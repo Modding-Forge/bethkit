@@ -1,0 +1,284 @@
+﻿= BSA / BA2 Archives
+
+`bethkit-bsa` reads, extracts, and writes all major Bethesda archive formats.
+Reading auto-detects the format from the file magic and returns a unified `Archive` trait object.
+Writing uses dedicated builder structs — `BsaWriter`, `Ba2GnrlWriter`, and `Ba2Dx10Writer` —
+that follow a simple *add → write* pattern.
+
+For the authoritative community reference see the
+https://en.uesp.net/wiki/Skyrim_Mod:Archive_File_Format[UESP Skyrim Archive File Format] page.
+
+== Supported formats
+
+[cols="1,1,3",options="header"]
+|===
+| Format | Magic / Version | Games
+
+| BSA TES3
+| Magic `\x00\x01\x00\x00`
+| Morrowind
+
+| BSA TES4
+| Magic `BSA\x00`, version `0x67`
+| Oblivion
+
+| BSA FO3
+| Magic `BSA\x00`, version `0x68`
+| Fallout 3, Fallout: New Vegas, Skyrim LE
+
+| BSA SSE
+| Magic `BSA\x00`, version `0x69`
+| Skyrim SE / AE (supports LZ4 Frame compression)
+
+| BA2 GNRL
+| Magic `BTDX`, sub-type `GNRL`, versions 1/7/8
+| Fallout 4 — general files
+
+| BA2 DX10
+| Magic `BTDX`, sub-type `DX10`
+| Fallout 4 — textures with full DDS chunk reassembly
+|===
+
+== Opening an archive
+
+[source,rust]
+----
+use bethkit_bsa;
+
+let archive = bethkit_bsa::open("Skyrim - Meshes0.bsa".as_ref())?;
+
+println!("format:     {}", archive.format_name());
+println!("file count: {}", archive.file_count());
+----
+
+`bethkit_bsa::open` auto-detects the format from the first four bytes.
+It returns a `Box<dyn Archive>` so you work with a single API regardless of format.
+
+If you know the format in advance you can open the concrete type directly:
+
+[source,rust]
+----
+use bethkit_bsa::{BsaArchive, Ba2Archive};
+
+let bsa = BsaArchive::open("Skyrim - Animations.bsa".as_ref())?;
+let ba2 = Ba2Archive::open("Fallout4 - Meshes.ba2".as_ref())?;
+----
+
+== Listing entries
+
+[source,rust]
+----
+for entry in archive.entries() {
+    println!("{}", entry.path);   // e.g. "meshes/armor/iron/male/cuirass_0.nif"
+}
+----
+
+`ArchiveEntry::path` uses forward slashes regardless of the host OS.
+The `Archive::entries` iterator allocates only the path string for each entry; the file data
+is not read until you call `extract`.
+
+== Extracting files
+
+=== Single file
+
+[source,rust]
+----
+// Returns None if the path is not found in the archive.
+if let Some(result) = archive.extract("meshes/armor/iron/male/cuirass_0.nif") {
+    let bytes: Vec<u8> = result?;
+    std::fs::write("cuirass_0.nif", &bytes)?;
+}
+----
+
+Path matching is case-insensitive; both `/` and `\` are accepted as separators.
+
+=== All files
+
+[source,rust]
+----
+use std::fs;
+use std::path::Path;
+
+let out_dir = Path::new("extracted");
+fs::create_dir_all(out_dir)?;
+
+for entry in archive.entries() {
+    if let Some(result) = archive.extract(&entry.path) {
+        let bytes = result?;
+        let dest = out_dir.join(&entry.path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(dest, &bytes)?;
+    }
+}
+----
+
+=== Parallel extraction with rayon
+
+`bethkit-bsa` links `rayon` for data-parallel extraction.
+The simplest approach uses `par_bridge()`:
+
+[source,rust]
+----
+use rayon::prelude::*;
+
+let paths: Vec<String> = archive.entries().map(|e| e.path.clone()).collect();
+
+paths.par_iter().try_for_each(|path| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(result) = archive.extract(path) {
+        let bytes = result.map_err(|e| Box::new(e) as _)?;
+        std::fs::write(path, &bytes)?;
+    }
+    Ok(())
+})?;
+----
+
+NOTE: `Archive::extract` is `&self` (shared reference) and is safe to call concurrently.
+
+== BA2 DX10 specifics
+
+Fallout 4 texture archives (`DX10`) store mip levels as separate chunks.
+`extract` reassembles them into a complete DDS file automatically.
+The returned `Vec<u8>` is a valid DDS that can be written directly to disk or
+passed to any DDS-aware texture library.
+
+== Writing archives
+
+=== BSA (TES3 / TES4 / FO3 / SSE)
+
+Use `BsaWriter` with a `BsaVersion` to select the target format.
+
+[source,rust]
+----
+use bethkit_bsa::write::{BsaWriter, BsaVersion};
+use std::path::Path;
+
+let mut w = BsaWriter::new(BsaVersion::Sse)
+    .compress(true);          // LZ4 Frame per-file compression
+
+w.add("meshes/armor/iron/male/cuirass_0.nif", nif_bytes);
+w.add("textures/armor/iron/ironcuirass.dds", dds_bytes);
+
+w.write_to(Path::new("MyMod.bsa"))?;
+----
+
+Available versions:
+
+[cols="1,2",options="header"]
+|===
+| `BsaVersion` | Format
+
+| `Tes3`
+| Morrowind — flat file list, no compression, files sorted by hash
+
+| `Tes4`
+| Oblivion — folder/file hierarchy, optional zlib compression
+
+| `Fo3`
+| Fallout 3 / New Vegas / Skyrim LE — same layout as TES4
+
+| `Sse`
+| Skyrim SE / AE — same layout as TES4, LZ4 Frame compression
+|===
+
+Compression behavior:
+
+* `BsaVersion::Tes3` ignores the compression flag (format does not support it).
+* `BsaVersion::Sse` uses LZ4 Frame; all other versions use zlib.
+* Per-file override is planned but not yet exposed through `BuilderEntry`.
+
+=== BA2 GNRL (Fallout 4 general files)
+
+[source,rust]
+----
+use bethkit_bsa::write::{Ba2GnrlWriter, Ba2Version};
+use std::path::Path;
+
+let mut w = Ba2GnrlWriter::new(Ba2Version::V1)
+    .compress(true);   // zlib per-file compression
+
+w.add("meshes/foo.nif", nif_bytes);
+w.add("scripts/main.pex", pex_bytes);
+
+w.write_to(Path::new("MyMod.ba2"))?;
+----
+
+Available BA2 versions:
+
+[cols="1,2",options="header"]
+|===
+| `Ba2Version` | Notes
+
+| `V1`
+| Fallout 4 original — widest compatibility
+
+| `V7`
+| Fallout 4 Next Gen update
+
+| `V8`
+| Fallout 4 Next Gen update (alternate)
+|===
+
+=== BA2 DX10 (Fallout 4 textures)
+
+`Ba2Dx10Writer` accepts **raw DDS files** as input.
+It parses the DDS header internally to extract width, height, mip count, and
+DXGI format, then serializes the texture metadata and mip data into the BA2
+DX10 layout (one chunk per texture containing all mip levels).
+
+[source,rust]
+----
+use bethkit_bsa::write::{Ba2Dx10Writer, Ba2Version};
+use std::path::Path;
+
+let mut w = Ba2Dx10Writer::new(Ba2Version::V1);
+
+let dds = std::fs::read("textures/sky.dds")?;
+w.add("textures/sky.dds", dds)?;   // returns Err on malformed DDS
+
+w.write_to(Path::new("MyTextures.ba2"))?;
+----
+
+Supported DDS pixel formats:
+
+* BC1–BC5, BC7 (block-compressed)
+* R8G8B8A8_UNORM, B8G8R8A8_UNORM, B8G8R8X8_UNORM (32-bpp)
+* R8G8_UNORM, B5G6R5_UNORM, B5G5R5A1_UNORM (16-bpp)
+* A8_UNORM, R8_UNORM, R8_SNORM, R8_UINT (8-bpp)
+* DX10 extension header (DXGI format read directly)
+
+== Error handling
+
+All errors are variants of `BsaError` (re-exported as `bethkit_bsa::BsaError`):
+
+[cols="1,3",options="header"]
+|===
+| Variant | Cause
+
+| `BsaError::Io(_)`
+| Underlying I/O or decompression error from `bethkit-io`.
+
+| `BsaError::InvalidMagic { got }`
+| The first four bytes do not match any known archive format.
+
+| `BsaError::InvalidVersion { got }`
+| The version field is not recognized for the detected format.
+
+| `BsaError::InvalidFormat(msg)`
+| The archive is structurally malformed (truncated index, invalid offsets, …).
+
+| `BsaError::EmptyArchive`
+| `write_to` was called before any files were added.
+
+| `BsaError::InvalidDds(msg)`
+| The DDS file passed to `Ba2Dx10Writer::add` is malformed.
+
+| `BsaError::UnsupportedDxgiFormat { format }`
+| The DXGI format in the DDS is not supported by the writer.
+
+| `BsaError::WriteIo(_)`
+| I/O error while serializing the output archive.
+|===
+
+See xref:error-handling.adoc[Error Handling] for how to handle errors at the call site.

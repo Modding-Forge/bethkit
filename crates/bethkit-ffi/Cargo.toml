@@ -1,0 +1,16 @@
+[package]
+name    = "bethkit-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+bethkit-core = { path = "../bethkit-core" }
+bethkit-bsa  = { path = "../bethkit-bsa" }
+bethkit-io   = { path = "../bethkit-io" }
+thiserror    = { workspace = true }
+
+[build-dependencies]
+cbindgen = "0.26"

@@ -1,0 +1,21 @@
+﻿.xref:index.adoc[Overview]
+
+.Getting Started
+* xref:quick-start.adoc[Quick Start]
+* xref:architecture.adoc[Architecture & Crate Layout]
+
+.Core Concepts
+* xref:plugin-format.adoc[Bethesda Plugin Format]
+* xref:reading-plugins.adoc[Reading Plugins]
+* xref:writing-plugins.adoc[Writing & Patching Plugins]
+* xref:string-tables.adoc[Localized Strings]
+* xref:archives.adoc[BSA / BA2 Archives]
+
+.Advanced
+* xref:schema.adoc[Record Schema]
+* xref:load-order.adoc[Load Order & FormID Resolution]
+* xref:error-handling.adoc[Error Handling]
+* xref:language-bindings.adoc[Language Bindings (C ABI)]
+
+.Project
+* xref:contributing.adoc[Contributing]

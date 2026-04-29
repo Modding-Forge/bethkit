@@ -1,0 +1,257 @@
+﻿= Load Order & FormID Resolution
+
+bethkit provides a complete set of utilities for working with multi-plugin load orders:
+`LoadOrder` for FormID remapping, `GlobalFormId` for stable cross-plugin identifiers, and
+`PluginCache` for a winning-override record index.
+
+== FormID basics
+
+A raw 32-bit FormID is file-local.
+The top byte (or ESL slot bits) identifies which plugin in the load order owns the record.
+This byte changes depending on how many plugins are loaded and in what order.
+
+To compare records across plugins you need to *resolve* raw FormIDs to `GlobalFormId` values,
+which combine the owning plugin's filename with the record's object ID and are stable across
+load orders.
+
+[source,rust]
+----
+use bethkit_core::GlobalFormId;
+
+let gfid = GlobalFormId {
+    plugin_name: "skyrim.esm".to_owned(),
+    object_id:   0x00_0D62,
+};
+println!("{}", gfid); // "skyrim.esm:0x000D62"
+----
+
+== LoadOrder
+
+`LoadOrder` maps plugin filenames to load-order indices.
+It knows how to handle both regular plugins (indices 0x00–0xFD) and light plugins (ESL slot).
+
+[source,rust]
+----
+use bethkit_core::{LoadOrder, PluginKind};
+
+let mut lo = LoadOrder::new();
+lo.push("Skyrim.esm", PluginKind::Master); // assigned index 0x00
+lo.push("Update.esm", PluginKind::Master); // index 0x01
+lo.push("MyMod.esp",  PluginKind::Plugin);  // index 0x02
+lo.push("Tiny.esl",   PluginKind::Light);   // ESL slot 0x000
+----
+
+In practice `LoadOrder` is used internally by `PluginCache`, which manages `push` calls
+automatically as plugins are added.
+Manual `LoadOrder` use is needed only when constructing a load order without parsing plugins
+(for example, when working with raw binary data).
+
+== PluginCache
+
+`PluginCache` is a multi-plugin record index with winning-override semantics.
+When two plugins define the same `GlobalFormId`, the plugin added later wins — matching the
+Bethesda engine's load-order override behavior.
+
+The EditorID index is built lazily on first use via `OnceLock` and is invalidated automatically
+whenever a new plugin is added.
+
+=== Building a cache
+
+[source,rust]
+----
+use bethkit_core::{GameContext, Plugin, PluginCache};
+
+let ctx = GameContext::sse();
+let mut cache = PluginCache::new();
+
+// Add plugins in load order — later plugins override earlier ones.
+for name in &["Skyrim.esm", "Update.esm", "Dawnguard.esm", "MyMod.esp"] {
+    let plugin = Plugin::open(name.as_ref(), ctx)?;
+    cache.add(name, plugin);
+}
+----
+
+=== Winning-override lookup
+
+[source,rust]
+----
+use bethkit_core::{GlobalFormId, Signature};
+
+// Look up the winning version of a specific record.
+let gfid = GlobalFormId {
+    plugin_name: "skyrim.esm".to_owned(),
+    object_id:   0x00_0D62,
+};
+if let Some(record) = cache.resolve_record(&gfid) {
+    println!("{} {:08X}", record.header.signature, record.header.form_id.0);
+}
+----
+
+=== All records of a type
+
+[source,rust]
+----
+use bethkit_core::Signature;
+
+// Iterate every winning NPC_ record across all loaded plugins.
+for (gfid, record) in cache.records_of_type(Signature(*b"NPC_")) {
+    println!("{gfid}  {:?}", record.editor_id());
+}
+----
+
+This is equivalent to the "winning overrides" concept in Mutagen and xEdit.
+
+=== EditorID lookup
+
+[source,rust]
+----
+// Find the winning record for "ManaPotion" by its EditorID.
+if let Some((gfid, record)) = cache.find_by_editor_id("ManaPotion") {
+    println!("{gfid}");
+}
+----
+
+The EditorID index is built on first call to `find_by_editor_id` and cached until the next
+`add`.
+
+== ImplicitRecords
+
+Some FormIDs are hardcoded by the engine and never written to any plugin file.
+They exist in the game runtime but are absent from `Skyrim.esm` and every other plugin —
+looking them up via `resolve_record` or `find_by_editor_id` will return `None`.
+
+`ImplicitRecords` exposes the complete set of these FormIDs so that patchers can recognize
+and skip them when iterating winning-override records.
+
+[source,rust]
+----
+use bethkit_core::{ImplicitRecords, Signature};
+
+let implicits = ImplicitRecords::sse();
+
+// Guard against engine-internal records when iterating the cache.
+for (gfid, record) in cache.records_of_type(Signature(*b"NPC_")) {
+    if implicits.contains(gfid) {
+        continue; // engine-internal — skip
+    }
+    // … process winning-override NPC_ records …
+}
+----
+
+=== Well-known implicit FormIDs (SSE)
+
+The 23 implicit FormIDs for Skyrim SE include:
+
+* *Player Reference* — `skyrim.esm:0x00000014` (available as `ImplicitRecords::sse_player()`)
+* Actor Value Information records (15 entries)
+* Body Part Data, Eyes, Globals, Image Space Adapters, Impact Data Set, Texture Set
+
+[source,rust]
+----
+use bethkit_core::ImplicitRecords;
+
+let player = ImplicitRecords::sse_player();
+println!("{player}"); // "skyrim.esm:0x00000014"
+----
+
+The design mirrors Mutagen's `Implicits.RecordFormKeys` / `Constants.Player` pattern.
+
+== CacheEntry
+
+Each plugin in the cache is accessible as a `CacheEntry`:
+
+[source,rust]
+----
+for entry in cache.entries() {
+    println!("{} — {} records", entry.name, entry.plugin.record_count());
+}
+----
+
+`CacheEntry` has the following public fields:
+
+[cols="1,1,3",options="header"]
+|===
+| Field | Type | Description
+
+| `name`
+| `String`
+| Canonical plugin filename (lowercased, includes extension).
+
+| `plugin`
+| `Plugin`
+| The parsed plugin.
+|===
+
+== LoadOrderEntry
+
+`LoadOrder::entries()` exposes each slot as a `LoadOrderEntry`:
+
+[source,rust]
+----
+for entry in cache.load_order().entries() {
+    println!("slot {:02X}  {}  {:?}", entry.index, entry.name, entry.kind);
+}
+----
+
+[cols="1,1,3",options="header"]
+|===
+| Field | Type | Description
+
+| `name`
+| `String`
+| Canonical plugin filename.
+
+| `index`
+| `u8`
+| Load-order index (top byte of FormIDs for regular plugins, `0xFE` for light plugins).
+
+| `kind`
+| `PluginKind`
+| `Master`, `Plugin`, or `Light`.
+
+| `light_slot`
+| `Option<u16>`
+| ESL slot index (0x000–0xFFF) for light plugins; `None` for regular plugins.
+|===
+
+== Full example — patch with load-order context
+
+[source,rust]
+----
+use bethkit_core::{
+    GameContext, GlobalFormId, Plugin, PluginCache, PluginPatcher, RecordPatch, Signature,
+};
+use std::fs::File;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = GameContext::sse();
+    let mut cache = PluginCache::new();
+
+    for name in &["Skyrim.esm", "Update.esm", "MyPatcher.esp"] {
+        cache.add(name, Plugin::open(name.as_ref(), ctx)?);
+    }
+
+    // Find the winning ManaPotion record
+    let Some((gfid, template)) = cache.find_by_editor_id("ManaPotion") else {
+        eprintln!("ManaPotion not found");
+        return Ok(());
+    };
+    println!("found: {gfid}");
+
+    // Build a patch and write to a new plugin
+    let source = Plugin::open("MyPatcher.esp".as_ref(), ctx)?;
+    let mut patcher = PluginPatcher::new(&source);
+
+    // … construct new_bytes from template …
+    let new_bytes: Vec<u8> = build_patch(template);
+    patcher.replace_record(template.header.form_id, RecordPatch::RawBytes(new_bytes));
+
+    let mut out = File::create("MyPatcher_output.esp")?;
+    patcher.write_to(&mut out)?;
+    Ok(())
+}
+
+fn build_patch(record: &bethkit_core::Record) -> Vec<u8> {
+    Vec::new() // placeholder
+}
+----

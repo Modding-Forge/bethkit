@@ -1,0 +1,17 @@
+[package]
+name    = "bethkit-bsa"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bethkit-io = { path = "../bethkit-io" }
+rayon      = { workspace = true }
+ahash      = { workspace = true }
+thiserror  = { workspace = true }
+bitflags   = { workspace = true }
+memmap2    = { workspace = true }
+flate2     = { workspace = true }
+lz4_flex   = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

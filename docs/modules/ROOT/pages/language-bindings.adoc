@@ -1,0 +1,583 @@
+= Language Bindings (C ABI)
+
+The `bethkit-ffi` crate exposes a stable `extern "C"` ABI that lets you call
+bethkit from any language that can load a shared library and invoke C functions:
+Python, C#, C++, Lua, and others.
+
+A matching `bethkit.h` header is generated automatically by
+https://github.com/mozilla/cbindgen[cbindgen] during the build.
+
+== Building the shared library
+
+[source,bash]
+----
+# Debug build (fast compile, debug symbols)
+cargo build -p bethkit-ffi
+
+# Release build (optimized, smaller)
+cargo build -p bethkit-ffi --release
+----
+
+The output is placed in `target/debug/` or `target/release/` as:
+
+* `bethkit_ffi.dll` / `bethkit_ffi.dll.lib` on Windows
+* `libbethkit_ffi.so` on Linux
+* `libbethkit_ffi.dylib` on macOS
+
+The generated header is written to `crates/bethkit-ffi/bethkit.h`.
+
+== Conventions
+
+=== Return codes
+
+Every function that can fail returns `0` on success and `-1` on error.
+Functions that return a pointer signal failure by returning a null pointer.
+
+After any failure, call `bethkit_last_error()` on the **same thread** to
+retrieve a NUL-terminated description of the error:
+
+[source,c]
+----
+BethkitPlugin *p = bethkit_plugin_open("Mod.esp", BETHKIT_GAME_SKYRIM_SE);
+if (!p) {
+    fprintf(stderr, "bethkit error: %s\n", bethkit_last_error());
+}
+----
+
+`bethkit_last_error()` returns a static empty string (never null) when no
+error is set.
+
+=== Memory ownership
+
+The ownership model follows three rules, consistent across the entire API:
+
+[cols="1,2,3",options="header"]
+|===
+| Handle type | Created by | Must be freed with
+
+| Opaque owned handle +
+  (`*BethkitPlugin`, `*BethkitArchive`, `*BethkitRecordView`, …)
+| `bethkit_*_new` / `bethkit_*_open`
+| Its matching `bethkit_*_free`
+
+| Borrowed handle +
+  (`*const BethkitRecord`, `*const BethkitGroup`, …)
+| A getter on a parent handle
+| **Never** — valid until the parent handle is freed
+
+| Owned byte buffer +
+  (`uint8_t *`, `char *` from `_as_zstring`)
+| Extract or convert functions
+| `bethkit_bytes_free` / the matching `*_free` function
+|===
+
+String pointers (`const char *`) returned by accessor functions are borrowed
+from the handle that produced them.
+They are valid until that handle is freed.
+
+Do not call `free()` or `delete[]` on any pointer returned by bethkit.
+Always use the provided `*_free` functions.
+
+=== Thread safety
+
+Each thread has its own error buffer.
+Always check `bethkit_last_error()` on the same thread that made the failing call.
+Handles themselves are not thread-safe; do not share mutable handles across
+threads without external synchronization.
+
+== Quick example — C
+
+[source,c]
+----
+#include "bethkit.h"
+#include <stdio.h>
+
+int main(void) {
+    /* Open a plugin */
+    BethkitPlugin *plugin =
+        bethkit_plugin_open("Ordinator - Perks of Skyrim.esp",
+                            BETHKIT_GAME_SKYRIM_SE);
+    if (!plugin) {
+        fprintf(stderr, "open failed: %s\n", bethkit_last_error());
+        return 1;
+    }
+
+    printf("masters: %zu\n", bethkit_plugin_master_count(plugin));
+
+    /* Iterate groups and records */
+    size_t n_groups = bethkit_plugin_group_count(plugin);
+    for (size_t gi = 0; gi < n_groups; gi++) {
+        const BethkitGroup *grp = bethkit_plugin_group_get(plugin, gi);
+        size_t n_children = bethkit_group_child_count(grp);
+        for (size_t ci = 0; ci < n_children; ci++) {
+            if (!bethkit_group_child_is_record(grp, ci)) continue;
+            const BethkitRecord *rec = bethkit_group_child_as_record(grp, ci);
+
+            /* Print FormID */
+            uint32_t fid = bethkit_record_form_id(rec);
+
+            /* Print editor ID if present */
+            const char *edid = bethkit_record_editor_id(rec);
+            if (edid) {
+                printf("  %08X  %s\n", fid, edid);
+                bethkit_record_editor_id_free((char *)edid);
+            }
+        }
+    }
+
+    bethkit_plugin_free(plugin);
+    return 0;
+}
+----
+
+== Quick example — Python (ctypes)
+
+[source,python]
+----
+import ctypes, sys
+
+lib = ctypes.CDLL("bethkit_ffi.dll")        # Windows
+# lib = ctypes.CDLL("./libbethkit_ffi.so")  # Linux
+
+# bethkit_plugin_open
+lib.bethkit_plugin_open.restype  = ctypes.c_void_p
+lib.bethkit_plugin_open.argtypes = [ctypes.c_char_p, ctypes.c_int]
+
+BETHKIT_GAME_SKYRIM_SE = 0
+
+plugin = lib.bethkit_plugin_open(b"Ordinator - Perks of Skyrim.esp",
+                                 BETHKIT_GAME_SKYRIM_SE)
+if not plugin:
+    err = ctypes.cast(lib.bethkit_last_error(), ctypes.c_char_p).value
+    sys.exit(f"open failed: {err.decode()}")
+
+# bethkit_plugin_master_count
+lib.bethkit_plugin_master_count.restype  = ctypes.c_size_t
+lib.bethkit_plugin_master_count.argtypes = [ctypes.c_void_p]
+print("masters:", lib.bethkit_plugin_master_count(plugin))
+
+lib.bethkit_plugin_free(plugin)
+----
+
+== Function reference
+
+The tables below list every exported function grouped by topic.
+All parameter and return types are C types as declared in `bethkit.h`.
+
+=== Globals
+
+[cols="2,3",options="header"]
+|===
+| Function | Description
+
+| `const char *bethkit_last_error(void)`
+| Returns the last error message for the current thread, or an empty string if none.
+
+| `void bethkit_bytes_free(uint8_t *ptr, size_t len)`
+| Frees an owned byte buffer returned by an extract or write function.
+|===
+
+=== Plugin — `BethkitPlugin`
+
+[cols="2,3",options="header"]
+|===
+| Function | Description
+
+| `BethkitPlugin *bethkit_plugin_open(const char *path, BethkitGame game)`
+| Opens and parses a plugin file from disk.
+
+| `BethkitPlugin *bethkit_plugin_open_from_bytes(const uint8_t *data, size_t len, BethkitGame game)`
+| Parses a plugin from an in-memory byte slice.
+
+| `void bethkit_plugin_free(BethkitPlugin *plugin)`
+| Frees a plugin handle.
+
+| `BethkitPluginKind bethkit_plugin_kind(const BethkitPlugin *plugin)`
+| Returns the plugin kind (Full, Light, …).
+
+| `bool bethkit_plugin_is_localized(const BethkitPlugin *plugin)`
+| Returns `true` when the plugin has the LOCALIZED header flag set.
+
+| `size_t bethkit_plugin_master_count(const BethkitPlugin *plugin)`
+| Returns the number of master files listed in the plugin header.
+
+| `const char *bethkit_plugin_master_get(const BethkitPlugin *plugin, size_t index)`
+| Returns the master file name at `index`.  Borrowed.
+
+| `const char *bethkit_plugin_description(const BethkitPlugin *plugin)`
+| Returns the plugin description string, or null if absent.  Borrowed.
+
+| `size_t bethkit_plugin_group_count(const BethkitPlugin *plugin)`
+| Returns the number of top-level groups in the plugin.
+
+| `const BethkitGroup *bethkit_plugin_group_get(const BethkitPlugin *plugin, size_t index)`
+| Returns the top-level group at `index`.  Borrowed.
+
+| `const BethkitRecord *bethkit_plugin_find_record(const BethkitPlugin *plugin, uint32_t form_id)`
+| Searches all groups for a record with the given FormID.  Borrowed, or null if not found.
+|===
+
+=== Group — `BethkitGroup`
+
+[cols="2,3",options="header"]
+|===
+| Function | Description
+
+| `int32_t bethkit_group_type(const BethkitGroup *group)`
+| Returns the numeric group type (0 = top-level by signature, …).
+
+| `size_t bethkit_group_child_count(const BethkitGroup *group)`
+| Returns the number of children (records + sub-groups).
+
+| `bool bethkit_group_child_is_record(const BethkitGroup *group, size_t index)`
+| Returns `true` when the child at `index` is a record.
+
+| `const BethkitRecord *bethkit_group_child_as_record(const BethkitGroup *group, size_t index)`
+| Returns the child at `index` as a record pointer, or null if it is a group.
+
+| `const BethkitGroup *bethkit_group_child_as_group(const BethkitGroup *group, size_t index)`
+| Returns the child at `index` as a group pointer, or null if it is a record.
+|===
+
+=== Record — `BethkitRecord` / `BethkitSubRecord`
+
+[cols="2,3",options="header"]
+|===
+| Function | Description
+
+| `int32_t bethkit_record_signature(const BethkitRecord *record, uint8_t *out)`
+| Writes the 4-byte record signature into `out`.
+
+| `uint32_t bethkit_record_form_id(const BethkitRecord *record)`
+| Returns the raw FormID.
+
+| `uint32_t bethkit_record_flags(const BethkitRecord *record)`
+| Returns the raw record flags word.
+
+| `uint16_t bethkit_record_form_version(const BethkitRecord *record)`
+| Returns the form version from the record header.
+
+| `const char *bethkit_record_editor_id(const BethkitRecord *record)`
+| Returns a heap-allocated NUL-terminated editor ID string, or null if absent.
+  Must be freed with `bethkit_record_editor_id_free`.
+
+| `void bethkit_record_editor_id_free(char *ptr)`
+| Frees the string returned by `bethkit_record_editor_id`.
+
+| `int64_t bethkit_record_subrecord_count(const BethkitRecord *record)`
+| Returns the number of subrecords, or -1 on error.
+
+| `const BethkitSubRecord *bethkit_record_subrecord_get(const BethkitRecord *record, size_t index)`
+| Returns the subrecord at `index`.  Borrowed.
+
+| `const BethkitSubRecord *bethkit_record_subrecord_find(const BethkitRecord *record, const uint8_t *sig)`
+| Returns the first subrecord matching the 4-byte signature.  Borrowed.
+
+| `int32_t bethkit_subrecord_signature(const BethkitSubRecord *sr, uint8_t *out)`
+| Writes the 4-byte subrecord signature into `out`.
+
+| `BethkitSlice bethkit_subrecord_bytes(const BethkitSubRecord *sr)`
+| Returns a non-owning slice of the raw subrecord payload.
+
+| `int32_t bethkit_subrecord_as_u8(const BethkitSubRecord *sr, uint8_t *out)`
+| Reads the payload as a single `uint8_t`.
+
+| `int32_t bethkit_subrecord_as_u16(const BethkitSubRecord *sr, uint16_t *out)`
+| Reads the payload as a little-endian `uint16_t`.
+
+| `int32_t bethkit_subrecord_as_u32(const BethkitSubRecord *sr, uint32_t *out)`
+| Reads the payload as a little-endian `uint32_t`.
+
+| `int32_t bethkit_subrecord_as_f32(const BethkitSubRecord *sr, float *out)`
+| Reads the payload as a little-endian `float`.
+
+| `char *bethkit_subrecord_as_zstring(const BethkitSubRecord *sr)`
+| Returns a heap-allocated copy of the NUL-terminated payload string.
+  Must be freed with `bethkit_zstring_free`.
+
+| `void bethkit_zstring_free(char *ptr)`
+| Frees the string returned by `bethkit_subrecord_as_zstring`.
+|===
+
+=== Schema — `BethkitSchemaRegistry` / `BethkitRecordView`
+
+Typed field access decodes every subrecord using the built-in SSE schema.
+
+[cols="2,3",options="header"]
+|===
+| Function | Description
+
+| `const BethkitSchemaRegistry *bethkit_schema_registry_sse(void)`
+| Returns a pointer to the static SSE schema registry.  Never free.
+
+| `bool bethkit_schema_registry_has(const BethkitSchemaRegistry *reg, const uint8_t *sig)`
+| Returns `true` when the registry has a schema for the 4-byte signature.
+
+| `BethkitRecordView *bethkit_record_view_new(const BethkitRecord *record, const uint8_t *sig, bool localized)`
+| Creates a typed snapshot of all decoded fields.
+
+| `void bethkit_record_view_free(BethkitRecordView *view)`
+| Frees the view and all owned sub-objects.
+
+| `size_t bethkit_record_view_field_count(const BethkitRecordView *view)`
+| Returns the number of decoded fields.
+
+| `const BethkitNamedField *bethkit_record_view_field_get(const BethkitRecordView *view, size_t index)`
+| Returns the named field at `index`.  Borrowed.
+
+| `size_t bethkit_field_entries_len(const BethkitFieldEntries *entries)`
+| Returns the number of entries in a struct-type field list.
+
+| `const BethkitNamedField *bethkit_field_entries_get(const BethkitFieldEntries *entries, size_t index)`
+| Returns the named field at `index` inside a struct value.  Borrowed.
+
+| `void bethkit_field_entries_free(BethkitFieldEntries *entries)`
+| Frees a struct field list.
+
+| `size_t bethkit_field_values_len(const BethkitFieldValues *values)`
+| Returns the number of elements in an array-type field list.
+
+| `const BethkitFieldValue *bethkit_field_values_get(const BethkitFieldValues *values, size_t index)`
+| Returns the field value at `index` inside an array value.  Borrowed.
+
+| `void bethkit_field_values_free(BethkitFieldValues *values)`
+| Frees an array field list.
+|===
+
+==== BethkitFieldValue — tagged union
+
+Inspect the `kind` field to determine which arm of the `payload` union is active:
+
+[cols="1,2",options="header"]
+|===
+| Kind | Active payload member
+
+| `BETHKIT_FIELD_VALUE_KIND_INT` | `payload.int_val` (`int64_t`)
+| `BETHKIT_FIELD_VALUE_KIND_FLOAT` | `payload.float_val` (`double`)
+| `BETHKIT_FIELD_VALUE_KIND_STR` | `payload.str_val` (`const char *`, borrowed)
+| `BETHKIT_FIELD_VALUE_KIND_FORM_ID` | `payload.form_id` (`uint32_t`)
+| `BETHKIT_FIELD_VALUE_KIND_FORM_ID_TYPED` | `payload.form_id_typed` (`BethkitTypedFormId`)
+| `BETHKIT_FIELD_VALUE_KIND_BYTES` | `payload.bytes` (`BethkitSlice`, borrowed)
+| `BETHKIT_FIELD_VALUE_KIND_ENUM` | `payload.enum_val` (`BethkitEnumVal`)
+| `BETHKIT_FIELD_VALUE_KIND_FLAGS` | `payload.flags_val` (`BethkitFlagsVal`)
+| `BETHKIT_FIELD_VALUE_KIND_STRUCT` | `payload.struct_entries` (`BethkitFieldEntries *`, owned)
+| `BETHKIT_FIELD_VALUE_KIND_ARRAY` | `payload.array_values` (`BethkitFieldValues *`, owned)
+| `BETHKIT_FIELD_VALUE_KIND_LOCALIZED_ID` | `payload.localized_id` (`uint32_t`)
+| `BETHKIT_FIELD_VALUE_KIND_MISSING` | — (subrecord was absent)
+|===
+
+`Struct` and `Array` payloads are owned and must be freed with their
+respective `bethkit_field_entries_free` / `bethkit_field_values_free`.
+All other payloads are freed automatically when the `BethkitRecordView` is freed.
+
+=== Archives — `BethkitArchive`
+
+[cols="2,3",options="header"]
+|===
+| Function | Description
+
+| `BethkitArchive *bethkit_archive_open(const char *path)`
+| Opens a BSA or BA2 archive from disk.
+
+| `void bethkit_archive_free(BethkitArchive *archive)`
+| Frees an archive handle.
+
+| `const char *bethkit_archive_format_name(const BethkitArchive *archive)`
+| Returns a static string describing the archive format (e.g. `"BSA/SSE"`).
+
+| `size_t bethkit_archive_file_count(const BethkitArchive *archive)`
+| Returns the total number of files in the archive.
+
+| `const BethkitArchiveEntry *bethkit_archive_entry_get(const BethkitArchive *archive, size_t index)`
+| Returns the archive entry at `index`.  Borrowed.
+
+| `const char *bethkit_archive_entry_path(const BethkitArchive *archive, size_t index)`
+| Returns the virtual file path for the entry at `index`.  Borrowed.
+
+| `uint32_t bethkit_archive_entry_uncompressed_size(const BethkitArchive *archive, size_t index)`
+| Returns the uncompressed byte size for the entry at `index`.
+
+| `uint8_t *bethkit_archive_extract(const BethkitArchive *archive, const char *path, size_t *out_len)`
+| Decompresses the named file into a heap-allocated buffer.
+  Free with `bethkit_bytes_free(ptr, *out_len)`.
+
+| `int32_t bethkit_archive_extract_to_file(const BethkitArchive *archive, const char *path, const char *dest)`
+| Decompresses the named file directly to disk.
+|===
+
+=== BSA writer — `BethkitBsaWriter`
+
+[cols="2,3",options="header"]
+|===
+| Function | Description
+
+| `BethkitBsaWriter *bethkit_bsa_writer_new(BethkitBsaVersion version)`
+| Creates a new BSA writer for the given format version.
+
+| `void bethkit_bsa_writer_free(BethkitBsaWriter *w)`
+| Frees the writer (no-op if already consumed by `write_to`).
+
+| `int32_t bethkit_bsa_writer_set_compress(BethkitBsaWriter *w, bool compress)`
+| Enables or disables per-entry compression.
+
+| `int32_t bethkit_bsa_writer_set_embed_names(BethkitBsaWriter *w, bool embed)`
+| Enables or disables embedded file names.
+
+| `int32_t bethkit_bsa_writer_add(BethkitBsaWriter *w, const char *path, const uint8_t *data, size_t len)`
+| Adds a file to the archive.
+
+| `int32_t bethkit_bsa_writer_write_to(BethkitBsaWriter *w, const char *dest)`
+| Writes the archive to disk.  Consumes the writer; further calls return -1.
+|===
+
+BA2 writers (`bethkit_ba2_gnrl_writer_*`, `bethkit_ba2_dx10_writer_*`) follow
+the same pattern.
+
+=== Load order — `BethkitLoadOrder`
+
+[cols="2,3",options="header"]
+|===
+| Function | Description
+
+| `BethkitLoadOrder *bethkit_load_order_new(void)`
+| Creates a new, empty load order.
+
+| `void bethkit_load_order_free(BethkitLoadOrder *lo)`
+| Frees the load order.
+
+| `int32_t bethkit_load_order_push(BethkitLoadOrder *lo, const char *name, BethkitPluginKind kind)`
+| Appends a plugin to the load order.
+
+| `size_t bethkit_load_order_len(const BethkitLoadOrder *lo)`
+| Returns the number of plugins in the load order.
+
+| `int32_t bethkit_load_order_resolve(const BethkitLoadOrder *lo, uint32_t form_id, const char *source_plugin, BethkitGlobalFormId *out)`
+| Resolves a file-local FormID to a global FormID.
+|===
+
+=== Plugin cache — `BethkitPluginCache`
+
+[cols="2,3",options="header"]
+|===
+| Function | Description
+
+| `BethkitPluginCache *bethkit_plugin_cache_new(void)`
+| Creates a new, empty plugin cache.
+
+| `void bethkit_plugin_cache_free(BethkitPluginCache *cache)`
+| Frees the cache.
+
+| `int32_t bethkit_plugin_cache_add(BethkitPluginCache *cache, const char *name, BethkitPlugin *plugin)`
+| Adds a plugin to the cache.  **Takes ownership** of `plugin`.
+
+| `size_t bethkit_plugin_cache_len(const BethkitPluginCache *cache)`
+| Returns the number of plugins in the cache.
+
+| `size_t bethkit_plugin_cache_record_count(const BethkitPluginCache *cache)`
+| Returns the total number of records across all cached plugins.
+
+| `const BethkitRecord *bethkit_plugin_cache_resolve(const BethkitPluginCache *cache, const char *plugin_name, uint32_t object_id)`
+| Resolves a global FormID to the winning record.  Borrowed.
+
+| `const BethkitRecord *bethkit_plugin_cache_find_by_editor_id(const BethkitPluginCache *cache, const char *edid, BethkitGlobalFormId *out_gfid)`
+| Searches the cache for a record by editor ID.  Borrowed.
+|===
+
+=== String tables — `BethkitStringTable` / `BethkitLocalizationSet`
+
+[cols="2,3",options="header"]
+|===
+| Function | Description
+
+| `BethkitStringTable *bethkit_string_table_new(BethkitStringFileKind kind)`
+| Creates a new, empty string table.
+
+| `BethkitStringTable *bethkit_string_table_open(const char *path)`
+| Opens a string table from disk.
+
+| `void bethkit_string_table_free(BethkitStringTable *st)`
+| Frees the string table.
+
+| `BethkitStringFileKind bethkit_string_table_kind(const BethkitStringTable *st)`
+| Returns the file kind (Strings, DLStrings, ILStrings).
+
+| `size_t bethkit_string_table_len(const BethkitStringTable *st)`
+| Returns the number of entries.
+
+| `const uint8_t *bethkit_string_table_get(const BethkitStringTable *st, uint32_t id, size_t *out_len)`
+| Returns a borrowed pointer to the raw bytes for `id`, or null if absent.
+
+| `int32_t bethkit_string_table_insert(BethkitStringTable *st, uint32_t id, const uint8_t *data, size_t len)`
+| Inserts or replaces the entry with `id`.
+
+| `int32_t bethkit_string_table_insert_new(BethkitStringTable *st, const uint8_t *data, size_t len, uint32_t *out_id)`
+| Inserts a new entry with an auto-assigned ID.
+
+| `bool bethkit_string_table_remove(BethkitStringTable *st, uint32_t id)`
+| Removes the entry with `id`.  Returns `true` if it was present.
+
+| `int32_t bethkit_string_table_write_to_file(const BethkitStringTable *st, const char *path)`
+| Serializes the table to disk.
+
+| `BethkitLocalizationSet *bethkit_localization_set_new(void)`
+| Creates a new, empty localization set (three sibling string tables).
+
+| `BethkitLocalizationSet *bethkit_localization_set_open(const char *plugin_path, const char *language)`
+| Opens all three sibling string tables for the given plugin and language.
+
+| `void bethkit_localization_set_free(BethkitLocalizationSet *ls)`
+| Frees the localization set.
+
+| `const uint8_t *bethkit_localization_set_get(const BethkitLocalizationSet *ls, BethkitStringFileKind kind, uint32_t id, size_t *out_len)`
+| Returns borrowed bytes for the string with `id` in the given table.
+
+| `int32_t bethkit_localization_set_set(BethkitLocalizationSet *ls, BethkitStringFileKind kind, uint32_t id, const uint8_t *data, size_t len)`
+| Inserts or replaces a string.
+
+| `int32_t bethkit_localization_set_write(const BethkitLocalizationSet *ls, const char *plugin_path, const char *language)`
+| Serializes all three tables to disk.
+|===
+
+=== Plugin writer — `BethkitPluginWriter`
+
+[cols="2,3",options="header"]
+|===
+| Function | Description
+
+| `BethkitPluginWriter *bethkit_plugin_writer_new(BethkitGame game, float form_version)`
+| Creates a new plugin writer.
+
+| `void bethkit_plugin_writer_free(BethkitPluginWriter *pw)`
+| Frees the writer.
+
+| `int32_t bethkit_plugin_writer_add_group(BethkitPluginWriter *pw, BethkitWritableGroup *group)`
+| Adds a top-level group.  **Takes ownership** of `group`.
+
+| `int32_t bethkit_plugin_writer_write_to_file(const BethkitPluginWriter *pw, const char *path)`
+| Serializes the plugin to disk.
+
+| `uint8_t *bethkit_plugin_writer_write_to_bytes(const BethkitPluginWriter *pw, size_t *out_len)`
+| Serializes the plugin to a heap-allocated buffer.
+  Free with `bethkit_bytes_free(ptr, *out_len)`.
+
+| `BethkitWritableGroup *bethkit_writable_group_new(const uint8_t *label, int32_t group_type)`
+| Creates a new writable group.
+
+| `void bethkit_writable_group_free(BethkitWritableGroup *group)`
+| Frees a group that was not added to a writer.
+
+| `int32_t bethkit_writable_group_add_record(BethkitWritableGroup *group, BethkitWritableRecord *record)`
+| Adds a record as a child.  **Takes ownership** of `record`.
+
+| `int32_t bethkit_writable_group_add_group(BethkitWritableGroup *group, BethkitWritableGroup *child)`
+| Adds a sub-group as a child.  **Takes ownership** of `child`.
+
+| `BethkitWritableRecord *bethkit_writable_record_new(const uint8_t *signature, uint32_t flags, uint32_t form_id, uint16_t form_version)`
+| Creates a new writable record.
+
+| `void bethkit_writable_record_free(BethkitWritableRecord *record)`
+| Frees a record that was not added to a group.
+
+| `int32_t bethkit_writable_record_add_subrecord(BethkitWritableRecord *record, const uint8_t *signature, const uint8_t *data, size_t data_len)`
+| Appends a subrecord to the record.
+|===

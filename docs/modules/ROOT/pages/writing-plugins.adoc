@@ -1,0 +1,141 @@
+﻿= Writing & Patching Plugins
+
+bethkit provides two complementary APIs for producing plugin files:
+
+* `PluginWriter` — build a new plugin from scratch
+* `PluginPatcher` — replace specific records inside an existing plugin while copying
+  everything else verbatim
+
+== PluginWriter — build from scratch
+
+`PluginWriter` constructs a valid plugin file byte-by-byte.
+It handles the TES4 header, GRUP wrappers, record headers, and group-size fields automatically.
+
+=== Minimal example
+
+[source,rust]
+----
+use bethkit_core::{
+    FormId, GameContext, PluginKind, Signature,
+    WritableGroup, WritableGroupChild, WritableHeader,
+    WritableRecord, WritableSubRecord, PluginWriter,
+};
+use std::fs::File;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut out = File::create("MyMod.esp")?;
+    let mut writer = PluginWriter::new(GameContext::sse(), PluginKind::Esp);
+
+    // Add master files
+    writer.header_mut().add_master("Skyrim.esm");
+    writer.header_mut().set_author("My Name");
+    writer.header_mut().set_description("A demonstration plugin.");
+
+    // Add a KYWD group with one record
+    let mut group = WritableGroup::new(Signature(*b"KYWD"));
+    let mut record = WritableRecord::new(Signature(*b"KYWD"), FormId(0x00_000D62));
+    record.add_subrecord(WritableSubRecord::zstring(Signature(*b"EDID"), "MyKeyword"));
+    group.add_record(record);
+    writer.add_group(group);
+
+    writer.write_to(&mut out)?;
+    Ok(())
+}
+----
+
+=== Setting the LOCALIZED flag
+
+[source,rust]
+----
+writer.header_mut().set_localized(true);
+----
+
+When `set_localized` is true the writer sets bit 7 of the TES4 record flags.
+String-table generation is your responsibility — see xref:string-tables.adoc[Localized Strings].
+
+=== ESLification
+
+To produce a light plugin (ESL) from an existing set of records, first write the plugin
+with `PluginKind::Esl` and ensure all object IDs stay within the 0x000–0xFFF range.
+`Plugin::eslify()` compacts a fully loaded plugin in-memory before writing:
+
+[source,rust]
+----
+use bethkit_core::{GameContext, Plugin};
+
+let ctx = GameContext::sse();
+let mut plugin = Plugin::open("MyMod.esp".as_ref(), ctx)?;
+let eslified = plugin.eslify()?; // returns a new Plugin with compacted FormIDs
+
+let mut out = std::fs::File::create("MyMod.esl")?;
+eslified.write_to(&mut out)?;
+----
+
+`eslify()` returns `Err(CoreError::EslRecordLimitExceeded)` if the plugin defines more than
+2048 records (the practical ESL limit).
+
+== PluginPatcher — streaming replacement
+
+`PluginPatcher` is designed for automated patchers that change a handful of records in a large
+plugin without re-serializing the entire file.
+
+It reads the source plugin sequentially and writes each group/record directly to the output.
+Only the records that you have registered for replacement are held in memory simultaneously.
+Group sizes are recalculated correctly even when the replacement bytes differ in size from the
+original.
+
+=== Basic usage
+
+[source,rust]
+----
+use bethkit_core::{FormId, GameContext, Plugin, PluginPatcher, RecordPatch};
+use std::fs::File;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = GameContext::sse();
+    let plugin = Plugin::open("MyMod.esp".as_ref(), ctx)?;
+    let mut patcher = PluginPatcher::new(&plugin);
+
+    // Build replacement bytes — complete record (24-byte header + data)
+    let new_bytes: Vec<u8> = build_replacement();
+    patcher.replace_record(FormId(0x00_000ABC), RecordPatch::RawBytes(new_bytes));
+
+    let mut out = File::create("MyMod_patched.esp")?;
+    patcher.write_to(&mut out)?;
+    Ok(())
+}
+
+fn build_replacement() -> Vec<u8> {
+    // … assemble 24-byte record header followed by subrecord bytes …
+    Vec::new()
+}
+----
+
+=== RecordPatch variants
+
+[cols="1,3",options="header"]
+|===
+| Variant | Description
+
+| `RecordPatch::RawBytes(Vec<u8>)`
+| Complete replacement bytes including the 24-byte record header.
+  Use this when you have already constructed the full record binary.
+
+| `RecordPatch::Delete`
+| Removes the record from the output entirely.
+  The containing group is still written (possibly empty).
+|===
+
+=== Combining PluginPatcher with PluginWriter
+
+When a patcher needs to insert *new* records rather than replace existing ones, build the new
+records with `PluginWriter` first, then use `PluginPatcher` to slot them in alongside the
+patched records.
+
+== Performance notes
+
+* `PluginPatcher` cost is O(plugin size) for the copy pass plus O(edits) for the replacements.
+  Memory usage is bounded by the size of the replacement bytes you register.
+* `PluginWriter` constructs the output in a `Vec<u8>` that grows linearly with the plugin size.
+  For very large plugins (100 MB+), write to a `BufWriter<File>` rather than keeping the whole
+  output in memory.

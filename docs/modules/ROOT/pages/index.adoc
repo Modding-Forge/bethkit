@@ -1,0 +1,64 @@
+﻿= bethkit
+:description: Fast, zero-copy Rust library for Bethesda plugin and archive files.
+
+bethkit is a fast, zero-copy Rust library for reading and writing Bethesda game plugin and archive files.
+It targets library and tooling authors who need direct, low-overhead access to the binary format without
+pulling in a heavy dependency or accepting a restrictive licence.
+
+== Key capabilities
+
+[cols="1,3",options="header"]
+|===
+| Capability | Description
+
+| Zero-copy parsing
+| Plugin files are memory-mapped via `memmap2`.
+  Records borrow bytes directly from the mapping — no extra allocations.
+
+| Skyrim SE first
+| Primary target is **Skyrim Special Edition / AE** with full record-schema coverage (126 record types).
+  The binary format layer (`GameContext`) is prepared for Skyrim LE/VR, Fallout 3/NV/4/76,
+  Starfield, Oblivion, and Morrowind, but record-schema definitions for those games are planned.
+
+| Record schema
+| `SchemaRegistry::sse()` covers all 126 SSE record types.
+  `RecordView` decodes any subrecord into typed `FieldValue` variants — integers, floats,
+  ZStrings, FormIDs, structs, arrays, enums with resolved names, and bit-flags with resolved names.
+  All definition data is `&'static`; no heap allocation at runtime.
+
+| BSA / BA2 archives
+| Read, extract, and **write** all major archive formats:
+  BSA TES3 (Morrowind), BSA TES4/FO3/SSE (Oblivion through Skyrim SE),
+  BA2 GNRL and BA2 DX10 (Fallout 4).
+  Auto-detection via `bethkit_bsa::open`;
+  writing via `BsaWriter`, `Ba2GnrlWriter`, and `Ba2Dx10Writer`.
+
+| Localized strings
+| Read and write `.STRINGS` / `.DLSTRINGS` / `.ILSTRINGS` sibling files.
+  Extract every translatable string from a plugin in one call.
+  Apply translation edits without touching the plugin binary at all.
+
+| Streaming rewrite
+| `PluginPatcher` replaces arbitrary records while copying everything else verbatim.
+  Group sizes are recomputed automatically.
+  Cost is O(edits), not O(plugin size).
+
+| Load-order utilities
+| `LoadOrder`, `GlobalFormId`, `PluginCache` — multi-plugin record index with
+  winning-override semantics and EditorID lookup.
+
+| C ABI (planned)
+| `bethkit-ffi` will expose a stable `extern "C"` surface callable from Python,
+  C#, C++, and any other language without a Rust toolchain.
+|===
+
+== Licence
+
+Apache-2.0.
+The licence imposes no restrictions on linking or embedding in commercial or proprietary software.
+
+== Next steps
+
+* xref:quick-start.adoc[Quick Start] — add bethkit to your project and read your first plugin in minutes
+* xref:architecture.adoc[Architecture] — understand the crate layout and design decisions
+* xref:plugin-format.adoc[Bethesda Plugin Format] — background on ESP/ESM/ESL binary structure

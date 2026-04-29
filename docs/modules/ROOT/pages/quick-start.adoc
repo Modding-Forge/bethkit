@@ -1,0 +1,116 @@
+﻿= Quick Start
+
+This page gets you from zero to reading records out of a Skyrim SE plugin in a few minutes.
+
+== Add bethkit to your project
+
+bethkit is a Cargo workspace of several crates.
+Add the ones you need to your `Cargo.toml`:
+
+[source,toml]
+----
+[dependencies]
+# Plugin parser, writer, string tables, schema
+bethkit-core = { git = "https://github.com/your-org/bethkit" }
+
+# BSA / BA2 archive reader (optional)
+bethkit-bsa  = { git = "https://github.com/your-org/bethkit" }
+----
+
+NOTE: Once bethkit is published to crates.io the dependency path will simply be
+`bethkit-core = "0.x"`.
+
+== Read records from a plugin
+
+[source,rust]
+----
+use bethkit_core::{GameContext, Plugin, Signature};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = GameContext::sse();
+    let plugin = Plugin::open("Ordinator - Perks of Skyrim.esp".as_ref(), ctx)?;
+
+    println!("kind:    {:?}", plugin.kind());
+    println!("masters: {:?}", plugin.masters());
+
+    for group in plugin.groups() {
+        for record in group.records_recursive() {
+            // EditorID (EDID subrecord), if present
+            if let Some(edid) = record.editor_id()? {
+                println!(
+                    "{} {:08X}  {}",
+                    record.header.signature,
+                    record.header.form_id.0,
+                    edid,
+                );
+            }
+
+            // Any subrecord by 4-byte signature
+            if let Some(full) = record.get(Signature(*b"FULL"))? {
+                println!("  FULL = {}", full.as_zstring()?);
+            }
+        }
+    }
+
+    Ok(())
+}
+----
+
+== Decode typed fields with the schema
+
+The xref:schema.adoc[Record Schema] system turns raw bytes into named, typed values:
+
+[source,rust]
+----
+use bethkit_core::{GameContext, Plugin, RecordView, SchemaRegistry, Signature};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = GameContext::sse();
+    let plugin = Plugin::open("Skyrim.esm".as_ref(), ctx)?;
+    let registry = SchemaRegistry::sse();
+
+    for group in plugin.groups() {
+        for record in group.records_recursive() {
+            let sig = record.header.signature;
+            if let Some(schema) = registry.get(sig) {
+                let view = RecordView::new(record, schema);
+                if let Some(entry) = view.get_field("Full Name")? {
+                    println!("{} — {}", sig, entry.value);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+----
+
+== Extract files from a BSA archive
+
+[source,rust]
+----
+use std::fs;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let archive = bethkit_bsa::open("Skyrim - Meshes0.bsa".as_ref())?;
+
+    println!("format:     {}", archive.format_name());
+    println!("file count: {}", archive.file_count());
+
+    // Extract one file by path (case-insensitive, / or \ separators)
+    if let Some(result) = archive.extract("meshes/armor/iron/male/cuirass_0.nif") {
+        let bytes = result?;
+        fs::write("cuirass_0.nif", &bytes)?;
+    }
+
+    Ok(())
+}
+----
+
+== Next steps
+
+* xref:reading-plugins.adoc[Reading Plugins] — groups, records, subrecords in depth
+* xref:schema.adoc[Record Schema] — full `RecordView` / `FieldValue` reference
+* xref:writing-plugins.adoc[Writing & Patching Plugins] — `PluginWriter` and `PluginPatcher`
+* xref:string-tables.adoc[Localized Strings] — extraction and translation workflow
+* xref:archives.adoc[BSA / BA2 Archives] — all supported archive formats

@@ -1,0 +1,22 @@
+# Normalize line endings to LF in the repository, check out as-is on all platforms.
+* text=auto eol=lf
+
+# Rust source files — always LF
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.adoc text eol=lf
+*.h text eol=lf
+
+# Windows batch / PowerShell scripts — keep CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files — do not touch line endings
+*.bsa binary
+*.ba2 binary
+*.esp binary
+*.esm binary
+*.esl binary
+*.dds binary
+*.png binary

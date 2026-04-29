@@ -1,0 +1,143 @@
+﻿= Bethesda Plugin Format
+
+This page gives the background needed to understand how bethkit models plugin files internally.
+You do not need to memorise this to use the library, but it helps when debugging unexpected data.
+
+For the authoritative community reference see the
+https://en.uesp.net/wiki/Skyrim_Mod:Mod_File_Format[UESP Skyrim Mod File Format] page.
+
+== File extensions
+
+[cols="1,3",options="header"]
+|===
+| Extension | Meaning
+
+| `.esm`
+| Master file — loaded before all regular plugins.
+  May contain a full game world.
+
+| `.esp`
+| Plugin file — standard mod file.
+  FormIDs use the top byte to identify the plugin in the load order.
+
+| `.esl`
+| Light plugin — introduced in Skyrim SE.
+  Shares the sentinel load-order byte `0xFE`; the object-ID range is limited to 12 bits (0x000–0xFFF).
+  Up to 4096 ESL plugins can be loaded simultaneously without consuming a regular load-order slot.
+|===
+
+NOTE: An `.esm` or `.esp` file can be *flagged* as a light plugin (ESL flag in the TES4 header)
+without changing its extension.
+bethkit uses `PluginKind` to describe the functional type regardless of file extension.
+
+== Binary structure overview
+
+A plugin file is a flat sequence of top-level *groups* (`GRUP` records).
+Each group contains records of a single type (or nested sub-groups for some types).
+
+[source]
+----
+Plugin file
+  TES4 record         (file header — not inside a GRUP)
+  GRUP (record type = "KYWD")
+    KYWD record
+    KYWD record
+    …
+  GRUP (record type = "NPC_")
+    NPC_ record
+    …
+  GRUP (record type = "CELL")
+    GRUP (interior / exterior cell block)
+      GRUP (sub-block)
+        CELL record
+        GRUP (persistent references)
+          REFR record
+          …
+----
+
+== Record layout
+
+Every record begins with a 24-byte header:
+
+[cols="1,1,3",options="header"]
+|===
+| Offset | Size | Field
+
+| 0 | 4 | Type signature (e.g. `NPC_`)
+| 4 | 4 | Data size (bytes following the header)
+| 8 | 4 | Flags (see below)
+| 12 | 4 | FormID (file-local)
+| 16 | 2 | Revision (unused by engine)
+| 18 | 2 | Version
+| 20 | 2 | Unknown
+| 22 | 2 | Unknown
+|===
+
+The data that follows the header is a stream of *subrecords*.
+Each subrecord has a 6-byte header (4-byte signature + 2-byte data size) followed by its payload.
+
+=== Record flags (selected)
+
+[cols="1,1,3",options="header"]
+|===
+| Bit | Mask | Meaning
+
+| 18 | `0x0002_0000` | Record is deleted
+| 6  | `0x0000_0040` | Record is initially disabled
+| 7  | `0x0000_0080` | Plugin is *localized* — LString fields hold 32-bit string-table IDs
+| 17 | `0x0001_0000` | Compressed — record data is zlib-deflate or LZ4-frame compressed
+|===
+
+In bethkit, `RecordFlags` is a `bitflags!` type defined in `types.rs`.
+The most commonly checked flags are `RecordFlags::LOCALIZED`, `RecordFlags::COMPRESSED`, and
+`RecordFlags::DELETED`.
+
+== FormID layout
+
+A raw 32-bit FormID encodes two pieces of information:
+
+[source]
+----
+Regular plugin:   [PP][OO OO OO]
+  PP       = load-order index of the owning plugin (top byte)
+  OO OO OO = object ID within that plugin (lower 3 bytes)
+
+Light plugin:     [FE][SSS][OOO]
+  FE       = sentinel byte (always 0xFE for ESL plugins)
+  SSS      = 12-bit ESL slot index (bits 23:12)
+  OOO      = 12-bit object ID (bits 11:0, max 0xFFF)
+----
+
+FormIDs are *file-local*: the `PP` byte refers to the owning plugin's position in the current
+load order, not an absolute number.
+To compare FormIDs across plugins you must resolve them to `GlobalFormId` first.
+See xref:load-order.adoc[Load Order & FormID Resolution] for details.
+
+== Large subrecord override (XXXX)
+
+When a subrecord's data exceeds 65535 bytes, the game uses an `XXXX` subrecord immediately
+before the actual data subrecord.
+`XXXX` carries a 4-byte size override; the following subrecord's 2-byte size field is ignored.
+
+bethkit handles XXXX transparently — `SubRecord::as_bytes()` always returns the complete payload
+regardless of whether XXXX was used.
+
+== Compressed records
+
+If `RecordFlags::COMPRESSED` is set, the bytes after the record header begin with a 4-byte
+*decompressed size* value, followed by compressed data (zlib deflate for most games; LZ4 frame
+for Skyrim SE and later).
+
+bethkit decompresses lazily via `SubRecordData::decompress()`.
+`SubRecord::as_bytes()` calls decompression transparently so callers never need to check the
+compressed flag explicitly.
+
+== Localized strings
+
+If `RecordFlags::LOCALIZED` is set on the file header (TES4 record), all `LString` subrecords
+in that plugin contain 4-byte string-table IDs instead of inline NUL-terminated strings.
+The actual text lives in `.STRINGS`, `.DLSTRINGS`, or `.ILSTRINGS` sibling files.
+
+bethkit's `RecordView` detects the LOCALIZED flag automatically and returns
+`FieldValue::LocalizedId(u32)` for LString fields instead of `FieldValue::Str`.
+See xref:string-tables.adoc[Localized Strings] for the full workflow.

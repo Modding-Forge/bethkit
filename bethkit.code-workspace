@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../TES5Edit"
+		},
+		{
+			"path": "../SSE-Auto-Translator"
+		},
+		{
+			"path": "../Mutagen"
+		},
+		{
+			"path": "../bethkit.py"
+		}
+	],
+	"settings": {}
+}

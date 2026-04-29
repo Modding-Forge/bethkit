@@ -1,0 +1,128 @@
+= Contributing
+
+Contributions are welcome — bug reports, documentation improvements, new record schemas,
+and additional game support are all valuable.
+
+== Prerequisites
+
+* Rust stable toolchain (rustup recommended)
+* Git
+
+Install from https://rustup.rs[rustup.rs], then verify:
+
+[source,shell]
+----
+rustup update stable
+rustup component add clippy rustfmt
+----
+
+== Clone and build
+
+[source,shell]
+----
+git clone https://github.com/your-org/bethkit.git
+cd bethkit
+cargo build --all
+----
+
+== Running tests
+
+[source,shell]
+----
+# All unit and integration tests
+cargo test --all
+
+# A specific crate only
+cargo test -p bethkit-core
+----
+
+The integration tests in `tests/integration/` require test data files placed in
+`tests/testdata/`.
+These files are not committed to the repository for licensing reasons.
+Obtain a copy of the game's plugin files and place them in that directory to run the
+integration tests.
+
+== Linting and formatting
+
+All pull requests must pass `clippy` with `-D warnings` and `rustfmt` without changes:
+
+[source,shell]
+----
+cargo clippy --all -- -D warnings
+cargo fmt --all -- --check
+----
+
+Run `cargo fmt --all` to apply formatting in-place.
+
+== Code conventions
+
+bethkit follows strict conventions defined in the project's Copilot instructions.
+The most important ones for contributors:
+
+=== SPDX licence header
+
+Every `.rs` file must begin with:
+
+[source,rust]
+----
+// SPDX-License-Identifier: Apache-2.0
+----
+
+=== Doc comments
+
+Every public `struct`, `enum`, `trait`, `fn`, `const`, and `type` must have a `///` doc comment.
+Functions that return `Result` must document all error variants under `# Errors`.
+Functions that can panic must document the condition under `# Panics`.
+`unsafe fn` and `unsafe` blocks must have a `# Safety` section and a `// SAFETY:` comment.
+
+=== Error handling
+
+* Use `thiserror::Error` for all custom error types.
+* Never use `Box<dyn Error>` as a return type in library code.
+* Never use `.unwrap()` in library code.
+  Use `.expect("reason")` only when failure is impossible by construction and the message
+  explains that invariant.
+
+=== No decorative comments
+
+Banner comments, separator lines, section headers, and Unicode box-drawing characters are not
+allowed.
+
+=== Line length
+
+100 characters maximum, including comments and doc comments.
+
+== Adding a new SSE record schema
+
+1. Identify the correct source file (`simple.rs`, `items.rs`, `actors.rs`, `magic.rs`,
+   `world.rs`, `quests.rs`, `audio.rs`, or `projectiles.rs`).
+2. Use the TES5Edit source (`wbDefinitionsTES5.pas`) as a reference for field names and types.
+   Do not copy code verbatim — write your own implementation.
+3. Add the schema static following the existing pattern.
+4. Register it in `sse/mod.rs` inside `fn build()`.
+5. If you need new enum or flags definitions, add them to `enums.rs`.
+6. Add a test in `schema/mod.rs` or a dedicated test function that verifies the schema
+   is registered and has the expected members.
+
+== Adding support for a new game
+
+1. Add a `GameContext::new_game()` constructor in `types.rs` with the correct header values.
+2. Create `crates/bethkit-core/src/schema/<game>/` mirroring the `sse/` directory structure.
+3. Register the game's schemas in `schema/mod.rs`.
+4. Add integration test data if available.
+
+== Pull request checklist
+
+* [ ] `cargo test --all` passes
+* [ ] `cargo clippy --all -- -D warnings` passes
+* [ ] `cargo fmt --all -- --check` passes
+* [ ] All new public items have `///` doc comments
+* [ ] No `unwrap()` in library code
+* [ ] Every `unsafe` block has a `// SAFETY:` comment
+* [ ] File header `// SPDX-License-Identifier: Apache-2.0` is present in every new `.rs` file
+* [ ] Lines do not exceed 100 characters
+
+== Licence
+
+By contributing to bethkit you agree that your contributions will be licensed under the
+Apache-2.0 licence.

@@ -1,0 +1,12 @@
+[package]
+name    = "bethkit-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bethkit-io = { path = "../bethkit-io" }
+bitflags   = { workspace = true }
+ahash      = { workspace = true }
+bstr       = { workspace = true }
+once_cell  = { workspace = true }
+thiserror  = { workspace = true }

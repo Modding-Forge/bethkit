@@ -1,0 +1,256 @@
+﻿= Localized Strings
+
+Bethesda's localization system moves all user-visible text out of the plugin binary and into
+three sibling files that live next to the plugin.
+bethkit provides a complete workflow for reading, extracting, editing, and writing these files.
+
+== The three string-table files
+
+[cols="1,1,3",options="header"]
+|===
+| Extension | `StringFileKind` | Used for
+
+| `.strings`
+| `StringFileKind::Strings`
+| Short names, object names (FULL subrecord).
+
+| `.dlstrings`
+| `StringFileKind::DLStrings`
+| Long descriptions, book text, dialogue (DESC, DNAM, …).
+
+| `.ilstrings`
+| `StringFileKind::ILStrings`
+| Info / condition strings.
+|===
+
+Each file is a binary index followed by a string pool.
+The index maps a 32-bit ID to a byte offset in the pool.
+bethkit's `StringTable` handles the binary format transparently.
+
+== When are string tables used?
+
+If the `RecordFlags::LOCALIZED` flag is set on the TES4 (file header) record, every `LString`
+subrecord in the plugin contains a 4-byte ID that refers into the sibling string files instead
+of an inline NUL-terminated string.
+
+Plugins that are *not* localized embed strings directly in each `LString` subrecord.
+bethkit handles both cases automatically:
+
+* `RecordView` returns `FieldValue::LocalizedId(u32)` for localized plugins.
+* `RecordView` returns `FieldValue::Str(&str)` for non-localized plugins.
+
+== Opening a LocalizationSet
+
+`LocalizationSet` bundles the three string-table files for one plugin and one language.
+
+[source,rust]
+----
+use bethkit_core::LocalizationSet;
+
+// Opens MyMod.strings, MyMod.dlstrings, MyMod.ilstrings next to MyMod.esp
+// in the "strings" sub-directory (standard Bethesda layout).
+let set = LocalizationSet::open("MyMod.esp".as_ref(), "english")?;
+----
+
+== Extracting all translatable strings
+
+[source,rust]
+----
+use bethkit_core::{extract_strings, GameContext, LocalizationSet, Plugin};
+
+let plugin = Plugin::open("Skyrim.esm".as_ref(), GameContext::sse())?;
+let set = LocalizationSet::open("Skyrim.esm".as_ref(), "english")?;
+
+// include_inactive = true → also extract strings from disabled/deleted records
+for ls in extract_strings(&plugin, &set, false)? {
+    println!(
+        "{:08X}  {}  {}  {:?}",
+        ls.form_id.0,
+        ls.record_type,
+        ls.subrecord_type,
+        String::from_utf8_lossy(&ls.bytes),
+    );
+}
+----
+
+`LocalizedString` has these fields:
+
+[cols="1,1,3",options="header"]
+|===
+| Field | Type | Description
+
+| `form_id` | `FormId` | Record that owns this string.
+| `record_type` | `Signature` | Record type (e.g. `NPC_`).
+| `subrecord_type` | `Signature` | Subrecord signature (e.g. `FULL`).
+| `kind` | `StringFileKind` | Which of the three table files this string lives in.
+| `id` | `u32` | String-table ID.
+| `bytes` | `Vec<u8>` | Raw string bytes (not necessarily valid UTF-8).
+|===
+
+== Applying translation edits
+
+To translate a plugin you do *not* need to rewrite the plugin binary.
+You only need to produce a new set of sibling string-table files in the target language.
+
+[source,rust]
+----
+use bethkit_core::{apply_edits, GameContext, LocalizationSet, Plugin, StringFileKind};
+
+let plugin = Plugin::open("MyMod.esp".as_ref(), GameContext::sse())?;
+let mut set = LocalizationSet::open("MyMod.esp".as_ref(), "english")?;
+
+// Replace specific string-table entries by (kind, id) key.
+apply_edits(
+    &mut set,
+    [
+        (StringFileKind::Strings,   1, "Translated Name".as_bytes().to_vec()),
+        (StringFileKind::DLStrings, 2, "Long translated description.".as_bytes().to_vec()),
+    ],
+);
+
+// Write the three sibling files for the target language.
+// The plugin binary is not touched.
+set.write("MyMod.esp".as_ref(), "german")?;
+----
+
+`set.write` produces:
+----
+strings/MyMod_german.strings
+strings/MyMod_german.dlstrings
+strings/MyMod_german.ilstrings
+----
+
+== Full translation workflow example
+
+[source,rust]
+----
+use bethkit_core::{
+    apply_edits, extract_strings, GameContext, LocalizationSet, Plugin, StringFileKind,
+};
+use std::collections::HashMap;
+
+fn translate(
+    plugin_path: &std::path::Path,
+    translations: HashMap<(StringFileKind, u32), Vec<u8>>,
+    target_lang: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = GameContext::sse();
+    let plugin = Plugin::open(plugin_path, ctx)?;
+    let mut set = LocalizationSet::open(plugin_path, "english")?;
+
+    // Optional: list all strings before applying edits
+    for ls in extract_strings(&plugin, &set, false)? {
+        println!("  {:08X} {} = {:?}", ls.id, ls.subrecord_type,
+                 String::from_utf8_lossy(&ls.bytes));
+    }
+
+    // Apply all translated strings
+    let edits: Vec<_> = translations.into_iter()
+        .map(|((kind, id), text)| (kind, id, text))
+        .collect();
+    apply_edits(&mut set, edits);
+
+    set.write(plugin_path, target_lang)?;
+    Ok(())
+}
+----
+
+== StringTable
+
+`StringTable` is the low-level type that backs each of the three files inside a
+`LocalizationSet`.
+It is publicly accessible via `set.strings`, `set.dlstrings`, and `set.ilstrings`.
+
+[cols="1,3",options="header"]
+|===
+| Method | Description
+
+| `StringTable::open(path)` | Memory-map and parse a `.strings` / `.dlstrings` / `.ilstrings` file. The kind is derived from the file extension.
+| `StringTable::open_as(path, kind)` | As above with an explicit `StringFileKind`.
+| `StringTable::from_bytes(bytes, kind)` | Parse from an in-memory byte slice (copies entries to heap).
+| `StringTable::new(kind)` | Create an empty table.
+| `get(id) -> Option<&[u8]>` | Look up a string by its 32-bit ID.
+| `iter() -> impl Iterator<Item=(u32, &[u8])>` | Iterate all (id, bytes) pairs in deterministic order.
+| `insert(id, bytes)` | Insert or replace an entry by exact ID.
+| `insert_new(bytes) -> u32` | Append a new entry and return the freshly assigned ID.
+| `remove(id) -> Option<Vec<u8>>` | Remove an entry, returning its bytes.
+| `len() / is_empty()` | Entry count.
+| `write_to(writer)` | Serialize the table to any `Write` target.
+|===
+
+`LocalizationSet::open` and `LocalizationSet::write` are the usual entry points;
+access individual `StringTable` fields only when you need direct ID-level control.
+
+== Low-level helpers: `localized_subrecords` and `resolve_string_kind`
+
+These two free functions are the building blocks used by `extract_strings` internally.
+They are useful when implementing an FFI layer or a custom extraction loop.
+
+=== `localized_subrecords`
+
+[source,rust]
+----
+pub fn localized_subrecords(record_sig: Signature) -> &'static [Signature]
+----
+
+Returns the subrecord signatures that carry localized strings for a given record type.
+Returns an empty slice for record types with no translatable subrecords.
+
+[source,rust]
+----
+use bethkit_core::{localized_subrecords, Signature};
+
+let sigs = localized_subrecords(Signature(*b"NPC_"));
+// e.g. [Signature(*b"FULL")]
+for sig in sigs {
+    println!("NPC_ has localized subrecord: {sig}");
+}
+----
+
+=== `resolve_string_kind`
+
+[source,rust]
+----
+pub fn resolve_string_kind(record_sig: Signature, subrecord_sig: Signature) -> StringFileKind
+----
+
+Maps a `(record type, subrecord signature)` pair to the `StringFileKind` used for the lookup.
+Defaults to `StringFileKind::Strings`; long descriptions and dialogue text route to
+`DLStrings` and `ILStrings` respectively.
+
+[source,rust]
+----
+use bethkit_core::{resolve_string_kind, Signature, StringFileKind};
+
+// DESC is always in DLStrings regardless of record type.
+let kind = resolve_string_kind(Signature(*b"NPC_"), Signature(*b"DESC"));
+assert_eq!(kind, StringFileKind::DLStrings);
+
+// INFO.NAM1 (dialogue response) routes to ILStrings.
+let kind = resolve_string_kind(Signature(*b"INFO"), Signature(*b"NAM1"));
+assert_eq!(kind, StringFileKind::ILStrings);
+----
+
+Routing rules:
+
+[cols="1,1,1",options="header"]
+|===
+| Record | Subrecord | File
+
+| _any_ | `DESC` | `.dlstrings`
+| `BOOK` | `CNAM` | `.dlstrings`
+| `QUST` | `CNAM` | `.dlstrings`
+| `MGEF` | `DNAM` | `.dlstrings`
+| `MESG` | `ITXT` | `.dlstrings`
+| `INFO` | `NAM1` | `.ilstrings`
+| `INFO` | `RNAM` | `.ilstrings`
+| _everything else_ | | `.strings`
+|===
+
+== Notes on encoding
+
+Bethesda plugins use Windows-1252 (or game-specific code pages) for non-localized strings
+and UTF-8 for localized strings.
+`bethkit_core::code_page_for_language` returns the correct `CodePage` for a given language tag.
+Use `CodePage::decode` to convert raw bytes to a Rust `String` when needed.
+

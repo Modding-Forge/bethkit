@@ -1,0 +1,5 @@
+name: bethkit
+title: bethkit
+version: ~
+nav:
+  - modules/ROOT/nav.adoc

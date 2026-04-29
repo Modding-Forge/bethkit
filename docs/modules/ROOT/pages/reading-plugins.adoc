@@ -1,0 +1,278 @@
+= Reading Plugins
+
+This page covers everything about opening plugin files and navigating their contents with bethkit.
+
+== Opening a plugin
+
+[source,rust]
+----
+use bethkit_core::{GameContext, Plugin};
+
+let ctx = GameContext::sse();          // Skyrim Special Edition
+let plugin = Plugin::open("MyMod.esp".as_ref(), ctx)?;
+----
+
+`Plugin::open` memory-maps the file.
+No data is copied into heap buffers — all records reference the memory-mapped region directly.
+
+=== Inspecting the file header
+
+[source,rust]
+----
+println!("kind:        {:?}", plugin.kind());              // Esp / Esm / Esl
+println!("masters:     {:?}", plugin.masters());           // &[String]
+println!("description: {:?}", plugin.header.description); // Option<String>
+----
+
+`plugin.kind()` returns a `PluginKind` based on the flags in the TES4 record header, not the
+file extension.
+The plugin description and author are accessible through `plugin.header`, which is a public
+`PluginHeader` struct.
+
+=== Supported game contexts
+
+[cols="1,1",options="header"]
+|===
+| Context | Game
+
+| `GameContext::sse()`
+| Skyrim Special Edition (primary target; named constructor)
+
+| `GameContext { game: Game::SkyrimLE }`
+| Skyrim Legendary Edition
+
+| `GameContext { game: Game::SkyrimVR }`
+| Skyrim VR
+
+| `GameContext { game: Game::Fallout4 }`
+| Fallout 4
+
+| `GameContext { game: Game::Fallout76 }`
+| Fallout 76
+
+| `GameContext { game: Game::Starfield }`
+| Starfield
+
+| `GameContext { game: Game::Oblivion }`
+| Oblivion
+
+| `GameContext { game: Game::Fallout3 }`
+| Fallout 3
+
+| `GameContext { game: Game::FalloutNV }`
+| Fallout: New Vegas
+
+| `GameContext { game: Game::Morrowind }`
+| Morrowind
+|===
+
+NOTE: `GameContext` only encodes binary-format differences (header signature, HEDR version,
+light-flag bit position).
+Record *schema* definitions currently exist only for SSE.
+
+== Groups
+
+A plugin contains a flat list of top-level groups.
+Each group holds records of one type (or nested sub-groups for cell/worldspace data).
+
+=== Group types
+
+`GroupType` is an `enum` that identifies how a GRUP header's label should be interpreted.
+
+[cols="1,2",options="header"]
+|===
+| Variant | Meaning
+
+| `GroupType::Normal`
+| Top-level group. Label is a 4-byte record signature (`NPC_`, `WEAP`, …).
+
+| `GroupType::WorldChildren`
+| Children of a worldspace (WRLD). Label is the parent worldspace FormID.
+
+| `GroupType::InteriorCellBlock` / `InteriorCellSubBlock`
+| Interior cell block/sub-block. Label is an `i32` block number.
+
+| `GroupType::ExteriorCellBlock` / `ExteriorCellSubBlock`
+| Exterior cell block/sub-block. Label is a grid coordinate (`i16 x`, `i16 y`).
+
+| `GroupType::CellChildren`
+| Children of a CELL record. Label is the cell FormID.
+
+| `GroupType::TopicChildren`
+| Children of a DIAL topic. Label is the topic FormID.
+
+| `GroupType::CellPersistentChildren` / `CellTemporaryChildren`
+| Persistent / temporary placed-reference children of a cell.
+|===
+
+`GroupLabel` is the interpreted label value, produced by `GroupHeader::label`.
+Its variants mirror `GroupType`:
+
+* `GroupLabel::Signature(Signature)` — for `Normal` groups.
+* `GroupLabel::FormId(FormId)` — for worldspace / cell / topic children.
+* `GroupLabel::GridCell { x, y }` — for exterior cell blocks.
+* `GroupLabel::BlockNumber(i32)` — for interior cell blocks.
+
+`GroupChild` is the type yielded by iterating a group's children.
+It is an enum with two variants:
+
+[source,rust]
+----
+match child {
+    GroupChild::Record(record) => { /* a main record */ }
+    GroupChild::Group(sub_group) => { /* a nested GRUP */ }
+}
+----
+
+Use `group.children()` to iterate `GroupChild` directly, or the convenience
+methods `group.records()` / `group.records_recursive()` for records-only traversal.
+
+[source,rust]
+----
+for group in plugin.groups() {
+    println!("GRUP type: {:?}", group.header.group_type);
+    println!("GRUP label: {:?}", group.header.label);
+
+    for record in group.records() {
+        // direct children only — no recursion into sub-groups
+    }
+
+    for record in group.records_recursive() {
+        // all records including those in nested sub-groups
+    }
+}
+----
+
+`records_recursive()` is the usual choice — it handles cell block / sub-block nesting
+transparently.
+
+=== Filtering by record type
+
+[source,rust]
+----
+use bethkit_core::Signature;
+
+for group in plugin.groups() {
+    // Only descend into NPC_ groups
+    if group.header.label == GroupLabel::RecordType(Signature(*b"NPC_")) {
+        for record in group.records() {
+            // …
+        }
+    }
+}
+----
+
+== Records
+
+Every `Record` exposes its header and a lazy view of its subrecords.
+
+[source,rust]
+----
+for group in plugin.groups() {
+    for record in group.records_recursive() {
+        let sig   = record.header.signature;   // Signature (4-byte array)
+        let fid   = record.header.form_id;     // FormId (u32 wrapper)
+        let flags = record.header.flags;       // RecordFlags (bitflags)
+
+        println!("{sig} {fid:#010X} {:?}", flags);
+    }
+}
+----
+
+=== Convenience accessors
+
+[source,rust]
+----
+// EditorID (EDID subrecord) — None if absent
+if let Some(edid) = record.editor_id()? {
+    println!("EditorID: {edid}");
+}
+
+// Full name (FULL subrecord, inline) — None if absent
+if let Some(full) = record.full_name()? {
+    println!("Name: {full}");
+}
+----
+
+=== Accessing subrecords by signature
+
+[source,rust]
+----
+use bethkit_core::Signature;
+
+// First matching subrecord (returns None if not present)
+if let Some(sr) = record.get(Signature(*b"DATA"))? {
+    let bytes = sr.as_bytes(); // &[u8]
+    println!("DATA length: {}", bytes.len());
+}
+
+// All subrecords with a given signature (for repeating fields)
+for sr in record.get_all(Signature(*b"KWDA"))? {
+    let kw = sr.as_bytes();
+    // each KWDA is a 4-byte FormID
+}
+----
+
+== SubRecord payloads
+
+`SubRecord::as_bytes()` always returns the complete, decompressed payload.
+bethkit also provides typed convenience methods:
+
+[source,rust]
+----
+let sr: &SubRecord = /* … */;
+
+let raw:    &[u8]  = sr.as_bytes();
+let u8val:  u8     = sr.as_u8()?;
+let u16val: u16    = sr.as_u16()?;
+let u32val: u32    = sr.as_u32()?;
+let f32val: f32    = sr.as_f32()?;
+let i8val:  i8     = sr.as_i8()?;
+let i16val: i16    = sr.as_i16()?;
+let i32val: i32    = sr.as_i32()?;
+let s:      &str   = sr.as_zstring()?;  // NUL-terminated UTF-8
+----
+
+For richer, schema-aware decoding see xref:schema.adoc[Record Schema].
+
+== Checking record flags
+
+[source,rust]
+----
+use bethkit_core::RecordFlags;
+
+if record.header.flags.contains(RecordFlags::DELETED) {
+    // record is deleted — skip
+}
+if record.header.flags.contains(RecordFlags::COMPRESSED) {
+    // decompressed automatically by as_bytes()
+}
+if record.header.flags.contains(RecordFlags::LOCALIZED) {
+    // LString fields contain string-table IDs — pass a LocalizationSet to resolve them
+}
+----
+
+== Working example — dump all NPC_ EditorIDs
+
+[source,rust]
+----
+use bethkit_core::{GameContext, Plugin, Signature};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = GameContext::sse();
+    let plugin = Plugin::open("Skyrim.esm".as_ref(), ctx)?;
+
+    for group in plugin.groups() {
+        for record in group.records_recursive() {
+            if record.header.signature != Signature(*b"NPC_") {
+                continue;
+            }
+            if let Some(edid) = record.editor_id()? {
+                println!("{edid}");
+            }
+        }
+    }
+
+    Ok(())
+}
+----

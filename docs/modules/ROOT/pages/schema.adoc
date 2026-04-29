@@ -1,0 +1,278 @@
+﻿= Record Schema
+
+The schema system turns raw subrecord bytes into named, typed values without any heap allocation
+for the definition data itself.
+
+== Core types
+
+=== SchemaRegistry
+
+`SchemaRegistry` maps record-type signatures to `RecordSchema` definitions.
+The global SSE registry is available as a `&'static` singleton:
+
+[source,rust]
+----
+use bethkit_core::SchemaRegistry;
+
+let registry = SchemaRegistry::sse();
+println!("registered schemas: {}", registry.len()); // 126 for SSE
+----
+
+`SchemaRegistry::sse()` builds the registry once on first call using `OnceLock`.
+Subsequent calls return the same pointer in O(1) with no locking overhead.
+
+To look up a schema for a specific record type:
+
+[source,rust]
+----
+use bethkit_core::{SchemaRegistry, Signature};
+
+let registry = SchemaRegistry::sse();
+
+if let Some(schema) = registry.get(Signature(*b"NPC_")) {
+    println!("record name: {}", schema.name);
+    for member in schema.members {
+        println!("  {:?}  {}", member.sig, member.name);
+    }
+}
+----
+
+`RecordSchema` fields:
+
+[cols="1,1,3",options="header"]
+|===
+| Field | Type | Description
+
+| `sig` | `Signature` | 4-byte record type (e.g. `NPC_`).
+| `name` | `&'static str` | Human-readable record name (e.g. `"Non-Player Character"`).
+| `members` | `&'static [SubRecordDef]` | Ordered list of subrecord definitions.
+|===
+
+=== SubRecordDef
+
+[cols="1,1,3",options="header"]
+|===
+| Field | Type | Description
+
+| `sig` | `Signature` | 4-byte subrecord signature (e.g. `EDID`).
+| `name` | `&'static str` | Human-readable name (e.g. `"Editor ID"`).
+| `required` | `bool` | Whether the subrecord must be present in a valid record.
+| `repeating` | `bool` | Whether this subrecord may appear more than once.
+| `field` | `FieldType` | Data type / structure of the payload.
+|===
+
+=== FieldType
+
+`FieldType` is a `Copy` enum describing how to decode subrecord bytes:
+
+[cols="1,3",options="header"]
+|===
+| Variant | Meaning
+
+| `UInt8`, `UInt16`, `UInt32`, `UInt64` | Unsigned little-endian integer.
+| `Int8`, `Int16`, `Int32` | Signed little-endian integer.
+| `Float32` | 32-bit IEEE 754 float.
+| `ZString` | NUL-terminated UTF-8 string (inline, never localized).
+| `LString` | String that is either inline or a string-table ID if LOCALIZED is set.
+| `ByteArray` | Raw bytes, no further interpretation.
+| `FormId` | 32-bit file-local FormID.
+| `FormIdTyped(&[Signature])` | FormID restricted to the listed target record types.
+| `Enum(&EnumDef)` | 32-bit integer interpreted as a named enumeration.
+| `Flags(&FlagsDef)` | 32-bit integer interpreted as named bit flags.
+| `Struct(&[FieldDef])` | Fixed-layout sequence of named fields.
+| `Array { element, count }` | Homogeneous array. `count` is `Fixed(n)`, `Remainder`, or `PrecedingSibling(sig)`.
+| `Union { decider, variants }` | Active variant chosen at runtime by the `decider` function.
+| `Unused(n)` | `n` padding bytes, ignored during decoding.
+|===
+
+== RecordView
+
+`RecordView` pairs a live `Record` reference with its `RecordSchema` and decodes subrecords
+on demand.
+
+[source,rust]
+----
+use bethkit_core::{GameContext, Plugin, RecordView, SchemaRegistry, Signature};
+
+let ctx = GameContext::sse();
+let plugin = Plugin::open("Skyrim.esm".as_ref(), ctx)?;
+let registry = SchemaRegistry::sse();
+
+for group in plugin.groups() {
+    for record in group.records_recursive() {
+        let Some(schema) = registry.get(record.header.signature) else { continue };
+        let view = RecordView::new(record, schema);
+
+        // Decode all fields defined by the schema
+        for entry in view.fields()? {
+            println!("{}: {}", entry.name, entry.value);
+        }
+    }
+}
+----
+
+=== get_field
+
+`get_field` looks up a single field by name and decodes it:
+
+[source,rust]
+----
+if let Some(entry) = view.get_field("Full Name")? {
+    println!("{}", entry.value);
+}
+----
+
+Returns:
+
+* `Ok(Some(FieldEntry))` — field found and decoded.
+* `Ok(None)` — no `SubRecordDef` with that name exists in this schema.
+
+If the subrecord is absent from the record, the returned `FieldEntry` has `value = FieldValue::Missing`.
+
+== FieldEntry and FieldValue
+
+`FieldEntry` is the decoded result:
+
+[source,rust]
+----
+pub struct FieldEntry<'a> {
+    pub name:  &'static str,   // from SubRecordDef
+    pub value: FieldValue<'a>,
+}
+----
+
+`FieldValue` is a `Copy`-less enum that borrows from the record's bytes where possible:
+
+[cols="1,3",options="header"]
+|===
+| Variant | Description
+
+| `Int(i64)` | Any unsigned or signed integer value, widened to i64.
+| `Float(f64)` | 32-bit float widened to f64.
+| `Str(&str)` | Inline NUL-terminated string borrowed from the record data.
+| `FormId(FormId)` | A 32-bit FormID (still file-local — resolve with `PluginCache` if needed).
+| `Bytes(&[u8])` | Raw byte slice for types that are not further decoded.
+| `Enum { value, name }` | Integer plus optional resolved name from `EnumDef`.
+| `Flags { value, active }` | Integer plus list of active flag names from `FlagsDef`.
+| `Struct(Vec<FieldEntry>)` | Nested struct decoded into a list of named fields.
+| `Array(Vec<FieldValue>)` | Homogeneous array of decoded values.
+| `LocalizedId(u32)` | String-table ID (only when the record's LOCALIZED flag is set).
+| `Missing` | The subrecord was absent from the record.
+|===
+
+`FieldValue` implements `Display`:
+
+[source,rust]
+----
+// Str      → the string text
+// Int      → decimal number
+// Float    → decimal number
+// FormId   → "00012345"
+// Enum     → "Alteration (6)" or just "6" if unknown
+// Flags    → "0x41 [FlagA, FlagC]"
+// Struct   → "{FieldA: 1, FieldB: 2}"
+// Array    → "[1, 2, 3]"
+// LocalizedId → "<LSTRING:0x0001234>"
+// Missing  → "<missing>"
+println!("{}", entry.value);
+----
+
+== Enums and flags
+
+=== EnumDef
+
+`EnumDef` maps integer values to names:
+
+[source,rust]
+----
+use bethkit_core::SchemaRegistry;
+use bethkit_core::Signature;
+
+let reg = SchemaRegistry::sse();
+let schema = reg.get(Signature(*b"SPEL")).unwrap();
+
+// Walk the member definitions to find an Enum field
+for member in schema.members {
+    if let bethkit_core::FieldType::Enum(def) = member.field {
+        println!("enum name: {}", def.name);
+        for (value, name) in def.values {
+            println!("  {value} = {name}");
+        }
+    }
+}
+----
+
+To look up a single value:
+
+[source,rust]
+----
+if let Some(name) = enum_def.name_of(6) {
+    println!("6 = {name}"); // e.g. "Alteration"
+}
+----
+
+=== FlagsDef
+
+`FlagsDef` maps bit positions (0-based) to flag names:
+
+[source,rust]
+----
+let active: Vec<&str> = flags_def.active_names(0b0000_0101).collect();
+// bits 0 and 2 are set
+----
+
+== Enums defined for SSE
+
+The 27 enum / flags definitions in `bethkit_core::schema::enums` cover the most common
+fields in SSE records:
+
+[cols="1,2",options="header"]
+|===
+| Static name | Covers
+
+| `ACTOR_VALUE_ENUM` | Actor values (Strength, Alteration, …), 163 values
+| `SCHOOL_ENUM` | Magic school (Alteration, Conjuration, …)
+| `WEAPON_ANIM_TYPE_ENUM` | Weapon animation type
+| `STAGGER_ENUM` | Stagger values
+| `ARMOR_TYPE_ENUM` | Light / Heavy / Clothing
+| `BOOK_TYPE_ENUM` | Tome / Note / Journal / Scroll
+| `BOOK_FLAGS` | Book flags (Teaches Skill, Teaches Spell, …)
+| `MAGIC_EFFECT_FLAGS` | MGEF flags (Hostile, Detrimental, …)
+| `DELIVERY_ENUM` | Spell delivery (Self, Touch, Aimed, …)
+| `CASTING_TYPE_ENUM` | Casting type (Constant, FireForget, Concentration, Scroll)
+| `SPELL_TYPE_ENUM` | Spell / Disease / Power / LesserPower / …
+| `NPC_FLAGS` | NPC ACBS flags (Female, Essential, Unique, …)
+| `PACKAGE_TYPE_ENUM` | AI package types
+| `LIGHT_FLAGS` | Light flags (Dynamic, Can Carry, …)
+| `QUEST_TYPE_ENUM` | Quest type (None, MainQuest, BrotherhoodOfSteel, …)
+| `QUEST_FLAGS` | Quest flags (Start Game Enabled, Allow Repeated Stages, …)
+| `CELL_FLAGS` | Cell flags (Interior, Has Water, …)
+| `WEATHER_CLASS_ENUM` | Weather class (None, Pleasant, Cloudy, Rainy, Snow)
+| `PROJECTILE_FLAGS` | Projectile flags (Hitscan, Explosive, Alt Trigger, …)
+| `PROJECTILE_TYPE_ENUM` | Projectile type (Missile, Lobber, Beam, Flame, …)
+| `SOUND_LEVEL_ENUM` | Sound attenuation level
+| `EQUIP_TYPE_ENUM` | Equip slot _(reserved for future use)_
+| `MATERIAL_TYPE_ENUM` | Impact material type _(reserved for future use)_
+| `BIPED_OBJECT_ENUM` | Biped object slots _(reserved for future use)_
+| `CHARGE_TIME_ENUM` | Casting perk type _(reserved for future use)_
+| `NPC_LEVEL_TYPE_ENUM` | NPC level decider _(reserved for future use)_
+| `FACTION_FLAGS` | Faction rank flags _(reserved for future use)_
+|===
+
+== SSE record coverage
+
+`SchemaRegistry::sse()` registers 126 record types, grouped by category:
+
+[cols="1,1",options="header"]
+|===
+| Module | Record types (count)
+
+| `simple.rs` | TES4, KYWD, AACT, TXST, GLOB, GMST, VTYP, LCRT, MATT, COLL, CLFM, REVB, SHOU, WOOP, ASTP, EQUP, RELA, DEBR, LGTM, DOBJ, FLST, IDLM, ANIO, HDPT, LCTN, MESG, AVIF, CAMS, CPTH, MOVT, DUAL, PLYR (32)
+| `items.rs` | WEAP, ARMO, ARMA, AMMO, BOOK, ALCH, INGR, MISC, KEYM, SLGM, APPA, COBJ, CONT, DOOR, FURN (15)
+| `actors.rs` | NPC_, RACE, PACK, FACT, CSTY, IDLE, CLAS, EYES, OTFT, BPTD, LVLN, LVLI, LVSP (13)
+| `magic.rs` | SPEL, SCRL, MGEF, ENCH, RFCT, PROJ, EXPL, HAZD, PERK, IMGS, IMAD, IPCT, IPDS, ADDN, SPGD, EFSH (16)
+| `world.rs` | ACTI, TACT, STAT, GRAS, TREE, FLOR, MSTT, LTEX, LIGH, WATR, WTHR, CLMT, ASPC, ECZN, CELL, WRLD, LAND, REGN, NAVM, NAVI, LSCR, LENS, VOLI (23)
+| `quests.rs` | QUST, DIAL, INFO, DLBR, DLVW, SCEN, SMBN, SMQN, SMEN (9)
+| `audio.rs` | SOUN, SNDR, MUSC, MUST, SNCT, SOPM, FSTP, FSTS, ARTO, MATO (10)
+| `projectiles.rs` | PARW, PBAR, PBEA, PCON, PFLA, PGRE, PHZD, PMIS (8)
+|===

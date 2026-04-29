@@ -1,0 +1,115 @@
+﻿= Error Handling
+
+== Result types
+
+Every public function that can fail returns a typed `Result`:
+
+[cols="1,1",options="header"]
+|===
+| Crate | Result type
+
+| `bethkit-core` | `bethkit_core::Result<T>` = `Result<T, CoreError>`
+| `bethkit-bsa` | `bethkit_bsa::Result<T>` = `Result<T, BsaError>`
+|===
+
+Use `?` to propagate errors through your own code.
+If you need a uniform error type across crates, map into `Box<dyn std::error::Error>` or
+a custom error type that uses `#[from]` with `thiserror`.
+
+== CoreError variants
+
+[cols="1,3",options="header"]
+|===
+| Variant | When it occurs
+
+| `CoreError::Io(IoError)`
+| Any I/O or decompression error from `bethkit-io` (memory-map, zlib, LZ4).
+
+| `CoreError::InvalidSignature { expected, got }`
+| A record or group header contained an unexpected 4-byte signature.
+  This usually means the file is not a valid plugin or is corrupted.
+
+| `CoreError::InvalidGroupType(i32)`
+| A GRUP header contained an unknown group-type value.
+
+| `CoreError::UnexpectedEof { context }`
+| The parser ran out of data while reading a named structure.
+  `context` names the structure (e.g. `"UInt32 field"`).
+
+| `CoreError::LightFormIdOverflow(u32)`
+| A FormID in a light plugin exceeded the allowed object-ID range (0x000–0xFFF).
+
+| `CoreError::EslRecordLimitExceeded { count }`
+| `Plugin::eslify()` would require more than 2048 records — the practical ESL limit.
+
+| `CoreError::UnsupportedGame(Game)`
+| An operation is not supported for the given game context.
+
+| `CoreError::InvalidStringTable(String)`
+| A `.STRINGS` / `.DLSTRINGS` / `.ILSTRINGS` file is malformed or could not be classified.
+
+| `CoreError::MissingLStringId(u32)`
+| A localized record references a string-table ID that is absent from all loaded tables.
+
+| `CoreError::LocalizedFlagWithoutTables`
+| A plugin marked as localized was opened without supplying any string tables.
+
+| `CoreError::InvalidEncoding(String)`
+| A field's byte content is not valid for the expected encoding (e.g. invalid UTF-8 in a ZString).
+|===
+
+=== Example: matching on specific variants
+
+[source,rust]
+----
+use bethkit_core::{CoreError, Plugin, GameContext};
+
+match Plugin::open("Mod.esp".as_ref(), GameContext::sse()) {
+    Ok(plugin) => { /* … */ }
+    Err(CoreError::InvalidSignature { expected, got }) => {
+        eprintln!("bad signature: expected {expected}, got {got}");
+    }
+    Err(CoreError::Io(io)) => {
+        eprintln!("I/O error: {io}");
+    }
+    Err(e) => {
+        eprintln!("other error: {e}");
+    }
+}
+----
+
+== BsaError variants
+
+[cols="1,3",options="header"]
+|===
+| Variant | When it occurs
+
+| `BsaError::Io(IoError)`
+| Underlying I/O or decompression error.
+
+| `BsaError::InvalidMagic { got }`
+| The first four bytes do not match any known archive format.
+
+| `BsaError::InvalidVersion { got }`
+| The version field is not recognized for the detected format.
+
+| `BsaError::InvalidFormat(String)`
+| The archive is structurally malformed (truncated index, invalid offsets, etc.).
+|===
+
+== Design rationale
+
+* All error types are defined with `thiserror::Error`, providing `Display` and `Error` impls
+  automatically.
+* Errors carry structured context (field names, expected vs. actual values) rather than
+  opaque strings, so callers can handle them programmatically.
+* `CoreError::Io` wraps `bethkit_io::IoError`, which in turn wraps `std::io::Error`.
+  The full chain is preserved for debugging.
+* `Box<dyn Error>` is never returned from library code.
+  Application-level `main` functions may use it for convenience.
+
+== Tips
+
+* Use `anyhow::Context` in application code to attach call-site context to errors from bethkit.
+* Use `thiserror` in library code that wraps bethkit to propagate `CoreError` with `#[from]`.
+* Enable `RUST_BACKTRACE=1` to see where an error was created when debugging.
