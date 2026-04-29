@@ -54,7 +54,7 @@ jobs:
         run: cargo test --workspace --lib
 
       - name: Build release DLL
-        run: cargo build --release -p bethkit-ffi
+        run: cargo build --release -p bethkit-ffi --features generate-header
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

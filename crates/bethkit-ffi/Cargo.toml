@@ -12,5 +12,10 @@ bethkit-bsa  = { path = "../bethkit-bsa" }
 bethkit-io   = { path = "../bethkit-io" }
 thiserror    = { workspace = true }
 
+[features]
+# Enable to regenerate bethkit.h from the FFI source.
+# cargo build -p bethkit-ffi --features generate-header
+generate-header = ["dep:cbindgen"]
+
 [build-dependencies]
-cbindgen = "0.29"
+cbindgen = { version = "0.29", optional = true }
