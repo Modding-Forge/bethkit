@@ -94,8 +94,8 @@ jobs:
       # Zip each platform bundle for the release page.
       - name: Package artifacts
         run: |
-          cd dist/windows && zip -r ../../bethkit-${{ github.ref_name }}-windows-x64.zip .
-          cd dist/linux   && zip -r ../../bethkit-${{ github.ref_name }}-linux-x64.zip .
+          (cd dist/windows && zip -r ../../bethkit-${{ github.ref_name }}-windows-x64.zip .)
+          (cd dist/linux   && zip -r ../../bethkit-${{ github.ref_name }}-linux-x64.zip .)
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
