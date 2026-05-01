@@ -96,7 +96,10 @@ pub extern "C" fn bethkit_load_order_push(
 
     // SAFETY: lo is non-null.
     let handle = unsafe { &mut *lo };
-    handle.inner.push(name_str, rust_kind);
+    if let Err(e) = handle.inner.push(name_str, rust_kind) {
+        set_last_error(format!("bethkit_load_order_push: {e}"));
+        return -1;
+    }
 
     // Intern a stable CString so resolve can return borrowed plugin_name ptrs.
     let sanitized: Vec<u8> =

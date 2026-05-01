@@ -27,6 +27,19 @@ pub enum CoreError {
     #[error("FormID {0:#010X} exceeds light plugin limit (max 0xFFF)")]
     LightFormIdOverflow(u32),
 
+    /// The load order has no more file-index slots for regular plugins.
+    ///
+    /// File index `0xFE` is reserved as the ESL sentinel; at most 254 regular
+    /// plugins (indices `0x00`–`0xFD`) may be added.
+    #[error("load-order index overflow: file index 0xFE is reserved for light plugins")]
+    LoadOrderIndexFull,
+
+    /// The load order has no more ESL slots for light plugins.
+    ///
+    /// At most 4096 light plugins (ESL slots `0x000`–`0xFFF`) may be added.
+    #[error("light-plugin slot overflow: more than 4096 ESL plugins")]
+    LightSlotOverflow,
+
     /// Attempting to eslify a plugin that has too many records.
     #[error("ESL plugin would require {count} records, max is 2048")]
     EslRecordLimitExceeded { count: usize },

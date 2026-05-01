@@ -85,28 +85,29 @@ impl LoadOrder {
     /// * `name` - Plugin filename including extension (e.g. `"Skyrim.esm"`).
     /// * `kind` - The functional plugin type.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the regular file-index would reach 0xFE (reserved for the
-    /// ESL sentinel), or if the ESL slot counter exceeds 0xFFF.
-    pub fn push(&mut self, name: &str, kind: PluginKind) -> &LoadOrderEntry {
+    /// Returns [`CoreError::LoadOrderIndexFull`] when adding a regular plugin
+    /// would consume file index `0xFE` (reserved for the ESL sentinel).
+    ///
+    /// Returns [`CoreError::LightSlotOverflow`] when the ESL slot counter
+    /// would exceed `0xFFF`.
+    pub fn push(&mut self, name: &str, kind: PluginKind) -> crate::error::Result<&LoadOrderEntry> {
         let canonical: String = name.to_lowercase();
         let entry_index: usize = self.entries.len();
 
         let (index, light_slot) = if kind == PluginKind::Light {
-            assert!(
-                self.light_slot_counter <= 0xFFF,
-                "ESL slot overflow: more than 4096 light plugins"
-            );
+            if self.light_slot_counter > 0xFFF {
+                return Err(crate::error::CoreError::LightSlotOverflow);
+            }
             let slot: u16 = self.light_slot_counter;
             self.by_light_slot.insert(slot, entry_index);
             self.light_slot_counter += 1;
             (0xFE_u8, Some(slot))
         } else {
-            assert!(
-                self.regular_index < 0xFE,
-                "load-order index overflow: file index 0xFE is reserved for light plugins"
-            );
+            if self.regular_index >= 0xFE {
+                return Err(crate::error::CoreError::LoadOrderIndexFull);
+            }
             let idx: u8 = self.regular_index;
             self.regular_index += 1;
             (idx, None)
@@ -120,7 +121,7 @@ impl LoadOrder {
         });
         self.by_name.insert(canonical, entry_index);
 
-        &self.entries[entry_index]
+        Ok(&self.entries[entry_index])
     }
 
     /// Returns the number of entries in the load order.
@@ -209,9 +210,9 @@ mod tests {
         let mut lo = LoadOrder::new();
 
         // when
-        lo.push("Skyrim.esm", PluginKind::Master);
-        lo.push("Update.esm", PluginKind::Master);
-        lo.push("Dawnguard.esm", PluginKind::Master);
+        lo.push("Skyrim.esm", PluginKind::Master)?;
+        lo.push("Update.esm", PluginKind::Master)?;
+        lo.push("Dawnguard.esm", PluginKind::Master)?;
 
         // then
         assert_eq!(lo.entries[0].index, 0);
@@ -280,8 +281,8 @@ mod tests {
         let mut lo = LoadOrder::new();
 
         // when
-        lo.push("Skyrim.esm", PluginKind::Master);
-        let entry = lo.push("LightMod.esp", PluginKind::Light);
+        lo.push("Skyrim.esm", PluginKind::Master)?;
+        let entry = lo.push("LightMod.esp", PluginKind::Light)?;
 
         // then
         assert_eq!(entry.index, 0xFE);
@@ -297,9 +298,9 @@ mod tests {
         let mut lo = LoadOrder::new();
 
         // when
-        lo.push("Light0.esp", PluginKind::Light);
-        lo.push("Light1.esp", PluginKind::Light);
-        lo.push("Light2.esp", PluginKind::Light);
+        lo.push("Light0.esp", PluginKind::Light)?;
+        lo.push("Light1.esp", PluginKind::Light)?;
+        lo.push("Light2.esp", PluginKind::Light)?;
 
         // then
         assert_eq!(lo.entries[0].light_slot, Some(0));
@@ -316,14 +317,14 @@ mod tests {
         let mut lo = LoadOrder::new();
 
         // when
-        lo.push("Skyrim.esm", PluginKind::Master);
+        lo.push("Skyrim.esm", PluginKind::Master)?;
         // Copy the values out immediately so the returned reference does not
         // outlive the next mutable borrow of `lo`.
         let (light_index, light_slot) = {
-            let e = lo.push("LightMod.esp", PluginKind::Light);
+            let e = lo.push("LightMod.esp", PluginKind::Light)?;
             (e.index, e.light_slot)
         };
-        lo.push("AnotherMod.esp", PluginKind::Plugin);
+        lo.push("AnotherMod.esp", PluginKind::Plugin)?;
 
         // then — regular plugins each occupy a sequential file-index slot.
         assert_eq!(lo.entries[0].index, 0x00);
@@ -341,7 +342,7 @@ mod tests {
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given — ESL FormID: slot 0, object 0xABC → 0xFE_000_ABC
         let mut lo = LoadOrder::new();
-        lo.push("LightMod.esp", PluginKind::Light);
+        lo.push("LightMod.esp", PluginKind::Light)?;
         let form_id = FormId(0xFE00_0ABC);
 
         // when

@@ -61,7 +61,11 @@ pub(super) fn write(
         BsaVersion::Tes4 => VERSION_TES4,
         BsaVersion::Fo3 => VERSION_FO3,
         BsaVersion::Sse => VERSION_SSE,
-        BsaVersion::Tes3 => unreachable!("TES3 handled by bsa_tes3 writer"),
+        BsaVersion::Tes3 => {
+            return Err(BsaError::Corrupt(
+                "TES3 BSA cannot be written by the TES4/FO3/SSE writer".into(),
+            ))
+        }
     };
 
     let is_sse = version == BsaVersion::Sse;
