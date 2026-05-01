@@ -4,6 +4,8 @@
 
 use std::path::Path;
 
+use ahash::HashMap;
+
 use crate::error::{CoreError, Result};
 use crate::types::{FormId, GameContext, RecordFlags, Signature};
 
@@ -189,11 +191,19 @@ impl PluginWriter {
         self.localized = localized;
     }
 
-    /// Reassigns all new FormIDs in all groups to the ESL range (0x800–0xFFF)
-    /// and sets the LIGHT flag on the header.
+    /// Reassigns all FormIDs in all groups that belong to this plugin to the
+    /// ESL range (`0xFE_000800`–`0xFE_000FFF`) and sets the LIGHT flag on the
+    /// header.
     ///
-    /// A FormID is considered "new" (owned by this plugin) when its
-    /// `file_index` byte equals the master count (i.e. it points to itself).
+    /// A FormID is considered plugin-owned when its `file_index` byte equals
+    /// the master count (i.e. the file points to itself in the load order).
+    ///
+    /// This performs a **two-pass rewrite**:
+    /// 1. All plugin-owned record header FormIDs are remapped.
+    /// 2. Every 4-byte-aligned window in every subrecord's data is scanned;
+    ///    any value that matches a remapped old FormID is updated to the new
+    ///    ESL FormID. This covers common inline FormID references such as
+    ///    `CNAM`, `NAME`, and keyword arrays.
     ///
     /// # Errors
     ///
@@ -216,9 +226,25 @@ impl PluginWriter {
             return Err(CoreError::EslRecordLimitExceeded { count: new_count });
         }
 
-        // Re-assign FormIDs.
-        let mut next_id: u32 = 0x800;
-        reassign_form_ids(&mut self.groups, master_count, &mut next_id);
+        // First pass: collect old FormIDs of all plugin-owned records in
+        // iteration order so that sequential ESL IDs are assigned stably.
+        let file_index_shifted: u32 = 0xFEu32 << 24;
+        let old_fids: Vec<u32> = self
+            .groups
+            .iter()
+            .flat_map(iter_writable_records)
+            .filter(|r| r.form_id.file_index() == master_count)
+            .map(|r| r.form_id.0)
+            .collect();
+
+        let mut remap: HashMap<u32, u32> = HashMap::default();
+        for (i, old_fid) in old_fids.iter().enumerate() {
+            remap.insert(*old_fid, file_index_shifted | (0x800u32 + i as u32));
+        }
+
+        // Second pass: apply the remapping to record headers and all subrecord
+        // data so that internal FormID cross-references are also updated.
+        apply_fid_remap(&mut self.groups, &remap);
 
         // Set the LIGHT flag on the header for the next serialisation.
         self.light_flag_set = true;
@@ -261,8 +287,8 @@ impl PluginWriter {
         // record_count: total records across all groups (linear scan).
         let record_count: u32 = count_all_records(&self.groups) as u32;
         hedr_data.extend_from_slice(&record_count.to_le_bytes());
-        // next_object_id: compute from highest used FormID + 1.
-        let next_id: u32 = next_object_id(&self.groups) + 1;
+        // next_object_id: highest object ID in plugin-owned records, plus one.
+        let next_id: u32 = next_object_id(&self.groups, self.header.masters.len() as u8);
         hedr_data.extend_from_slice(&next_id.to_le_bytes());
 
         let hedr_sr = WritableSubRecord {
@@ -337,38 +363,59 @@ fn count_all_records(groups: &[WritableGroup]) -> usize {
     groups.iter().flat_map(iter_writable_records).count()
 }
 
-/// Returns the highest raw FormID value found in all records.
-fn next_object_id(groups: &[WritableGroup]) -> u32 {
+/// Returns the next object ID to use for new records: the highest object ID
+/// among plugin-owned records plus one. Returns `0x800` when no plugin-owned
+/// records exist yet (i.e. for a fresh plugin).
+fn next_object_id(groups: &[WritableGroup], master_count: u8) -> u32 {
     groups
         .iter()
         .flat_map(iter_writable_records)
-        .map(|r| r.form_id.0)
+        .filter(|r| r.form_id.file_index() == master_count)
+        .map(|r| r.form_id.object_id())
         .max()
-        .unwrap_or(0x800)
+        .map_or(0x800, |id| id + 1)
 }
 
-/// Reassigns FormIDs that belong to this plugin to the ESL range.
-fn reassign_form_ids(groups: &mut [WritableGroup], master_count: u8, next_id: &mut u32) {
+/// Applies a FormID remapping table to all records and subrecord data in
+/// every group (recursive).
+fn apply_fid_remap(groups: &mut [WritableGroup], remap: &HashMap<u32, u32>) {
     for group in groups.iter_mut() {
-        reassign_in_group(group, master_count, next_id);
+        apply_fid_remap_in_group(group, remap);
     }
 }
 
-fn reassign_in_group(group: &mut WritableGroup, master_count: u8, next_id: &mut u32) {
+fn apply_fid_remap_in_group(group: &mut WritableGroup, remap: &HashMap<u32, u32>) {
     for child in group.children.iter_mut() {
         match child {
-            WritableGroupChild::Record(r) => {
-                if r.form_id.file_index() == master_count {
-                    // ESL plugins always occupy file-index 0xFE in the load order.
-                    let file_index_shifted: u32 = 0xFEu32 << 24;
-                    r.form_id = FormId(file_index_shifted | *next_id);
-                    *next_id += 1;
-                }
-            }
-            WritableGroupChild::Group(g) => {
-                reassign_in_group(g, master_count, next_id);
-            }
+            WritableGroupChild::Record(r) => apply_fid_remap_in_record(r, remap),
+            WritableGroupChild::Group(g) => apply_fid_remap_in_group(g, remap),
         }
+    }
+}
+
+fn apply_fid_remap_in_record(record: &mut WritableRecord, remap: &HashMap<u32, u32>) {
+    if let Some(&new_fid) = remap.get(&record.form_id.0) {
+        record.form_id = FormId(new_fid);
+    }
+    for sr in record.subrecords.iter_mut() {
+        remap_form_ids_in_bytes(&mut sr.data, remap);
+    }
+}
+
+/// Scans `data` at every 4-byte-aligned offset and replaces any little-endian
+/// `u32` that matches a key in `remap` with the corresponding value.
+///
+/// Alignment-based scanning is used because FormID fields in Bethesda records
+/// are always 4-byte-aligned within their subrecord payload.
+fn remap_form_ids_in_bytes(data: &mut [u8], remap: &HashMap<u32, u32>) {
+    let len = data.len();
+    let mut i = 0usize;
+    while i + 4 <= len {
+        let raw = u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+        if let Some(&new_fid) = remap.get(&raw) {
+            data[i..i + 4].copy_from_slice(&new_fid.to_le_bytes());
+        }
+        i += 4;
     }
 }
 
