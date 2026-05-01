@@ -451,8 +451,8 @@ mod tests {
     }
 
     /// Verifies that a `.DLSTRINGS` table round-trips, including length prefix
-    #[test]
     /// handling.
+    #[test]
     fn dlstrings_kind_roundtrips() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given
         let entries: &[(u32, &[u8])] = &[
@@ -477,8 +477,8 @@ mod tests {
     }
 
     /// Verifies that the writer emits a byte-identical layout when nothing has
-    #[test]
     /// been edited.
+    #[test]
     fn write_then_parse_then_write_is_stable() -> std::result::Result<(), Box<dyn std::error::Error>>
     {
         // given

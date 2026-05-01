@@ -94,7 +94,7 @@ pub enum BethkitBa2Version {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BethkitFieldValueKind {
-    /// An integer value (i64); covers UInt8 through UInt64 and Int8 through Int32.
+    /// A signed integer value (i64); covers Int8 through Int32 and UInt8 through UInt32.
     Int = 0,
     /// A floating-point value (f64); covers Float32.
     Float = 1,
@@ -118,6 +118,8 @@ pub enum BethkitFieldValueKind {
     LocalizedId = 10,
     /// The subrecord matching this field definition was absent from the record.
     Missing = 11,
+    /// An unsigned 64-bit integer that cannot be losslessly represented as i64.
+    UInt = 12,
 }
 
 /// A typed FormID with its allowed target record-type signatures.

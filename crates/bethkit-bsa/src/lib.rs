@@ -42,19 +42,17 @@ pub use write::{Ba2Dx10Writer, Ba2GnrlWriter, Ba2Version, BsaVersion, BsaWriter}
 /// supported archive format, or any other [`BsaError`] variant on parse or
 /// I/O failure.
 pub fn open(path: &std::path::Path) -> Result<Box<dyn Archive>> {
-    let bytes = {
-        use std::fs::File;
-        use std::io::Read;
-        let mut buf = [0u8; 4];
-        let mut f = File::open(path).map_err(|e| BsaError::Io(bethkit_io::IoError::Io(e)))?;
-        f.read_exact(&mut buf)
-            .map_err(|e| BsaError::Io(bethkit_io::IoError::Io(e)))?;
-        buf
-    };
-
-    match bytes {
-        bsa::tes3::MAGIC | bsa::tes4::MAGIC => Ok(Box::new(BsaArchive::open(path)?)),
-        ba2::MAGIC => Ok(Box::new(Ba2Archive::open(path)?)),
+    use std::sync::Arc;
+    let mmap: Arc<bethkit_io::MappedFile> =
+        Arc::new(bethkit_io::MappedFile::open(path).map_err(BsaError::Io)?);
+    let bytes: &[u8] = mmap.as_bytes();
+    if bytes.len() < 4 {
+        return Err(BsaError::Corrupt("file too small to detect archive format".into()));
+    }
+    let magic: [u8; 4] = [bytes[0], bytes[1], bytes[2], bytes[3]];
+    match magic {
+        bsa::tes3::MAGIC | bsa::tes4::MAGIC => Ok(Box::new(BsaArchive::from_mmap(mmap)?)),
+        ba2::MAGIC => Ok(Box::new(Ba2Archive::from_mmap(mmap)?)),
         got => Err(BsaError::InvalidMagic { got }),
     }
 }

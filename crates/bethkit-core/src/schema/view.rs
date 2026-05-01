@@ -27,8 +27,10 @@ use crate::types::{FormId, RecordFlags, Signature};
 /// A decoded field value produced by a [`RecordView`].
 #[derive(Debug)]
 pub enum FieldValue<'a> {
-    /// Any unsigned or signed integer narrowed to i64 for a uniform API.
+    /// A signed integer widened to i64 for a uniform API.
     Int(i64),
+    /// An unsigned 64-bit integer that cannot be losslessly narrowed to i64.
+    UInt(u64),
     /// A 32-bit or 64-bit float widened to f64.
     Float(f64),
     /// An inline NUL-terminated string borrowed from the record data.
@@ -84,6 +86,7 @@ impl fmt::Display for FieldValue<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Int(v) => write!(f, "{v}"),
+            Self::UInt(v) => write!(f, "{v}"),
             Self::Float(v) => write!(f, "{v}"),
             Self::Str(s) => write!(f, "{s}"),
             Self::FormId(id) => write!(f, "{id}"),
@@ -287,9 +290,7 @@ impl<'a> RecordView<'a> {
                     return Err(CoreError::UnexpectedEof { context: "UInt64 field" });
                 }
                 let v: u64 = u64::from_le_bytes(data[..8].try_into().expect("slice is 8 bytes"));
-                // Truncate to i64 on overflow — callers that need the full
-                // u64 range should use Bytes instead.
-                Ok(FieldValue::Int(v as i64))
+                Ok(FieldValue::UInt(v))
             }
             FieldType::Int8 => {
                 let v: i8 = data
@@ -450,7 +451,7 @@ fn decode_one_field<'a>(
                 return Err(CoreError::UnexpectedEof { context: "UInt64" });
             }
             let v: u64 = u64::from_le_bytes(data[..8].try_into().expect("slice is 8 bytes"));
-            Ok((FieldValue::Int(v as i64), 8))
+            Ok((FieldValue::UInt(v), 8))
         }
         FieldType::Int8 => {
             let v: i8 = *data.first().ok_or(CoreError::UnexpectedEof { context: "Int8" })? as i8;

@@ -2,6 +2,7 @@
 //!
 //! Plugin writer — serialises records and groups back to binary.
 
+use std::io::Write;
 use std::path::Path;
 
 use ahash::HashMap;
@@ -266,14 +267,36 @@ impl PluginWriter {
         Ok(buf)
     }
 
-    /// Serialises the plugin and writes it to `path`.
+    /// Serialises the plugin and writes it directly to `path` using a
+    /// buffered writer.
+    ///
+    /// Unlike [`Self::write_to_vec`], the serialised bytes are streamed to
+    /// disk without first collecting everything into a `Vec<u8>`. This avoids
+    /// holding the entire plugin in memory when writing large ESMs.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::Io`] if the file cannot be created or written.
     pub fn write_to_file(&self, path: &Path) -> Result<()> {
-        let data: Vec<u8> = self.write_to_vec()?;
-        std::fs::write(path, &data).map_err(|e| CoreError::Io(bethkit_io::IoError::Io(e)))
+        let file: std::fs::File = std::fs::File::create(path)
+            .map_err(|e| CoreError::Io(bethkit_io::IoError::Io(e)))?;
+        let mut writer: std::io::BufWriter<std::fs::File> =
+            std::io::BufWriter::new(file);
+        let mut buf: Vec<u8> = Vec::new();
+        self.write_tes4(&mut buf)?;
+        writer
+            .write_all(&buf)
+            .map_err(|e| CoreError::Io(bethkit_io::IoError::Io(e)))?;
+        for group in &self.groups {
+            buf.clear();
+            group.write_to(&mut buf);
+            writer
+                .write_all(&buf)
+                .map_err(|e| CoreError::Io(bethkit_io::IoError::Io(e)))?;
+        }
+        writer
+            .flush()
+            .map_err(|e| CoreError::Io(bethkit_io::IoError::Io(e)))
     }
 
     /// Serialises the `TES4` header record into `buf`.

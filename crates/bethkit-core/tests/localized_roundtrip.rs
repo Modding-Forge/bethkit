@@ -98,8 +98,8 @@ fn build_synthetic_localized_plugin() -> (Vec<u8>, LocalizationSet) {
 }
 
 /// Verifies that every translatable string in a localized synthetic plugin
-#[test]
 /// is extracted and resolved against the matching string tables.
+#[test]
 fn extract_strings_resolves_all_subrecords() -> Result<(), Box<dyn std::error::Error>> {
     // given
     let (plugin_bytes, set) = build_synthetic_localized_plugin();
@@ -155,9 +155,9 @@ fn extract_strings_resolves_all_subrecords() -> Result<(), Box<dyn std::error::E
 }
 
 /// Verifies the full translation workflow: build → write tables to disk →
-#[test]
 /// re-open via `LocalizationSet::open` → extract again → bytes match the
 /// edits.
+#[test]
 fn full_localized_roundtrip_via_disk() -> Result<(), Box<dyn std::error::Error>> {
     // given
     let (plugin_bytes, mut set) = build_synthetic_localized_plugin();
@@ -224,8 +224,8 @@ fn full_localized_roundtrip_via_disk() -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// Verifies that a plugin without the `LOCALIZED` flag returns no strings
-#[test]
 /// when `require_localized` is false, and errors when true.
+#[test]
 fn extract_strings_respects_require_localized_flag() -> Result<(), Box<dyn std::error::Error>> {
     // given
     let mut writer = PluginWriter::new(GameContext::sse(), 1.71);

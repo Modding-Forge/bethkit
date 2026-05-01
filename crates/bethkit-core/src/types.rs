@@ -243,6 +243,31 @@ impl GameContext {
         }
     }
 
+    /// Creates a context targeting Skyrim Legendary Edition (Classic).
+    pub fn skyrim_le() -> Self {
+        Self { game: Game::SkyrimLE }
+    }
+
+    /// Creates a context targeting Fallout 4.
+    pub fn fallout4() -> Self {
+        Self { game: Game::Fallout4 }
+    }
+
+    /// Creates a context targeting Starfield.
+    pub fn starfield() -> Self {
+        Self { game: Game::Starfield }
+    }
+
+    /// Creates a context targeting The Elder Scrolls IV: Oblivion.
+    pub fn oblivion() -> Self {
+        Self { game: Game::Oblivion }
+    }
+
+    /// Creates a context targeting The Elder Scrolls III: Morrowind.
+    pub fn morrowind() -> Self {
+        Self { game: Game::Morrowind }
+    }
+
     /// Returns the raw bit mask for the "light plugin" flag in record flags.
     ///
     /// Starfield moved this flag to bit 8; all other supported games use
@@ -272,6 +297,25 @@ impl GameContext {
         matches!(
             self.game,
             Game::SkyrimSE
+                | Game::SkyrimVR
+                | Game::Fallout4
+                | Game::Fallout4VR
+                | Game::Fallout76
+                | Game::Starfield
+        )
+    }
+
+    /// Returns `true` if the game supports string-table localisation.
+    ///
+    /// Skyrim (all editions), Fallout 4 (all editions), Fallout 76, and
+    /// Starfield all use `.STRINGS` / `.DLSTRINGS` / `.ILSTRINGS` sidecar
+    /// files. Earlier games (Morrowind, Oblivion, Fallout 3, Fallout NV) do
+    /// not.
+    pub fn supports_localization(&self) -> bool {
+        matches!(
+            self.game,
+            Game::SkyrimLE
+                | Game::SkyrimSE
                 | Game::SkyrimVR
                 | Game::Fallout4
                 | Game::Fallout4VR
@@ -437,8 +481,8 @@ mod tests {
     }
 
     /// Verifies plugin_kind_from_flags returns Light when the light flag is
-    #[test]
     /// set.
+    #[test]
     fn plugin_kind_light_flag() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given
         let ctx = GameContext::sse();

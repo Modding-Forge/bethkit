@@ -55,6 +55,8 @@ pub struct BethkitFieldValue {
 pub union BethkitFieldValuePayload {
     /// Active when `kind == Int`.
     pub int_val: i64,
+    /// Active when `kind == UInt`.
+    pub uint_val: u64,
     /// Active when `kind == Float`.
     pub float_val: f64,
     /// Active when `kind == Str`.  Borrowed from the owning view.
@@ -403,6 +405,10 @@ fn convert_field_value<'a>(
         FieldValue::Int(v) => BethkitFieldValue {
             kind: BethkitFieldValueKind::Int,
             payload: BethkitFieldValuePayload { int_val: *v },
+        },
+        FieldValue::UInt(v) => BethkitFieldValue {
+            kind: BethkitFieldValueKind::UInt,
+            payload: BethkitFieldValuePayload { uint_val: *v },
         },
         FieldValue::Float(v) => BethkitFieldValue {
             kind: BethkitFieldValueKind::Float,

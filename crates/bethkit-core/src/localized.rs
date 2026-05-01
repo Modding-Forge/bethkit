@@ -339,13 +339,18 @@ fn for_each_record(plugin: &Plugin, mut f: impl FnMut(&Record)) {
 ///
 /// # Errors
 ///
-/// Returns [`CoreError`] if subrecord parsing fails or the plugin is not
-/// localized and `require_localized` is `true`.
+/// Returns [`CoreError::UnsupportedGame`] if the game in `plugin.ctx` does
+/// not support string-table localisation. Returns [`CoreError`] on subrecord
+/// parse failure, or if the plugin is not localised and `require_localized`
+/// is `true`.
 pub fn extract_strings(
     plugin: &Plugin,
     set: &LocalizationSet,
     require_localized: bool,
 ) -> Result<Vec<LocalizedString>> {
+    if !plugin.ctx.supports_localization() {
+        return Err(CoreError::UnsupportedGame(plugin.ctx.game));
+    }
     if !plugin.is_localized() {
         if require_localized {
             return Err(CoreError::LocalizedFlagWithoutTables);
@@ -445,8 +450,8 @@ mod tests {
     use super::*;
 
     /// Verifies that the static subrecord table covers the canonical
-    #[test]
     /// TES5/SSE record types and routes them correctly.
+    #[test]
     fn localized_subrecords_lookup_basic() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given
         let npc: Signature = Signature(*b"NPC_");
@@ -491,8 +496,8 @@ mod tests {
     }
 
     /// Verifies that an empty `LocalizationSet` round-trips through
-    #[test]
     /// `write_to` for all three kinds.
+    #[test]
     fn empty_set_roundtrips() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given
         let set = LocalizationSet::new();

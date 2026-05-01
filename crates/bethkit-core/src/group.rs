@@ -26,7 +26,6 @@ use crate::types::{FormId, GameContext, Signature};
 /// The type of a GRUP record, which determines how the label field is
 /// interpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
 pub enum GroupType {
     /// Top-level group — label is a record signature (e.g. `b"NPC_"`).
     Normal = 0,
@@ -289,9 +288,14 @@ fn parse_children(
         }
     }
 
-    if cursor.pos() != end {
+    if cursor.pos() < end {
         return Err(CoreError::UnexpectedEof {
-            context: "group children misaligned with group_size",
+            context: "group children ended before group boundary",
+        });
+    }
+    if cursor.pos() > end {
+        return Err(CoreError::UnexpectedEof {
+            context: "group children overshot group boundary",
         });
     }
 

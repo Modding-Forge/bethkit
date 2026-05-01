@@ -101,8 +101,8 @@ mod tests {
     }
 
     /// Verifies that the Windows code page identifiers match the historic
-    #[test]
     /// Microsoft definitions.
+    #[test]
     fn windows_ids_are_correct() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given
         let cases: &[(CodePage, u32)] = &[

@@ -537,10 +537,10 @@ fn print_plugin_summary() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Verifies that running a no-op `PluginPatcher` over every real plugin
-#[test]
 /// produces a byte-identical copy of the original file. This is the
 /// foundational invariant for the streaming-rewrite approach used by
 /// localised-string roundtrip in Phase 3.
+#[test]
 fn no_op_patcher_is_byte_identical_for_all_plugins() -> Result<(), Box<dyn std::error::Error>> {
     // given
     let paths = collect_testdata();
