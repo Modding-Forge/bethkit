@@ -72,13 +72,15 @@ impl SubRecord {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Io`] if the data is not exactly 1 byte.
+    /// Returns [`CoreError::InvalidEncoding`] if the data is not exactly 1 byte.
     pub fn as_u8(&self) -> Result<u8> {
         let bytes: &[u8] = self.as_bytes();
         if bytes.len() != 1 {
-            return Err(CoreError::Io(bethkit_io::IoError::UnexpectedEof {
-                offset: 0,
-            }));
+            return Err(CoreError::InvalidEncoding(format!(
+                "expected 1 byte for {} subrecord, got {}",
+                self.signature,
+                bytes.len()
+            )));
         }
         Ok(bytes[0])
     }
@@ -87,12 +89,16 @@ impl SubRecord {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Io`] if the data is not exactly 2 bytes.
+    /// Returns [`CoreError::InvalidEncoding`] if the data is not exactly 2 bytes.
     pub fn as_u16(&self) -> Result<u16> {
         let bytes: &[u8] = self.as_bytes();
-        let arr: [u8; 2] = bytes
-            .try_into()
-            .map_err(|_| CoreError::Io(bethkit_io::IoError::UnexpectedEof { offset: 0 }))?;
+        let arr: [u8; 2] = bytes.try_into().map_err(|_| {
+            CoreError::InvalidEncoding(format!(
+                "expected 2 bytes for {} subrecord, got {}",
+                self.signature,
+                bytes.len()
+            ))
+        })?;
         Ok(u16::from_le_bytes(arr))
     }
 
@@ -100,12 +106,16 @@ impl SubRecord {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Io`] if the data is not exactly 4 bytes.
+    /// Returns [`CoreError::InvalidEncoding`] if the data is not exactly 4 bytes.
     pub fn as_u32(&self) -> Result<u32> {
         let bytes: &[u8] = self.as_bytes();
-        let arr: [u8; 4] = bytes
-            .try_into()
-            .map_err(|_| CoreError::Io(bethkit_io::IoError::UnexpectedEof { offset: 0 }))?;
+        let arr: [u8; 4] = bytes.try_into().map_err(|_| {
+            CoreError::InvalidEncoding(format!(
+                "expected 4 bytes for {} subrecord, got {}",
+                self.signature,
+                bytes.len()
+            ))
+        })?;
         Ok(u32::from_le_bytes(arr))
     }
 
@@ -113,27 +123,42 @@ impl SubRecord {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Io`] if the data is not exactly 4 bytes.
+    /// Returns [`CoreError::InvalidEncoding`] if the data is not exactly 4 bytes.
     pub fn as_f32(&self) -> Result<f32> {
         let bytes: &[u8] = self.as_bytes();
-        let arr: [u8; 4] = bytes
-            .try_into()
-            .map_err(|_| CoreError::Io(bethkit_io::IoError::UnexpectedEof { offset: 0 }))?;
+        let arr: [u8; 4] = bytes.try_into().map_err(|_| {
+            CoreError::InvalidEncoding(format!(
+                "expected 4 bytes for {} subrecord, got {}",
+                self.signature,
+                bytes.len()
+            ))
+        })?;
         Ok(f32::from_le_bytes(arr))
     }
 
     /// Interprets the data as a NUL-terminated UTF-8 string.
     ///
-    /// Trailing NUL bytes are stripped. The returned slice borrows from `self`.
+    /// All trailing NUL bytes are stripped. The returned slice borrows from
+    /// `self`.
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Io`] if the bytes are not valid UTF-8.
+    /// Returns [`CoreError::InvalidEncoding`] if the bytes are not valid UTF-8.
     pub fn as_zstring(&self) -> Result<&str> {
         let bytes: &[u8] = self.as_bytes();
-        let trimmed: &[u8] = bytes.strip_suffix(&[0]).unwrap_or(bytes);
-        std::str::from_utf8(trimmed)
-            .map_err(|e| CoreError::Io(bethkit_io::IoError::Decompress(e.to_string())))
+        let trimmed: &[u8] = {
+            let mut end = bytes.len();
+            while end > 0 && bytes[end - 1] == 0 {
+                end -= 1;
+            }
+            &bytes[..end]
+        };
+        std::str::from_utf8(trimmed).map_err(|e| {
+            CoreError::InvalidEncoding(format!(
+                "invalid UTF-8 in {} subrecord: {e}",
+                self.signature
+            ))
+        })
     }
 
     /// Interprets the data as a signed `i8`.
@@ -149,12 +174,16 @@ impl SubRecord {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Io`] if the data is not exactly 2 bytes.
+    /// Returns [`CoreError::InvalidEncoding`] if the data is not exactly 2 bytes.
     pub fn as_i16(&self) -> Result<i16> {
         let bytes: &[u8] = self.as_bytes();
-        let arr: [u8; 2] = bytes
-            .try_into()
-            .map_err(|_| CoreError::Io(bethkit_io::IoError::UnexpectedEof { offset: 0 }))?;
+        let arr: [u8; 2] = bytes.try_into().map_err(|_| {
+            CoreError::InvalidEncoding(format!(
+                "expected 2 bytes for {} subrecord, got {}",
+                self.signature,
+                bytes.len()
+            ))
+        })?;
         Ok(i16::from_le_bytes(arr))
     }
 
@@ -162,12 +191,16 @@ impl SubRecord {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Io`] if the data is not exactly 4 bytes.
+    /// Returns [`CoreError::InvalidEncoding`] if the data is not exactly 4 bytes.
     pub fn as_i32(&self) -> Result<i32> {
         let bytes: &[u8] = self.as_bytes();
-        let arr: [u8; 4] = bytes
-            .try_into()
-            .map_err(|_| CoreError::Io(bethkit_io::IoError::UnexpectedEof { offset: 0 }))?;
+        let arr: [u8; 4] = bytes.try_into().map_err(|_| {
+            CoreError::InvalidEncoding(format!(
+                "expected 4 bytes for {} subrecord, got {}",
+                self.signature,
+                bytes.len()
+            ))
+        })?;
         Ok(i32::from_le_bytes(arr))
     }
 
@@ -208,7 +241,12 @@ fn parse_subrecords(data: Arc<[u8]>) -> Result<Vec<SubRecord>> {
         let raw_size: u16 = cursor.read_u16()?;
 
         if sig == Signature::XXXX {
-            // XXXX always has data_size == 4 and carries a u32 real size.
+            // XXXX always carries exactly 4 bytes containing a u32 real size.
+            if raw_size != 4 {
+                return Err(CoreError::InvalidEncoding(format!(
+                    "XXXX subrecord has unexpected size {raw_size}, expected 4"
+                )));
+            }
             let mut xxxx_cursor: SliceCursor<'_> = cursor.sub_cursor(4)?;
             let real_size: u32 = xxxx_cursor.read_u32()?;
             pending_xxxx_size = Some(real_size);
