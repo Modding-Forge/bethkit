@@ -88,17 +88,38 @@ impl PluginHeader {
     }
 }
 
+/// How the full plugin file bytes are backed in memory.
+///
+/// Abstracts over a live OS memory map and a heap-allocated buffer so that
+/// [`Plugin::from_mapped`] can avoid copying the entire file onto the heap.
+enum PluginSource {
+    /// Bytes backed by an OS memory-mapped file.
+    ///
+    /// The `Arc<MappedFile>` keeps the mapping alive for as long as the
+    /// [`Plugin`] is alive. Byte ranges stored in [`Record::source_range`]
+    /// and [`Group::source_range`] index into these bytes.
+    Mapped(Arc<MappedFile>),
+    /// Bytes already in heap memory (e.g. from [`Plugin::from_bytes`]).
+    InMemory(Arc<[u8]>),
+}
+
+impl PluginSource {
+    /// Returns the full plugin file bytes regardless of backing storage.
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Mapped(m) => m.as_bytes(),
+            Self::InMemory(b) => b,
+        }
+    }
+}
+
 /// A fully parsed Bethesda plugin file (ESP / ESL / ESM).
 pub struct Plugin {
-    /// Keeps the memory-mapped file alive for the lifetime of all borrowed
-    /// slices, preventing the OS mapping from being released while records
-    /// still reference bytes into it. `None` when the plugin was constructed
-    /// from an in-memory byte slice via [`Plugin::from_bytes`].
-    _source: Option<Arc<MappedFile>>,
-    /// Full plugin file bytes. Used by [`crate::PluginPatcher`] to copy
-    /// unmodified records and groups verbatim, and by
-    /// [`Plugin::source_bytes`] for diagnostics.
-    source: Arc<[u8]>,
+    /// Full plugin file bytes. Backed by either an OS memory-mapped file (no
+    /// heap copy when opening from disk) or an in-memory buffer. Keeps the
+    /// backing storage alive for the lifetime of all byte ranges stored in
+    /// [`Record::source_range`] / [`Group::source_range`].
+    source: PluginSource,
     /// Game context used to parse this plugin.
     pub ctx: GameContext,
     /// Parsed plugin header.
@@ -129,8 +150,8 @@ impl Plugin {
 
     /// Parses a plugin from a raw byte slice.
     ///
-    /// Useful for testing or when the data is already in memory. A heap copy
-    /// is made and wrapped in an `Arc<MappedFile>`-equivalent.
+    /// Useful for testing or when plugin data is already in memory. The bytes
+    /// are heap-allocated once; no further copies are made during parsing.
     ///
     /// # Arguments
     ///
@@ -141,21 +162,21 @@ impl Plugin {
     ///
     /// Returns [`CoreError`] on malformed plugin data.
     pub fn from_bytes(data: &[u8], ctx: GameContext) -> Result<Self> {
-        // Write bytes to a temporary in-memory file equivalent by wrapping
-        // them in a cursor directly — no MappedFile needed for in-memory use.
-        // We create a dummy MappedFile wrapper by writing to a temp path.
-        // For testing purposes we parse directly from a cursor here.
         let owned: Arc<[u8]> = Arc::from(data);
         Self::from_arc_bytes(owned, ctx)
     }
 
-    /// Internal: parse from a memory-mapped file.
+    /// Internal: parse from a memory-mapped file without copying the mapping
+    /// to the heap.
     fn from_mapped(source: Arc<MappedFile>, ctx: GameContext) -> Result<Self> {
-        let bytes: Arc<[u8]> = Arc::from(source.as_bytes());
-        let (header, header_range, groups) = Self::parse_bytes(&bytes, &ctx)?;
+        // Parse while borrowing from the mmap; the returned values own their
+        // data and do not borrow from `bytes`, so the borrow ends here.
+        let (header, header_range, groups) = {
+            let bytes: &[u8] = source.as_bytes();
+            Self::parse_bytes(bytes, &ctx)?
+        };
         Ok(Self {
-            _source: Some(source),
-            source: bytes,
+            source: PluginSource::Mapped(source),
             ctx,
             header,
             header_range,
@@ -163,15 +184,12 @@ impl Plugin {
         })
     }
 
-    /// Internal: parse from an `Arc<[u8]>` (used by `from_bytes`).
-    ///
-    /// No `MappedFile` is needed because the data is already owned — records
-    /// hold `Arc<[u8]>` slices into `data`, keeping it alive independently.
+    /// Internal: parse from a heap-allocated `Arc<[u8]>` (used by
+    /// [`Self::from_bytes`]).
     fn from_arc_bytes(data: Arc<[u8]>, ctx: GameContext) -> Result<Self> {
         let (header, header_range, groups) = Self::parse_bytes(&data, &ctx)?;
         Ok(Self {
-            _source: None,
-            source: data,
+            source: PluginSource::InMemory(data),
             ctx,
             header,
             header_range,
@@ -208,12 +226,12 @@ impl Plugin {
     /// Returns the full plugin file bytes.
     ///
     /// Backed by the original memory mapping when the plugin was opened from
-    /// disk via [`Self::open`]; backed by an `Arc<[u8]>` copy when it was
-    /// constructed via [`Self::from_bytes`]. Either way, all
+    /// disk via [`Self::open`]; backed by an `Arc<[u8]>` when constructed via
+    /// [`Self::from_bytes`]. Either way, all
     /// [`crate::Record::source_range`] / [`crate::Group::source_range`]
     /// values are valid indices into this slice.
     pub fn source_bytes(&self) -> &[u8] {
-        &self.source
+        self.source.as_bytes()
     }
 
     /// Returns `true` if the plugin has externalized strings (LOCALIZED flag).

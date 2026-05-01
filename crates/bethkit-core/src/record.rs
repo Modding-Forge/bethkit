@@ -36,12 +36,24 @@ use crate::types::{FormId, GameContext, PluginKind, RecordFlags, Signature};
 
 /// The raw data payload of a subrecord.
 ///
-/// Owned data is produced when the parent record was zlib-compressed and the
-/// subrecords were parsed from the decompressed buffer.
+/// Subrecords parsed from uncompressed (or already-decompressed) records use
+/// the `Borrowed` variant, which shares the parent record's `Arc<[u8]>`
+/// without copying. Only synthesised subrecords that do not originate from a
+/// parsed byte buffer use `Owned`.
 pub enum SubRecordData {
-    /// A zero-copy slice into the original memory-mapped data.
-    Borrowed(Arc<[u8]>),
-    /// Decompressed or otherwise reconstructed data, heap-allocated.
+    /// Zero-copy view into the parent record's data arc.
+    ///
+    /// `data` is the same `Arc` that backs the record; `start` and `end` are
+    /// byte offsets within that arc. No extra allocation is needed.
+    Borrowed {
+        /// The record's data buffer.
+        data: Arc<[u8]>,
+        /// Start byte offset within `data`.
+        start: usize,
+        /// Exclusive end byte offset within `data`.
+        end: usize,
+    },
+    /// Heap-allocated data not derived from a parsed byte buffer.
     Owned(Vec<u8>),
 }
 
@@ -49,7 +61,7 @@ impl SubRecordData {
     /// Returns a byte slice over the subrecord data regardless of variant.
     pub fn as_bytes(&self) -> &[u8] {
         match self {
-            Self::Borrowed(arc) => arc.as_ref(),
+            Self::Borrowed { data, start, end } => &data[*start..*end],
             Self::Owned(vec) => vec.as_slice(),
         }
     }
@@ -259,17 +271,14 @@ fn parse_subrecords(data: Arc<[u8]>) -> Result<Vec<SubRecord>> {
             None => raw_size as usize,
         };
 
-        let slice: &[u8] = cursor.read_slice(data_size)?;
-        // Build a sub-Arc that shares ownership with the record's data Arc.
-        // We copy only the required bytes to avoid lifetime entanglement with
-        // the cursor borrow.
-        // NOTE: A zero-copy approach would require unsafe aliasing; copying
-        //       keeps the API safe and the cost is only paid on first parse.
-        let owned: Vec<u8> = slice.to_vec();
+        let start: usize = cursor.pos();
+        // Advance the cursor; bounds-checking is done here.
+        cursor.read_slice(data_size)?;
+        let end: usize = cursor.pos();
 
         subrecords.push(SubRecord {
             signature: sig,
-            data: SubRecordData::Owned(owned),
+            data: SubRecordData::Borrowed { data: Arc::clone(&data), start, end },
         });
     }
 
