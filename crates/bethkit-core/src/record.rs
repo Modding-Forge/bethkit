@@ -27,6 +27,7 @@
 
 use std::sync::{Arc, OnceLock};
 
+use once_cell::sync::OnceCell;
 use bethkit_io::SliceCursor;
 
 use crate::error::{CoreError, Result};
@@ -326,9 +327,12 @@ enum RecordData {
     /// decompressed).
     Raw(Arc<[u8]>),
     /// Compressed data, with the expected decompressed size stored alongside.
+    /// The decompressed bytes are cached on first access.
     Compressed {
         data: Arc<[u8]>,
         decompressed_size: u32,
+        /// Lazily populated decompressed cache.
+        decompressed: OnceCell<Arc<[u8]>>,
     },
 }
 
@@ -392,6 +396,7 @@ impl Record {
             RecordData::Compressed {
                 data: compressed_payload,
                 decompressed_size,
+                decompressed: OnceCell::new(),
             }
         } else {
             RecordData::Raw(raw_data.into())
@@ -421,11 +426,14 @@ impl Record {
             RecordData::Compressed {
                 data,
                 decompressed_size,
-            } => {
-                let decompressed: Vec<u8> =
-                    bethkit_io::decompress_zlib(data, *decompressed_size as usize)?;
-                Arc::from(decompressed)
-            }
+                decompressed,
+            } => decompressed
+                .get_or_try_init(|| {
+                    let bytes: Vec<u8> =
+                        bethkit_io::decompress_zlib(data, *decompressed_size as usize)?;
+                    Ok::<Arc<[u8]>, CoreError>(Arc::from(bytes))
+                })
+                .map(Arc::clone)?,
         };
 
         let subrecords: Vec<SubRecord> = parse_subrecords(data)?;
@@ -494,9 +502,9 @@ impl Record {
     /// Returns the raw (uncompressed) record data block, **excluding** the
     /// 24-byte header.
     ///
-    /// For compressed records this triggers a decompression on first call;
-    /// the result is *not* cached. For uncompressed records this is a
-    /// zero-copy slice into the parent storage.
+    /// For compressed records the result is cached after the first call;
+    /// subsequent calls return a reference to the cached data at no extra
+    /// cost. For uncompressed records this is a zero-copy slice.
     ///
     /// # Errors
     ///
@@ -507,10 +515,14 @@ impl Record {
             RecordData::Compressed {
                 data,
                 decompressed_size,
+                decompressed,
             } => {
-                let decompressed: Vec<u8> =
-                    bethkit_io::decompress_zlib(data, *decompressed_size as usize)?;
-                Ok(std::borrow::Cow::Owned(decompressed))
+                let cached: &Arc<[u8]> = decompressed.get_or_try_init(|| {
+                    let bytes: Vec<u8> =
+                        bethkit_io::decompress_zlib(data, *decompressed_size as usize)?;
+                    Ok::<Arc<[u8]>, CoreError>(Arc::from(bytes))
+                })?;
+                Ok(std::borrow::Cow::Borrowed(cached.as_ref()))
             }
         }
     }

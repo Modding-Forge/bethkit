@@ -93,7 +93,10 @@ pub extern "C" fn bethkit_plugin_cache_add(
     let inner_plugin = boxed_plugin.inner;
 
     // SAFETY: cache is non-null.
-    unsafe { &mut *cache }.0.add(name_str, inner_plugin);
+    if let Err(e) = unsafe { &mut *cache }.0.add(name_str, inner_plugin) {
+        set_last_error(format!("bethkit_plugin_cache_add: {e}"));
+        return -1;
+    }
     0
 }
 

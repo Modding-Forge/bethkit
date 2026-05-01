@@ -962,7 +962,7 @@ fn live_16_plugin_cache_winning_override() -> Result<(), Box<dyn std::error::Err
     // Load Skyrim.esm into the cache.
     let skyrim = open(&skyrim_path).map_err(|e| e.to_string())?;
     let mut cache = PluginCache::new();
-    cache.add("Skyrim.esm", skyrim);
+    cache.add("Skyrim.esm", skyrim).map_err(|e| e.to_string())?;
     let count_skyrim: usize = cache.record_count();
     eprintln!("  Skyrim.esm records        : {count_skyrim}");
     assert!(count_skyrim > 0, "expected records in Skyrim.esm cache");
@@ -994,7 +994,7 @@ fn live_16_plugin_cache_winning_override() -> Result<(), Box<dyn std::error::Err
     if update_path.exists() {
         match open(&update_path) {
             Ok(update_esm) => {
-                cache.add("Update.esm", update_esm);
+                cache.add("Update.esm", update_esm).map_err(|e| e.to_string())?;
                 let count_with_update: usize = cache.record_count();
                 eprintln!("  With Update.esm           : {count_with_update} records");
                 assert!(

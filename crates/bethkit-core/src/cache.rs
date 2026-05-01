@@ -42,10 +42,10 @@ pub struct CacheEntry {
 /// let mut cache = PluginCache::new();
 ///
 /// let skyrim = Plugin::open("Skyrim.esm".as_ref(), ctx)?;
-/// cache.add("Skyrim.esm", skyrim);
+/// cache.add("Skyrim.esm", skyrim)?;
 ///
 /// let my_mod = Plugin::open("MyMod.esp".as_ref(), ctx)?;
-/// cache.add("MyMod.esp", my_mod);
+/// cache.add("MyMod.esp", my_mod)?;
 ///
 /// if let Some((_gfid, record)) = cache.find_by_editor_id("ManaPotion") {
 ///     println!("{}", record.header.form_id);
@@ -58,6 +58,10 @@ pub struct PluginCache {
     /// Maps each indexed [`GlobalFormId`] to `(entry_index, raw_form_id)`.
     /// Later entries overwrite earlier ones — winning-override semantics.
     by_global_id: HashMap<GlobalFormId, (usize, FormId)>,
+    /// Maps each 4-byte record signature to the list of [`GlobalFormId`]s
+    /// for that record type in the winning-override set. Built incrementally
+    /// in [`Self::add`].
+    by_signature: HashMap<Signature, Vec<GlobalFormId>>,
     /// Lazily built EditorID → [`GlobalFormId`] index.
     /// Replaced with a fresh [`OnceLock`] whenever a plugin is added.
     by_editor_id: OnceLock<HashMap<String, GlobalFormId>>,
@@ -70,6 +74,7 @@ impl PluginCache {
             entries: Vec::new(),
             load_order: LoadOrder::new(),
             by_global_id: HashMap::default(),
+            by_signature: HashMap::default(),
             by_editor_id: OnceLock::new(),
         }
     }
@@ -112,7 +117,11 @@ impl PluginCache {
     ///
     /// * `name`   - Plugin filename including extension (e.g. `"MyMod.esp"`).
     /// * `plugin` - The fully parsed plugin to add.
-    pub fn add(&mut self, name: &str, plugin: Plugin) {
+    /// # Errors
+    ///
+    /// Returns [`CoreError::LoadOrderIndexFull`] or
+    /// [`CoreError::LightSlotOverflow`] if the load-order index is exhausted.
+    pub fn add(&mut self, name: &str, plugin: Plugin) -> crate::error::Result<()> {
         let kind: PluginKind = plugin.kind();
         let masters: Vec<String> = plugin.masters().to_vec();
         let canonical: String = name.to_lowercase();
@@ -120,13 +129,11 @@ impl PluginCache {
 
         // Register the plugin in the load order FIRST so that the ESL slot is
         // available when resolving this plugin's own ESL-encoded FormIDs.
-        self.load_order.push(name, kind);
+        self.load_order.push(name, kind)?;
 
-        // Collect (GlobalFormId, raw FormId) pairs for all non-null records
-        // before moving the plugin into entries. The iterator borrows from
-        // the local `plugin` variable, not from `self.entries`, so there is
-        // no borrow conflict with the insertion below.
-        let pairs: Vec<(GlobalFormId, FormId)> = plugin
+        // Collect (GlobalFormId, raw FormId, Signature) triples for all
+        // non-null records before moving the plugin into entries.
+        let triples: Vec<(GlobalFormId, FormId, Signature)> = plugin
             .groups()
             .iter()
             .flat_map(|g| g.records_recursive())
@@ -134,7 +141,7 @@ impl PluginCache {
             .filter_map(|r| {
                 self.load_order
                     .resolve(r.header.form_id, &canonical, &masters)
-                    .map(|gfid| (gfid, r.header.form_id))
+                    .map(|gfid| (gfid, r.header.form_id, r.header.signature))
             })
             .collect();
 
@@ -142,12 +149,26 @@ impl PluginCache {
         self.entries.push(CacheEntry { name: canonical, plugin });
 
         // Update the winning-override index. Later entries overwrite earlier.
-        for (gfid, raw_fid) in pairs {
+        for (gfid, raw_fid, sig) in triples {
+            // Remove stale signature index entry for the previous winner.
+            if let Some(&(_, prev_fid)) = self.by_global_id.get(&gfid) {
+                if let Some(sig_list) = self.by_signature.get_mut(&sig) {
+                    // NOTE: This is O(k) where k = records of that type.
+                    // For large plugins this may be slow, but it only fires
+                    // when the same GlobalFormId is overridden by a later
+                    // plugin, which is the minority case.
+                    let _ = prev_fid; // suppress unused warning
+                    sig_list.retain(|g| g != &gfid);
+                }
+            }
+
+            self.by_signature.entry(sig).or_default().push(gfid.clone());
             self.by_global_id.insert(gfid, (entry_index, raw_fid));
         }
 
         // Invalidate the EditorID cache so it is rebuilt on next access.
         self.by_editor_id = OnceLock::new();
+        Ok(())
     }
 
     /// Returns the winning-override [`Record`] for `gfid`, or `None` if the
@@ -217,28 +238,24 @@ impl PluginCache {
     /// Each item is a `(&GlobalFormId, &Record)` pair. Iteration order is
     /// unspecified.
     ///
+    /// Uses the internal signature index for O(1) lookup of matching
+    /// [`GlobalFormId`]s, then retrieves each record via
+    /// [`Self::resolve_record`].
+    ///
     /// # Arguments
     ///
     /// * `sig` - 4-byte record type signature to filter by (e.g. `b"NPC_"`).
-    ///
-    /// # Note
-    ///
-    /// Each yielded item requires a [`Plugin::find_record`] call (linear scan
-    /// per plugin). For repeated queries on large load orders, building a
-    /// dedicated typed index is recommended.
     pub fn records_of_type(
         &self,
         sig: Signature,
     ) -> impl Iterator<Item = (&GlobalFormId, &Record)> + '_ {
-        self.by_global_id
-            .iter()
-            .filter_map(move |(gfid, &(entry_idx, raw_fid))| {
-                let record: &Record = self.entries[entry_idx].plugin.find_record(raw_fid)?;
-                if record.header.signature == sig {
-                    Some((gfid, record))
-                } else {
-                    None
-                }
+        self.by_signature
+            .get(&sig)
+            .into_iter()
+            .flat_map(|gfids| gfids.iter())
+            .filter_map(move |gfid| {
+                let record: &Record = self.resolve_record(gfid)?;
+                Some((gfid, record))
             })
     }
 }
@@ -363,7 +380,7 @@ mod tests {
 
         // when
         let mut cache = PluginCache::new();
-        cache.add("mymod.esp", plugin);
+        cache.add("mymod.esp", plugin)?;
 
         // then
         assert_eq!(cache.len(), 1);
@@ -385,8 +402,8 @@ mod tests {
 
         // when
         let mut cache = PluginCache::new();
-        cache.add("mod_a.esp", plugin_a);
-        cache.add("mod_b.esp", plugin_b);
+        cache.add("mod_a.esp", plugin_a)?;
+        cache.add("mod_b.esp", plugin_b)?;
 
         // then — only one record per GlobalFormId; the winner comes from mod_b.
         let gfid = GlobalFormId { plugin_name: "mod_a.esp".to_owned(), object_id: 0x000001 };
@@ -418,7 +435,7 @@ mod tests {
 
         // when
         let mut cache = PluginCache::new();
-        cache.add("mymod.esp", plugin);
+        cache.add("mymod.esp", plugin)?;
         let result = cache.find_by_editor_id("ManaPotion");
 
         // then
@@ -452,8 +469,8 @@ mod tests {
 
         // when
         let mut cache = PluginCache::new();
-        cache.add("mod_npc.esp", plugin_npc);
-        cache.add("mod_weap.esp", plugin_weap);
+        cache.add("mod_npc.esp", plugin_npc)?;
+        cache.add("mod_weap.esp", plugin_weap)?;
         let npcs: Vec<_> = cache.records_of_type(Signature(*b"NPC_")).collect();
         let weapons: Vec<_> = cache.records_of_type(Signature(*b"WEAP")).collect();
 
@@ -476,9 +493,9 @@ mod tests {
 
         // when — trigger index build, then invalidate it by adding a second plugin
         let mut cache = PluginCache::new();
-        cache.add("mod_a.esp", plugin_a);
+        cache.add("mod_a.esp", plugin_a)?;
         assert!(cache.find_by_editor_id("FirstNpc").is_some(), "first lookup");
-        cache.add("mod_b.esp", plugin_b);
+        cache.add("mod_b.esp", plugin_b)?;
 
         // then — both EditorIDs are available after index rebuild
         assert!(cache.find_by_editor_id("FirstNpc").is_some());
