@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! XXXL live integration + benchmark suite against a real Skyrim Special Edition
 //! game installation with a full mod list.
@@ -32,10 +32,7 @@ use bethkit_core::{
     Signature,
 };
 
-
-const DEFAULT_DATA_DIR: &str =
-    r"E:\SteamLibrary\steamapps\common\Skyrim Special Edition\Data";
-
+const DEFAULT_DATA_DIR: &str = r"E:\SteamLibrary\steamapps\common\Skyrim Special Edition\Data";
 
 /// Locates the Skyrim SE Data directory.
 ///
@@ -47,7 +44,10 @@ fn find_data_dir() -> Option<PathBuf> {
         if p.exists() {
             return Some(p);
         }
-        eprintln!("SKYRIM_DATA_DIR is set but path does not exist: {}", p.display());
+        eprintln!(
+            "SKYRIM_DATA_DIR is set but path does not exist: {}",
+            p.display()
+        );
         return None;
     }
 
@@ -81,8 +81,7 @@ fn collect_plugins(dir: &Path) -> Vec<PathBuf> {
 
 /// Opens a plugin with SSE context, returning an error message on failure.
 fn open(path: &Path) -> Result<Plugin, String> {
-    Plugin::open(path, GameContext::sse())
-        .map_err(|e| format!("{}: {e}", path.display()))
+    Plugin::open(path, GameContext::sse()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Prints a section banner to stderr.
@@ -113,7 +112,6 @@ fn fmt_mbps(bytes: u64, elapsed: Duration) -> String {
     }
     format!("{:.1} MB/s", bytes as f64 / (1u64 << 20) as f64 / secs)
 }
-
 
 /// Verifies that the live Skyrim SE data directory is readable and contains
 /// a plausible number of plugin files.
@@ -150,18 +148,26 @@ fn live_01_dataset_discovery() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  ESM      : {esm}");
     eprintln!("  ESP      : {esp}");
     eprintln!("  ESL      : {esl}");
-    eprintln!("  Total    : {} files  ({})", paths.len(), fmt_bytes(total_bytes));
+    eprintln!(
+        "  Total    : {} files  ({})",
+        paths.len(),
+        fmt_bytes(total_bytes)
+    );
 
     // Sanity: at minimum Skyrim.esm must exist.
     assert!(
-        paths.iter().any(|p| p.file_name().map(|n| n == "Skyrim.esm").unwrap_or(false)),
+        paths
+            .iter()
+            .any(|p| p.file_name().map(|n| n == "Skyrim.esm").unwrap_or(false)),
         "Skyrim.esm not found in Data directory"
     );
-    assert!(paths.len() >= 5, "too few plugin files — expected at least 5");
+    assert!(
+        paths.len() >= 5,
+        "too few plugin files — expected at least 5"
+    );
 
     Ok(())
 }
-
 
 /// Every `.esp` / `.esm` / `.esl` file in the Data directory must parse
 /// without returning an error.
@@ -198,7 +204,6 @@ fn live_02_all_plugins_open() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 /// All record signatures across every plugin must consist exclusively of
 /// ASCII alphanumeric bytes or `_`.
 #[test]
@@ -218,10 +223,16 @@ fn live_03_all_signatures_are_valid_ascii() -> Result<(), Box<dyn std::error::Er
             for record in group.records_recursive() {
                 total_records += 1;
                 let sig = record.header.signature;
-                if !sig.0.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+                if !sig
+                    .0
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                {
                     bad.push(format!(
                         "{}: invalid signature {sig} at FormID {:08X}",
-                        path.file_name().expect("path ends in file name").to_string_lossy(),
+                        path.file_name()
+                            .expect("path ends in file name")
+                            .to_string_lossy(),
                         record.header.form_id.0,
                     ));
                 }
@@ -239,7 +250,6 @@ fn live_03_all_signatures_are_valid_ascii() -> Result<(), Box<dyn std::error::Er
 
     Ok(())
 }
-
 
 /// Every plugin must have a recognised PluginKind, and `.esm` files must
 /// not be detected as the Starfield-only `Update` variant.
@@ -268,7 +278,12 @@ fn live_04_plugin_kinds_are_valid() -> Result<(), Box<dyn std::error::Error>> {
 
         let ext = path.extension().map(|e| e.to_ascii_lowercase());
         if ext.map(|e| e == "esm").unwrap_or(false) && kind == PluginKind::Update {
-            bad_update_esm.push(path.file_name().expect("path ends in file name").to_string_lossy().into_owned());
+            bad_update_esm.push(
+                path.file_name()
+                    .expect("path ends in file name")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
     }
 
@@ -280,12 +295,14 @@ fn live_04_plugin_kinds_are_valid() -> Result<(), Box<dyn std::error::Error>> {
         for f in &bad_update_esm {
             eprintln!("  WARN: {f} detected as Update-kind (unexpected for SSE)");
         }
-        panic!("{} .esm file(s) incorrectly detected as Update kind", bad_update_esm.len());
+        panic!(
+            "{} .esm file(s) incorrectly detected as Update kind",
+            bad_update_esm.len()
+        );
     }
 
     Ok(())
 }
-
 
 /// The HEDR version float must be positive and finite for every plugin.
 #[test]
@@ -306,7 +323,9 @@ fn live_05_hedr_versions_are_valid() -> Result<(), Box<dyn std::error::Error>> {
         if !v.is_finite() || v <= 0.0 {
             bad.push(format!(
                 "{}: invalid HEDR version {v}",
-                path.file_name().expect("path ends in file name").to_string_lossy()
+                path.file_name()
+                    .expect("path ends in file name")
+                    .to_string_lossy()
             ));
         }
     }
@@ -330,7 +349,6 @@ fn live_05_hedr_versions_are_valid() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 /// All MAST subrecords must be non-empty, printable ASCII strings.
 #[test]
 fn live_06_master_filenames_are_valid() -> Result<(), Box<dyn std::error::Error>> {
@@ -353,7 +371,9 @@ fn live_06_master_filenames_are_valid() -> Result<(), Box<dyn std::error::Error>
             if m.is_empty() || !m.is_ascii() {
                 bad.push(format!(
                     "{}: invalid master {:?}",
-                    path.file_name().expect("path ends in file name").to_string_lossy(),
+                    path.file_name()
+                        .expect("path ends in file name")
+                        .to_string_lossy(),
                     m
                 ));
             }
@@ -376,7 +396,6 @@ fn live_06_master_filenames_are_valid() -> Result<(), Box<dyn std::error::Error>
 
     Ok(())
 }
-
 
 /// Triggering lazy subrecord parsing on every record across every plugin
 /// must not return an error.
@@ -402,7 +421,9 @@ fn live_07_all_subrecords_parse() -> Result<(), Box<dyn std::error::Error>> {
                     Err(e) => {
                         failures.push(format!(
                             "{}: FormID {:08X} ({}) parse failed: {e}",
-                            path.file_name().expect("path ends in file name").to_string_lossy(),
+                            path.file_name()
+                                .expect("path ends in file name")
+                                .to_string_lossy(),
                             record.header.form_id.0,
                             record.header.signature,
                         ));
@@ -425,7 +446,6 @@ fn live_07_all_subrecords_parse() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 /// Every EDID (Editor ID) subrecord must decode to a valid UTF-8 string.
 #[test]
 fn live_08_edid_subrecords_are_valid_utf8() -> Result<(), Box<dyn std::error::Error>> {
@@ -444,14 +464,18 @@ fn live_08_edid_subrecords_are_valid_utf8() -> Result<(), Box<dyn std::error::Er
         let Ok(plugin) = open(path) else { continue };
         for group in plugin.groups() {
             for record in group.records_recursive() {
-                let Ok(Some(sr)) = record.get(sig_edid) else { continue };
+                let Ok(Some(sr)) = record.get(sig_edid) else {
+                    continue;
+                };
                 edid_count += 1;
                 match sr.as_zstring() {
                     Ok(s) => max_len = max_len.max(s.len()),
                     Err(e) => {
                         failures.push(format!(
                             "{}: FormID {:08X} EDID decode failed: {e}",
-                            path.file_name().expect("path ends in file name").to_string_lossy(),
+                            path.file_name()
+                                .expect("path ends in file name")
+                                .to_string_lossy(),
                             record.header.form_id.0,
                         ));
                     }
@@ -470,7 +494,6 @@ fn live_08_edid_subrecords_are_valid_utf8() -> Result<(), Box<dyn std::error::Er
 
     Ok(())
 }
-
 
 /// Every compressed record (COMPRESSED flag set) must decompress without
 /// error and produce a non-empty subrecord list.
@@ -498,7 +521,9 @@ fn live_09_compressed_records_decompress() -> Result<(), Box<dyn std::error::Err
                 if let Err(e) = record.subrecords() {
                     failures.push(format!(
                         "{}: FormID {:08X} ({}) decompression failed: {e}",
-                        path.file_name().expect("path ends in file name").to_string_lossy(),
+                        path.file_name()
+                            .expect("path ends in file name")
+                            .to_string_lossy(),
                         record.header.form_id.0,
                         record.header.signature,
                     ));
@@ -512,20 +537,20 @@ fn live_09_compressed_records_decompress() -> Result<(), Box<dyn std::error::Err
     } else {
         0.0
     };
-    eprintln!(
-        "  Compressed : {compressed_count} / {total_records} records  ({pct:.1}%)"
-    );
+    eprintln!("  Compressed : {compressed_count} / {total_records} records  ({pct:.1}%)");
 
     if !failures.is_empty() {
         for f in failures.iter().take(20) {
             eprintln!("  FAIL: {f}");
         }
-        panic!("{} compressed record(s) failed to decompress", failures.len());
+        panic!(
+            "{} compressed record(s) failed to decompress",
+            failures.len()
+        );
     }
 
     Ok(())
 }
-
 
 /// Collects flag distribution across all records. Does not fail — flags are
 /// informational only.
@@ -576,7 +601,6 @@ fn live_10_record_flag_inventory() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 /// Measures what fraction of record types encountered in the wild are
 /// covered by our SSE schema registry.
 #[test]
@@ -616,9 +640,7 @@ fn live_11_schema_coverage() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("  Schema registry size     : {}", reg.len());
     eprintln!("  Distinct record types    : {total_distinct} found in wild");
-    eprintln!(
-        "  Type coverage            : {covered_count} / {total_distinct}  ({type_pct:.1}%)"
-    );
+    eprintln!("  Type coverage            : {covered_count} / {total_distinct}  ({type_pct:.1}%)");
     eprintln!(
         "  Record coverage          : {covered_records} / {total_records}  ({coverage_pct:.1}%)"
     );
@@ -639,7 +661,6 @@ fn live_11_schema_coverage() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
 
 /// Runs RecordView field decoding against all ESM master files (`.esm`).
 ///
@@ -704,7 +725,9 @@ fn live_12_schema_field_decode() -> Result<(), Box<dyn std::error::Error>> {
                         if decode_error_samples.len() < 50 {
                             decode_error_samples.push(format!(
                                 "{}: {} FormID {:08X}: {e}",
-                                path.file_name().expect("path ends in file name").to_string_lossy(),
+                                path.file_name()
+                                    .expect("path ends in file name")
+                                    .to_string_lossy(),
                                 record.header.signature,
                                 record.header.form_id.0,
                             ));
@@ -737,7 +760,6 @@ fn live_12_schema_field_decode() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 /// Performs a thorough analysis of `Skyrim.esm` — the largest and most
 /// complex plugin in the base game — and prints a detailed breakdown.
 #[test]
@@ -748,7 +770,11 @@ fn live_13_skyrim_esm_deep_analysis() -> Result<(), Box<dyn std::error::Error>> 
     banner("SKYRIM.ESM DEEP ANALYSIS");
 
     let esm_path = dir.join("Skyrim.esm");
-    assert!(esm_path.exists(), "Skyrim.esm not found at {}", esm_path.display());
+    assert!(
+        esm_path.exists(),
+        "Skyrim.esm not found at {}",
+        esm_path.display()
+    );
 
     let file_size = std::fs::metadata(&esm_path)?.len();
     eprintln!("  File size : {}", fmt_bytes(file_size));
@@ -807,11 +833,13 @@ fn live_13_skyrim_esm_deep_analysis() -> Result<(), Box<dyn std::error::Error>> 
         eprintln!("    {}  {:>8}  ({pct:4.1}%)", Signature(*sig), count);
     }
 
-    assert_eq!(failed_subrecords, 0, "Skyrim.esm had subrecord parse failures");
+    assert_eq!(
+        failed_subrecords, 0,
+        "Skyrim.esm had subrecord parse failures"
+    );
 
     Ok(())
 }
-
 
 /// Collects group type statistics across all plugins and validates that no
 /// unknown group type (outside 0-9) appears in SSE plugins.
@@ -836,7 +864,7 @@ fn live_14_group_type_distribution() -> Result<(), Box<dyn std::error::Error>> {
         let raw: i32 = group.header.group_type as i32;
         *counts.entry(raw).or_default() += 1;
         if !(0..=9).contains(&raw) && unknowns.len() < 20 {
-                unknowns.push(format!("{path_name}: unknown group type {raw}"));
+            unknowns.push(format!("{path_name}: unknown group type {raw}"));
         }
         for child in group.children() {
             if let GroupChild::Group(sub) = child {
@@ -847,7 +875,11 @@ fn live_14_group_type_distribution() -> Result<(), Box<dyn std::error::Error>> {
 
     for path in &paths {
         let Ok(plugin) = open(path) else { continue };
-        let name = path.file_name().expect("path ends in file name").to_string_lossy().into_owned();
+        let name = path
+            .file_name()
+            .expect("path ends in file name")
+            .to_string_lossy()
+            .into_owned();
         for group in plugin.groups() {
             count_group(group, &mut type_counts, &mut unknown_types, &name);
         }
@@ -881,7 +913,6 @@ fn live_14_group_type_distribution() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 /// Picks the first record from each base game ESM and verifies that
 /// `find_record` returns the same record by FormID.
 #[test]
@@ -910,8 +941,11 @@ fn live_15_find_record_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         };
 
-        let Some(first_record) =
-            plugin.groups().iter().flat_map(|g| g.records_recursive()).next()
+        let Some(first_record) = plugin
+            .groups()
+            .iter()
+            .flat_map(|g| g.records_recursive())
+            .next()
         else {
             eprintln!("  SKIP {esm_name}: no records found");
             continue;
@@ -934,7 +968,6 @@ fn live_15_find_record_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
 
 /// Loads the five base-game ESMs into a [`PluginCache`] in canonical load order
 /// Loads Skyrim.esm into a [`PluginCache`] and verifies winning-override
@@ -994,7 +1027,9 @@ fn live_16_plugin_cache_winning_override() -> Result<(), Box<dyn std::error::Err
     if update_path.exists() {
         match open(&update_path) {
             Ok(update_esm) => {
-                cache.add("Update.esm", update_esm).map_err(|e| e.to_string())?;
+                cache
+                    .add("Update.esm", update_esm)
+                    .map_err(|e| e.to_string())?;
                 let count_with_update: usize = cache.record_count();
                 eprintln!("  With Update.esm           : {count_with_update} records");
                 assert!(
@@ -1008,7 +1043,6 @@ fn live_16_plugin_cache_winning_override() -> Result<(), Box<dyn std::error::Err
 
     Ok(())
 }
-
 
 /// Measures the wall-clock time to open and fully iterate (with subrecord
 /// parse) every ESM file in the Data directory.
@@ -1066,7 +1100,6 @@ fn bench_a_all_esm_full_parse() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 /// Measures how long it takes to open and fully parse Skyrim.esm three
 /// times back-to-back to capture OS page-cache warm-up effects.
 #[test]
@@ -1106,7 +1139,6 @@ fn bench_b_skyrim_esm_repeated_parse() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-
 /// Measures raw schema registry lookup speed with 10 million iterations.
 #[test]
 fn bench_c_schema_lookup_speed() -> Result<(), Box<dyn std::error::Error>> {
@@ -1144,7 +1176,6 @@ fn bench_c_schema_lookup_speed() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 /// Measures EDID decode throughput across all ESM files.
 #[test]
 fn bench_d_edid_decode_throughput() -> Result<(), Box<dyn std::error::Error>> {
@@ -1168,7 +1199,9 @@ fn bench_d_edid_decode_throughput() -> Result<(), Box<dyn std::error::Error>> {
         let Ok(plugin) = open(path) else { continue };
         for group in plugin.groups() {
             for record in group.records_recursive() {
-                let Ok(Some(sr)) = record.get(sig_edid) else { continue };
+                let Ok(Some(sr)) = record.get(sig_edid) else {
+                    continue;
+                };
                 edid_count += 1;
                 edid_bytes += sr.as_bytes().len() as u64;
                 if sr.as_zstring().is_err() {
@@ -1190,7 +1223,6 @@ fn bench_d_edid_decode_throughput() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
 
 /// Measures how fast we can open and read just the headers of all 2000+
 /// plugins (no group/record iteration).
@@ -1232,7 +1264,6 @@ fn bench_e_all_plugins_header_only() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 /// Opens Skyrim.esm and runs RecordView field decoding over every record
 /// with schema coverage.  Reports throughput.
 #[test]
@@ -1259,7 +1290,9 @@ fn bench_f_skyrim_esm_full_field_decode() -> Result<(), Box<dyn std::error::Erro
     let t0 = Instant::now();
     for group in plugin.groups() {
         for record in group.records_recursive() {
-            let Some(schema) = reg.get(record.header.signature) else { continue };
+            let Some(schema) = reg.get(record.header.signature) else {
+                continue;
+            };
             records_decoded += 1;
             let view = RecordView::new(record, schema, plugin_localized);
             match view.fields() {
@@ -1283,7 +1316,6 @@ fn bench_f_skyrim_esm_full_field_decode() -> Result<(), Box<dyn std::error::Erro
 
     Ok(())
 }
-
 
 /// Measures decompression throughput across all compressed records in all
 /// ESM files.
@@ -1332,7 +1364,6 @@ fn bench_g_decompression_throughput() -> Result<(), Box<dyn std::error::Error>> 
 
     Ok(())
 }
-
 
 /// The ultimate throughput number: open + iterate all records + parse all
 /// subrecords across every plugin in a single sequential pass.

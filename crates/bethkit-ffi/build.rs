@@ -16,10 +16,8 @@ fn main() {
 
 #[cfg(feature = "generate-header")]
 fn generate_header() {
-    let crate_dir =
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    let out_dir =
-        std::env::var("OUT_DIR").expect("OUT_DIR not set");
+    let crate_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
 
     // Write into target/ first to avoid Windows file-lock issues when
     // editors have the source-tree copy open.

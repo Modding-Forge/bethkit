@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Schema definitions for world / environment SSE record types.
 //!
@@ -12,7 +12,6 @@ use super::common::{
     DESC_DEF, EDID_DEF, FULL_DEF, KSIZ_DEF, KWDA_DEF, MODL_DEF, OBND_DEF, RNAM_DEF, VMAD_DEF,
 };
 use crate::schema::enums::{CELL_FLAGS, LIGHT_FLAGS, SOUND_LEVEL_ENUM, WEATHER_CLASS_ENUM};
-
 
 static ACTI_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
@@ -38,7 +37,6 @@ pub static ACTI_SCHEMA: RecordSchema = RecordSchema {
     members: &ACTI_MEMBERS,
 };
 
-
 static TACT_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
     VMAD_DEF,
@@ -63,10 +61,15 @@ pub static TACT_SCHEMA: RecordSchema = RecordSchema {
     members: &TACT_MEMBERS,
 };
 
-
 static STAT_DNAM_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Max Angle", kind: FieldType::Float32 },
-    FieldDef { name: "Material", kind: FieldType::FormIdTyped(&[Signature(*b"MATO")]) },
+    FieldDef {
+        name: "Max Angle",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Material",
+        kind: FieldType::FormIdTyped(&[Signature(*b"MATO")]),
+    },
 ];
 
 static STAT_MEMBERS: [SubRecordDef; 5] = [
@@ -98,16 +101,39 @@ pub static STAT_SCHEMA: RecordSchema = RecordSchema {
     members: &STAT_MEMBERS,
 };
 
-
 static GRAS_DATA_FIELDS: [FieldDef; 8] = [
-    FieldDef { name: "Density", kind: FieldType::UInt8 },
-    FieldDef { name: "Min Slope", kind: FieldType::UInt8 },
-    FieldDef { name: "Max Slope", kind: FieldType::UInt8 },
-    FieldDef { name: "Unknown", kind: FieldType::UInt8 },
-    FieldDef { name: "Units From Water Amt", kind: FieldType::UInt16 },
-    FieldDef { name: "Pad", kind: FieldType::UInt16 },
-    FieldDef { name: "Units From Water Type", kind: FieldType::UInt32 },
-    FieldDef { name: "Position Range", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Density",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Min Slope",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Max Slope",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Units From Water Amt",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Pad",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Units From Water Type",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Position Range",
+        kind: FieldType::Float32,
+    },
 ];
 
 static GRAS_MEMBERS: [SubRecordDef; 4] = [
@@ -130,14 +156,31 @@ pub static GRAS_SCHEMA: RecordSchema = RecordSchema {
     members: &GRAS_MEMBERS,
 };
 
-
 static TREE_CNAM_FIELDS: [FieldDef; 6] = [
-    FieldDef { name: "Trunk Flexibility", kind: FieldType::Float32 },
-    FieldDef { name: "Branch Flexibility", kind: FieldType::Float32 },
-    FieldDef { name: "Trunk Amplitude", kind: FieldType::Float32 },
-    FieldDef { name: "Front Amplitude", kind: FieldType::Float32 },
-    FieldDef { name: "Back Amplitude", kind: FieldType::Float32 },
-    FieldDef { name: "Side Amplitude", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Trunk Flexibility",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Branch Flexibility",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Trunk Amplitude",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Front Amplitude",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Back Amplitude",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Side Amplitude",
+        kind: FieldType::Float32,
+    },
 ];
 
 static TREE_MEMBERS: [SubRecordDef; 5] = [
@@ -149,7 +192,12 @@ static TREE_MEMBERS: [SubRecordDef; 5] = [
         name: "Plant Ingredient",
         required: false,
         repeating: false,
-        field: FieldType::FormIdTyped(&[Signature(*b"INGR"), Signature(*b"ALCH"), Signature(*b"MISC"), Signature(*b"LVLI")]),
+        field: FieldType::FormIdTyped(&[
+            Signature(*b"INGR"),
+            Signature(*b"ALCH"),
+            Signature(*b"MISC"),
+            Signature(*b"LVLI"),
+        ]),
     },
     SubRecordDef {
         sig: Signature(*b"CNAM"),
@@ -167,15 +215,8 @@ pub static TREE_SCHEMA: RecordSchema = RecordSchema {
     members: &TREE_MEMBERS,
 };
 
-
 static FLOR_MEMBERS: [SubRecordDef; 7] = [
-    EDID_DEF,
-    VMAD_DEF,
-    OBND_DEF,
-    FULL_DEF,
-    MODL_DEF,
-    KSIZ_DEF,
-    KWDA_DEF,
+    EDID_DEF, VMAD_DEF, OBND_DEF, FULL_DEF, MODL_DEF, KSIZ_DEF, KWDA_DEF,
 ];
 
 /// FLOR — Flora (harvestable plant).
@@ -184,7 +225,6 @@ pub static FLOR_SCHEMA: RecordSchema = RecordSchema {
     name: "Flora",
     members: &FLOR_MEMBERS,
 };
-
 
 static MSTT_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -206,7 +246,6 @@ pub static MSTT_SCHEMA: RecordSchema = RecordSchema {
     name: "Moveable Static",
     members: &MSTT_MEMBERS,
 };
-
 
 static LTEX_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -233,17 +272,43 @@ pub static LTEX_SCHEMA: RecordSchema = RecordSchema {
     members: &LTEX_MEMBERS,
 };
 
-
 static LIGH_DATA_FIELDS: [FieldDef; 9] = [
-    FieldDef { name: "Time", kind: FieldType::Int32 },
-    FieldDef { name: "Radius", kind: FieldType::UInt32 },
-    FieldDef { name: "Color (RGBA)", kind: FieldType::UInt32 },
-    FieldDef { name: "Flags", kind: FieldType::Flags(&LIGHT_FLAGS) },
-    FieldDef { name: "Falloff Exp", kind: FieldType::Float32 },
-    FieldDef { name: "FOV", kind: FieldType::Float32 },
-    FieldDef { name: "Near Clip", kind: FieldType::Float32 },
-    FieldDef { name: "Period", kind: FieldType::Float32 },
-    FieldDef { name: "Intensity Amplitude", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Time",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Radius",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Color (RGBA)",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::Flags(&LIGHT_FLAGS),
+    },
+    FieldDef {
+        name: "Falloff Exp",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "FOV",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Near Clip",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Period",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Intensity Amplitude",
+        kind: FieldType::Float32,
+    },
 ];
 
 static LIGH_MEMBERS: [SubRecordDef; 6] = [
@@ -273,7 +338,6 @@ pub static LIGH_SCHEMA: RecordSchema = RecordSchema {
     name: "Light",
     members: &LIGH_MEMBERS,
 };
-
 
 static WATR_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -308,15 +372,35 @@ pub static WATR_SCHEMA: RecordSchema = RecordSchema {
     members: &WATR_MEMBERS,
 };
 
-
 static WTHR_DATA_FIELDS: [FieldDef; 7] = [
-    FieldDef { name: "Wind Speed", kind: FieldType::UInt8 },
-    FieldDef { name: "Wind Angle", kind: FieldType::UInt8 },
-    FieldDef { name: "Trans Delta", kind: FieldType::UInt8 },
-    FieldDef { name: "Sun Glare", kind: FieldType::UInt8 },
-    FieldDef { name: "Sun Damage", kind: FieldType::UInt8 },
-    FieldDef { name: "Precipitation Begin", kind: FieldType::UInt8 },
-    FieldDef { name: "Weather Class", kind: FieldType::Enum(&WEATHER_CLASS_ENUM) },
+    FieldDef {
+        name: "Wind Speed",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Wind Angle",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Trans Delta",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Sun Glare",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Sun Damage",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Precipitation Begin",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Weather Class",
+        kind: FieldType::Enum(&WEATHER_CLASS_ENUM),
+    },
 ];
 
 static WTHR_MEMBERS: [SubRecordDef; 4] = [
@@ -351,11 +435,19 @@ pub static WTHR_SCHEMA: RecordSchema = RecordSchema {
     members: &WTHR_MEMBERS,
 };
 
-
 static CLMT_WLST_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Weather", kind: FieldType::FormIdTyped(&[Signature(*b"WTHR")]) },
-    FieldDef { name: "Chance", kind: FieldType::Int32 },
-    FieldDef { name: "Global", kind: FieldType::FormIdTyped(&[Signature(*b"GLOB")]) },
+    FieldDef {
+        name: "Weather",
+        kind: FieldType::FormIdTyped(&[Signature(*b"WTHR")]),
+    },
+    FieldDef {
+        name: "Chance",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Global",
+        kind: FieldType::FormIdTyped(&[Signature(*b"GLOB")]),
+    },
 ];
 
 static CLMT_MEMBERS: [SubRecordDef; 4] = [
@@ -390,7 +482,6 @@ pub static CLMT_SCHEMA: RecordSchema = RecordSchema {
     members: &CLMT_MEMBERS,
 };
 
-
 static ASPC_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
     OBND_DEF,
@@ -424,13 +515,27 @@ pub static ASPC_SCHEMA: RecordSchema = RecordSchema {
     members: &ASPC_MEMBERS,
 };
 
-
 static ECZN_DATA_FIELDS: [FieldDef; 5] = [
-    FieldDef { name: "Owner", kind: FieldType::FormIdTyped(&[Signature(*b"NPC_"), Signature(*b"FACT")]) },
-    FieldDef { name: "Location", kind: FieldType::FormIdTyped(&[Signature(*b"LCTN")]) },
-    FieldDef { name: "Rank", kind: FieldType::Int8 },
-    FieldDef { name: "Min Level", kind: FieldType::Int8 },
-    FieldDef { name: "Flags", kind: FieldType::UInt8 },
+    FieldDef {
+        name: "Owner",
+        kind: FieldType::FormIdTyped(&[Signature(*b"NPC_"), Signature(*b"FACT")]),
+    },
+    FieldDef {
+        name: "Location",
+        kind: FieldType::FormIdTyped(&[Signature(*b"LCTN")]),
+    },
+    FieldDef {
+        name: "Rank",
+        kind: FieldType::Int8,
+    },
+    FieldDef {
+        name: "Min Level",
+        kind: FieldType::Int8,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt8,
+    },
 ];
 
 static ECZN_MEMBERS: [SubRecordDef; 2] = [
@@ -450,7 +555,6 @@ pub static ECZN_SCHEMA: RecordSchema = RecordSchema {
     name: "Encounter Zone",
     members: &ECZN_MEMBERS,
 };
-
 
 static CELL_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
@@ -506,10 +610,15 @@ pub static CELL_SCHEMA: RecordSchema = RecordSchema {
     members: &CELL_MEMBERS,
 };
 
-
 static WRLD_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Flags", kind: FieldType::UInt8 },
-    FieldDef { name: "Unknown", kind: FieldType::UInt8 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::UInt8,
+    },
 ];
 
 static WRLD_MEMBERS: [SubRecordDef; 9] = [
@@ -567,7 +676,6 @@ pub static WRLD_SCHEMA: RecordSchema = RecordSchema {
     members: &WRLD_MEMBERS,
 };
 
-
 static LAND_MEMBERS: [SubRecordDef; 3] = [
     SubRecordDef {
         sig: Signature(*b"VHGT"),
@@ -598,7 +706,6 @@ pub static LAND_SCHEMA: RecordSchema = RecordSchema {
     name: "Land",
     members: &LAND_MEMBERS,
 };
-
 
 static REGN_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -632,7 +739,6 @@ pub static REGN_SCHEMA: RecordSchema = RecordSchema {
     members: &REGN_MEMBERS,
 };
 
-
 static NAVM_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
     SubRecordDef {
@@ -658,7 +764,6 @@ pub static NAVM_SCHEMA: RecordSchema = RecordSchema {
     members: &NAVM_MEMBERS,
 };
 
-
 static NAVI_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -677,7 +782,6 @@ pub static NAVI_SCHEMA: RecordSchema = RecordSchema {
     members: &NAVI_MEMBERS,
 };
 
-
 static LSCR_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -695,7 +799,6 @@ pub static LSCR_SCHEMA: RecordSchema = RecordSchema {
     name: "Load Screen",
     members: &LSCR_MEMBERS,
 };
-
 
 static LENS_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -721,7 +824,6 @@ pub static LENS_SCHEMA: RecordSchema = RecordSchema {
     name: "Lens Flare",
     members: &LENS_MEMBERS,
 };
-
 
 static VOLI_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,

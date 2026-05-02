@@ -116,13 +116,10 @@ impl Dx10Archive {
                         .try_into()
                         .map_err(|_| BsaError::Corrupt(format!("DX10 chunk {i}/{j}: offset")))?,
                 ) as u64;
-                let packed_size = u32::from_le_bytes(
-                    bytes[pos + 8..pos + 12]
-                        .try_into()
-                        .map_err(|_| {
-                            BsaError::Corrupt(format!("DX10 chunk {i}/{j}: packed_size"))
-                        })?,
-                );
+                let packed_size =
+                    u32::from_le_bytes(bytes[pos + 8..pos + 12].try_into().map_err(|_| {
+                        BsaError::Corrupt(format!("DX10 chunk {i}/{j}: packed_size"))
+                    })?);
                 let size = u32::from_le_bytes(
                     bytes[pos + 12..pos + 16]
                         .try_into()

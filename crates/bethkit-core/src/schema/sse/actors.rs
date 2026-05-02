@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Schema definitions for actor / NPC-related SSE record types.
 //!
@@ -14,17 +14,43 @@ use super::common::{
 };
 use crate::schema::enums::{ACTOR_VALUE_ENUM, NPC_FLAGS, PACKAGE_TYPE_ENUM};
 
-
 static NPC_ACBS_FIELDS: [FieldDef; 9] = [
-    FieldDef { name: "Flags", kind: FieldType::Flags(&NPC_FLAGS) },
-    FieldDef { name: "Magicka Offset", kind: FieldType::Int16 },
-    FieldDef { name: "Stamina Offset", kind: FieldType::Int16 },
-    FieldDef { name: "Level", kind: FieldType::UInt16 },
-    FieldDef { name: "Calc Min Level", kind: FieldType::UInt8 },
-    FieldDef { name: "Calc Max Level", kind: FieldType::UInt8 },
-    FieldDef { name: "Speed Mult", kind: FieldType::UInt16 },
-    FieldDef { name: "Disposition Base", kind: FieldType::Int16 },
-    FieldDef { name: "Template Data Flags", kind: FieldType::UInt16 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::Flags(&NPC_FLAGS),
+    },
+    FieldDef {
+        name: "Magicka Offset",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Stamina Offset",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Level",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Calc Min Level",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Calc Max Level",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Speed Mult",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Disposition Base",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Template Data Flags",
+        kind: FieldType::UInt16,
+    },
 ];
 
 static NPC_MEMBERS: [SubRecordDef; 18] = [
@@ -109,7 +135,6 @@ pub static NPC_SCHEMA: RecordSchema = RecordSchema {
     members: &NPC_MEMBERS,
 };
 
-
 static RACE_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
     FULL_DEF,
@@ -134,12 +159,23 @@ pub static RACE_SCHEMA: RecordSchema = RecordSchema {
     members: &RACE_MEMBERS,
 };
 
-
 static PACK_PKDT_FIELDS: [FieldDef; 4] = [
-    FieldDef { name: "General Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Type", kind: FieldType::Enum(&PACKAGE_TYPE_ENUM) },
-    FieldDef { name: "Interrupt Override", kind: FieldType::UInt8 },
-    FieldDef { name: "Preferred Speed", kind: FieldType::UInt8 },
+    FieldDef {
+        name: "General Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Type",
+        kind: FieldType::Enum(&PACKAGE_TYPE_ENUM),
+    },
+    FieldDef {
+        name: "Interrupt Override",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Preferred Speed",
+        kind: FieldType::UInt8,
+    },
 ];
 
 static PACK_MEMBERS: [SubRecordDef; 5] = [
@@ -169,10 +205,15 @@ pub static PACK_SCHEMA: RecordSchema = RecordSchema {
     members: &PACK_MEMBERS,
 };
 
-
 static FACT_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Unknown", kind: FieldType::UInt8 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::UInt8,
+    },
 ];
 
 static FACT_MEMBERS: [SubRecordDef; 6] = [
@@ -215,7 +256,6 @@ pub static FACT_SCHEMA: RecordSchema = RecordSchema {
     members: &FACT_MEMBERS,
 };
 
-
 static CSTY_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
     SubRecordDef {
@@ -247,7 +287,6 @@ pub static CSTY_SCHEMA: RecordSchema = RecordSchema {
     name: "Combat Style",
     members: &CSTY_MEMBERS,
 };
-
 
 static IDLE_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -282,12 +321,23 @@ pub static IDLE_SCHEMA: RecordSchema = RecordSchema {
     members: &IDLE_MEMBERS,
 };
 
-
 static CLAS_DATA_FIELDS: [FieldDef; 4] = [
-    FieldDef { name: "Unknown", kind: FieldType::Int32 },
-    FieldDef { name: "Training Skill", kind: FieldType::Enum(&ACTOR_VALUE_ENUM) },
-    FieldDef { name: "Training Level", kind: FieldType::UInt8 },
-    FieldDef { name: "Skill Weights", kind: FieldType::ByteArray },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Training Skill",
+        kind: FieldType::Enum(&ACTOR_VALUE_ENUM),
+    },
+    FieldDef {
+        name: "Training Level",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Skill Weights",
+        kind: FieldType::ByteArray,
+    },
 ];
 
 static CLAS_MEMBERS: [SubRecordDef; 4] = [
@@ -309,7 +359,6 @@ pub static CLAS_SCHEMA: RecordSchema = RecordSchema {
     name: "Class",
     members: &CLAS_MEMBERS,
 };
-
 
 static EYES_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -337,7 +386,6 @@ pub static EYES_SCHEMA: RecordSchema = RecordSchema {
     members: &EYES_MEMBERS,
 };
 
-
 static OTFT_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -355,7 +403,6 @@ pub static OTFT_SCHEMA: RecordSchema = RecordSchema {
     name: "Outfit",
     members: &OTFT_MEMBERS,
 };
-
 
 static BPTD_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -375,7 +422,6 @@ pub static BPTD_SCHEMA: RecordSchema = RecordSchema {
     name: "Body Part Data",
     members: &BPTD_MEMBERS,
 };
-
 
 static LVLN_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -410,7 +456,6 @@ pub static LVLN_SCHEMA: RecordSchema = RecordSchema {
     members: &LVLN_MEMBERS,
 };
 
-
 static LVLI_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
     OBND_DEF,
@@ -443,7 +488,6 @@ pub static LVLI_SCHEMA: RecordSchema = RecordSchema {
     name: "Leveled Item",
     members: &LVLI_MEMBERS,
 };
-
 
 static LVSP_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,

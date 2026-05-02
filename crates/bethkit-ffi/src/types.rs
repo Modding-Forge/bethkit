@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! C-representable primitive types shared across all FFI modules.
 //!
@@ -10,7 +10,6 @@ use std::ffi::c_char;
 
 use bethkit_bsa::write::{Ba2Version, BsaVersion};
 use bethkit_core::{Game, GameContext, PluginKind, StringFileKind};
-
 
 /// Bethesda game target for plugin and archive operations.
 #[repr(C)]
@@ -44,7 +43,6 @@ pub enum BethkitPluginKind {
     Overlay = 2,
 }
 
-
 /// Identifies one of the three localized string table file types.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +54,6 @@ pub enum BethkitStringFileKind {
     /// `.ilstrings` — length-prefixed strings (info lines).
     IlStrings = 2,
 }
-
 
 /// BSA archive format version.
 #[repr(C)]
@@ -87,7 +84,6 @@ pub enum BethkitBa2Version {
     /// Fallout 4 Next-Gen BA2 (version 8).
     V8 = 2,
 }
-
 
 /// Discriminant for [`BethkitFieldValuePayload`], identifying which union arm
 /// is active in a [`BethkitFieldValue`].
@@ -169,23 +165,33 @@ pub struct BethkitFlagsVal {
     pub active_count: usize,
 }
 
-
 /// Converts a [`BethkitGame`] to a [`GameContext`] usable by bethkit-core.
 pub(crate) fn game_to_ctx(game: BethkitGame) -> GameContext {
     match game {
-        BethkitGame::SkyrimSe => GameContext { game: Game::SkyrimSE },
-        BethkitGame::Fallout4 => GameContext { game: Game::Fallout4 },
-        BethkitGame::Skyrim => GameContext { game: Game::SkyrimLE },
-        BethkitGame::Fallout3 => GameContext { game: Game::Fallout3 },
-        BethkitGame::FalloutNv => GameContext { game: Game::FalloutNV },
+        BethkitGame::SkyrimSe => GameContext {
+            game: Game::SkyrimSE,
+        },
+        BethkitGame::Fallout4 => GameContext {
+            game: Game::Fallout4,
+        },
+        BethkitGame::Skyrim => GameContext {
+            game: Game::SkyrimLE,
+        },
+        BethkitGame::Fallout3 => GameContext {
+            game: Game::Fallout3,
+        },
+        BethkitGame::FalloutNv => GameContext {
+            game: Game::FalloutNV,
+        },
     }
 }
 
 /// Converts a Rust [`PluginKind`] to the C-ABI equivalent.
 pub(crate) fn plugin_kind_from_rust(kind: PluginKind) -> BethkitPluginKind {
     match kind {
-        PluginKind::Plugin | PluginKind::Master | PluginKind::Medium | PluginKind::Update =>
-            BethkitPluginKind::Full,
+        PluginKind::Plugin | PluginKind::Master | PluginKind::Medium | PluginKind::Update => {
+            BethkitPluginKind::Full
+        }
         PluginKind::Light => BethkitPluginKind::Light,
     }
 }

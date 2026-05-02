@@ -192,16 +192,28 @@ fn full_localized_roundtrip_via_disk() -> Result<(), Box<dyn std::error::Error>>
     extracted.sort_by_key(|ls| (ls.form_id.0, ls.subrecord_type.0));
 
     // then — edited strings have new bytes, untouched strings unchanged.
-    let book_full = extracted.iter().find(|s| s.string_id == 1).ok_or("book_full not found")?;
+    let book_full = extracted
+        .iter()
+        .find(|s| s.string_id == 1)
+        .ok_or("book_full not found")?;
     assert_eq!(book_full.bytes, b"Buchtitel");
 
-    let book_desc = extracted.iter().find(|s| s.string_id == 2).ok_or("book_desc not found")?;
+    let book_desc = extracted
+        .iter()
+        .find(|s| s.string_id == 2)
+        .ok_or("book_desc not found")?;
     assert_eq!(book_desc.bytes, "Eine lange Buchbeschreibung.".as_bytes());
 
-    let npc_shrt = extracted.iter().find(|s| s.string_id == 11).ok_or("npc_shrt not found")?;
+    let npc_shrt = extracted
+        .iter()
+        .find(|s| s.string_id == 11)
+        .ok_or("npc_shrt not found")?;
     assert_eq!(npc_shrt.bytes, b"Bandit (DE)");
 
-    let npc_full = extracted.iter().find(|s| s.string_id == 10).ok_or("npc_full not found")?;
+    let npc_full = extracted
+        .iter()
+        .find(|s| s.string_id == 10)
+        .ok_or("npc_full not found")?;
     assert_eq!(npc_full.bytes, b"Generic NPC"); // not edited
 
     // Verify file kinds round-trip too.

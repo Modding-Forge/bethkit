@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Schema definitions for simple / utility SSE record types.
 //!
@@ -11,11 +11,19 @@ use crate::types::Signature;
 
 use super::common::{DESC_DEF, EDID_DEF, FULL_DEF, ICON_DEF, MODL_DEF, OBND_DEF};
 
-
 static TES4_HEDR_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Version", kind: FieldType::Float32 },
-    FieldDef { name: "Number of Records", kind: FieldType::UInt32 },
-    FieldDef { name: "Next Object ID", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Version",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Number of Records",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Next Object ID",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static TES4_MEMBERS: [SubRecordDef; 5] = [
@@ -63,7 +71,6 @@ pub static TES4_SCHEMA: RecordSchema = RecordSchema {
     members: &TES4_MEMBERS,
 };
 
-
 static KYWD_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -82,7 +89,6 @@ pub static KYWD_SCHEMA: RecordSchema = RecordSchema {
     members: &KYWD_MEMBERS,
 };
 
-
 static AACT_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -100,7 +106,6 @@ pub static AACT_SCHEMA: RecordSchema = RecordSchema {
     name: "Action",
     members: &AACT_MEMBERS,
 };
-
 
 static TXST_MEMBERS: [SubRecordDef; 10] = [
     EDID_DEF,
@@ -170,7 +175,6 @@ pub static TXST_SCHEMA: RecordSchema = RecordSchema {
     members: &TXST_MEMBERS,
 };
 
-
 static GLOB_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
     SubRecordDef {
@@ -196,7 +200,6 @@ pub static GLOB_SCHEMA: RecordSchema = RecordSchema {
     members: &GLOB_MEMBERS,
 };
 
-
 static GMST_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -216,7 +219,6 @@ pub static GMST_SCHEMA: RecordSchema = RecordSchema {
     members: &GMST_MEMBERS,
 };
 
-
 static VTYP_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -235,7 +237,6 @@ pub static VTYP_SCHEMA: RecordSchema = RecordSchema {
     members: &VTYP_MEMBERS,
 };
 
-
 static LCRT_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -253,7 +254,6 @@ pub static LCRT_SCHEMA: RecordSchema = RecordSchema {
     name: "Location Reference Type",
     members: &LCRT_MEMBERS,
 };
-
 
 static MATT_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -286,7 +286,6 @@ pub static MATT_SCHEMA: RecordSchema = RecordSchema {
     name: "Material Type",
     members: &MATT_MEMBERS,
 };
-
 
 /// Interactable flags stored in COLL.GNAM.
 static COLL_GNAM_FLAGS: FlagsDef = FlagsDef {
@@ -327,7 +326,6 @@ pub static COLL_SCHEMA: RecordSchema = RecordSchema {
     members: &COLL_MEMBERS,
 };
 
-
 static CLFM_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
     FULL_DEF,
@@ -347,16 +345,39 @@ pub static CLFM_SCHEMA: RecordSchema = RecordSchema {
     members: &CLFM_MEMBERS,
 };
 
-
 static REVB_DATA_FIELDS: [FieldDef; 8] = [
-    FieldDef { name: "Decay Time", kind: FieldType::UInt16 },
-    FieldDef { name: "HF Reference", kind: FieldType::UInt16 },
-    FieldDef { name: "Room Filter", kind: FieldType::Int8 },
-    FieldDef { name: "Room HF Filter", kind: FieldType::Int8 },
-    FieldDef { name: "Reflections", kind: FieldType::Int8 },
-    FieldDef { name: "Reverb Amp", kind: FieldType::Int8 },
-    FieldDef { name: "Decay HF Ratio", kind: FieldType::UInt8 },
-    FieldDef { name: "Reflections Delay", kind: FieldType::UInt8 },
+    FieldDef {
+        name: "Decay Time",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "HF Reference",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Room Filter",
+        kind: FieldType::Int8,
+    },
+    FieldDef {
+        name: "Room HF Filter",
+        kind: FieldType::Int8,
+    },
+    FieldDef {
+        name: "Reflections",
+        kind: FieldType::Int8,
+    },
+    FieldDef {
+        name: "Reverb Amp",
+        kind: FieldType::Int8,
+    },
+    FieldDef {
+        name: "Decay HF Ratio",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Reflections Delay",
+        kind: FieldType::UInt8,
+    },
 ];
 
 static REVB_MEMBERS: [SubRecordDef; 2] = [
@@ -376,7 +397,6 @@ pub static REVB_SCHEMA: RecordSchema = RecordSchema {
     name: "Reverb Parameters",
     members: &REVB_MEMBERS,
 };
-
 
 static SHOU_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -398,7 +418,6 @@ pub static SHOU_SCHEMA: RecordSchema = RecordSchema {
     members: &SHOU_MEMBERS,
 };
 
-
 static WOOP_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
     FULL_DEF,
@@ -417,7 +436,6 @@ pub static WOOP_SCHEMA: RecordSchema = RecordSchema {
     name: "Word of Power",
     members: &WOOP_MEMBERS,
 };
-
 
 static ASTP_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -458,7 +476,6 @@ pub static ASTP_SCHEMA: RecordSchema = RecordSchema {
     members: &ASTP_MEMBERS,
 };
 
-
 static EQUP_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -477,12 +494,23 @@ pub static EQUP_SCHEMA: RecordSchema = RecordSchema {
     members: &EQUP_MEMBERS,
 };
 
-
 static RELA_DATA_FIELDS: [FieldDef; 4] = [
-    FieldDef { name: "Parent", kind: FieldType::FormIdTyped(&[Signature(*b"NPC_")]) },
-    FieldDef { name: "Child", kind: FieldType::FormIdTyped(&[Signature(*b"NPC_")]) },
-    FieldDef { name: "Rank", kind: FieldType::UInt16 },
-    FieldDef { name: "Flags", kind: FieldType::UInt8 },
+    FieldDef {
+        name: "Parent",
+        kind: FieldType::FormIdTyped(&[Signature(*b"NPC_")]),
+    },
+    FieldDef {
+        name: "Child",
+        kind: FieldType::FormIdTyped(&[Signature(*b"NPC_")]),
+    },
+    FieldDef {
+        name: "Rank",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt8,
+    },
 ];
 
 static RELA_MEMBERS: [SubRecordDef; 2] = [
@@ -503,7 +531,6 @@ pub static RELA_SCHEMA: RecordSchema = RecordSchema {
     members: &RELA_MEMBERS,
 };
 
-
 static DEBR_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -521,7 +548,6 @@ pub static DEBR_SCHEMA: RecordSchema = RecordSchema {
     name: "Debris",
     members: &DEBR_MEMBERS,
 };
-
 
 static LGTM_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -541,7 +567,6 @@ pub static LGTM_SCHEMA: RecordSchema = RecordSchema {
     members: &LGTM_MEMBERS,
 };
 
-
 static DOBJ_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -560,7 +585,6 @@ pub static DOBJ_SCHEMA: RecordSchema = RecordSchema {
     members: &DOBJ_MEMBERS,
 };
 
-
 static FLST_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -578,7 +602,6 @@ pub static FLST_SCHEMA: RecordSchema = RecordSchema {
     name: "FormID List",
     members: &FLST_MEMBERS,
 };
-
 
 static IDLM_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -606,7 +629,6 @@ pub static IDLM_SCHEMA: RecordSchema = RecordSchema {
     members: &IDLM_MEMBERS,
 };
 
-
 static ANIO_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
     MODL_DEF,
@@ -625,7 +647,6 @@ pub static ANIO_SCHEMA: RecordSchema = RecordSchema {
     name: "Animated Object",
     members: &ANIO_MEMBERS,
 };
-
 
 static HDPT_MEMBERS: [SubRecordDef; 7] = [
     EDID_DEF,
@@ -668,7 +689,6 @@ pub static HDPT_SCHEMA: RecordSchema = RecordSchema {
     members: &HDPT_MEMBERS,
 };
 
-
 static LCTN_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
     FULL_DEF,
@@ -702,7 +722,6 @@ pub static LCTN_SCHEMA: RecordSchema = RecordSchema {
     members: &LCTN_MEMBERS,
 };
 
-
 static MESG_MEMBERS: [SubRecordDef; 6] = [
     EDID_DEF,
     DESC_DEF,
@@ -731,7 +750,6 @@ pub static MESG_SCHEMA: RecordSchema = RecordSchema {
     members: &MESG_MEMBERS,
 };
 
-
 static AVIF_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
     FULL_DEF,
@@ -752,7 +770,6 @@ pub static AVIF_SCHEMA: RecordSchema = RecordSchema {
     members: &AVIF_MEMBERS,
 };
 
-
 static CAMS_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
     MODL_DEF,
@@ -771,7 +788,6 @@ pub static CAMS_SCHEMA: RecordSchema = RecordSchema {
     name: "Camera Shot",
     members: &CAMS_MEMBERS,
 };
-
 
 static CPTH_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -797,7 +813,6 @@ pub static CPTH_SCHEMA: RecordSchema = RecordSchema {
     name: "Camera Path",
     members: &CPTH_MEMBERS,
 };
-
 
 static MOVT_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -838,14 +853,31 @@ pub static MOVT_SCHEMA: RecordSchema = RecordSchema {
     members: &MOVT_MEMBERS,
 };
 
-
 static DUAL_DATA_FIELDS: [FieldDef; 6] = [
-    FieldDef { name: "Projectile", kind: FieldType::FormIdTyped(&[Signature(*b"PROJ")]) },
-    FieldDef { name: "Explosion", kind: FieldType::FormIdTyped(&[Signature(*b"EXPL")]) },
-    FieldDef { name: "Effect Shader", kind: FieldType::FormIdTyped(&[Signature(*b"EFSH")]) },
-    FieldDef { name: "Hit Effect Art", kind: FieldType::FormIdTyped(&[Signature(*b"ARTO")]) },
-    FieldDef { name: "Impact Data Set", kind: FieldType::FormIdTyped(&[Signature(*b"IPDS")]) },
-    FieldDef { name: "Inherit Scale", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Projectile",
+        kind: FieldType::FormIdTyped(&[Signature(*b"PROJ")]),
+    },
+    FieldDef {
+        name: "Explosion",
+        kind: FieldType::FormIdTyped(&[Signature(*b"EXPL")]),
+    },
+    FieldDef {
+        name: "Effect Shader",
+        kind: FieldType::FormIdTyped(&[Signature(*b"EFSH")]),
+    },
+    FieldDef {
+        name: "Hit Effect Art",
+        kind: FieldType::FormIdTyped(&[Signature(*b"ARTO")]),
+    },
+    FieldDef {
+        name: "Impact Data Set",
+        kind: FieldType::FormIdTyped(&[Signature(*b"IPDS")]),
+    },
+    FieldDef {
+        name: "Inherit Scale",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static DUAL_MEMBERS: [SubRecordDef; 2] = [
@@ -865,7 +897,6 @@ pub static DUAL_SCHEMA: RecordSchema = RecordSchema {
     name: "Dual Cast Data",
     members: &DUAL_MEMBERS,
 };
-
 
 /// PLYR — Player reference (minimal).
 pub static PLYR_SCHEMA: RecordSchema = RecordSchema {

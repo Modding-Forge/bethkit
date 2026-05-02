@@ -474,7 +474,8 @@ mod tests {
 
     /// Verifies file-kind routing for the most common cases.
     #[test]
-    fn resolve_string_kind_routes_correctly() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn resolve_string_kind_routes_correctly() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         // given
         let npc: Signature = Signature(*b"NPC_");
         let book: Signature = Signature(*b"BOOK");

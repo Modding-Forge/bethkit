@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Schema definitions for quest / dialogue SSE record types.
 //!
@@ -10,14 +10,31 @@ use crate::types::Signature;
 use super::common::{CTDA_DEF, EDID_DEF, FULL_DEF, MODL_DEF, VMAD_DEF};
 use crate::schema::enums::{QUEST_FLAGS, QUEST_TYPE_ENUM};
 
-
 static QUST_DNAM_FIELDS: [FieldDef; 6] = [
-    FieldDef { name: "Flags", kind: FieldType::Flags(&QUEST_FLAGS) },
-    FieldDef { name: "Priority", kind: FieldType::UInt8 },
-    FieldDef { name: "Unknown", kind: FieldType::UInt8 },
-    FieldDef { name: "Unknown2", kind: FieldType::UInt8 },
-    FieldDef { name: "Quest Type", kind: FieldType::Enum(&QUEST_TYPE_ENUM) },
-    FieldDef { name: "Unused", kind: FieldType::UInt8 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::Flags(&QUEST_FLAGS),
+    },
+    FieldDef {
+        name: "Priority",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Unknown2",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Quest Type",
+        kind: FieldType::Enum(&QUEST_TYPE_ENUM),
+    },
+    FieldDef {
+        name: "Unused",
+        kind: FieldType::UInt8,
+    },
 ];
 
 static QUST_MEMBERS: [SubRecordDef; 8] = [
@@ -62,12 +79,23 @@ pub static QUST_SCHEMA: RecordSchema = RecordSchema {
     members: &QUST_MEMBERS,
 };
 
-
 static DIAL_DATA_FIELDS: [FieldDef; 4] = [
-    FieldDef { name: "Priority", kind: FieldType::Float32 },
-    FieldDef { name: "Unknown", kind: FieldType::Float32 },
-    FieldDef { name: "Category", kind: FieldType::UInt8 },
-    FieldDef { name: "Subtype", kind: FieldType::UInt8 },
+    FieldDef {
+        name: "Priority",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Category",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Subtype",
+        kind: FieldType::UInt8,
+    },
 ];
 
 static DIAL_MEMBERS: [SubRecordDef; 4] = [
@@ -96,11 +124,19 @@ pub static DIAL_SCHEMA: RecordSchema = RecordSchema {
     members: &DIAL_MEMBERS,
 };
 
-
 static INFO_ENAM_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Flags", kind: FieldType::UInt16 },
-    FieldDef { name: "Reset Hours", kind: FieldType::UInt8 },
-    FieldDef { name: "Unknown", kind: FieldType::UInt8 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Reset Hours",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::UInt8,
+    },
 ];
 
 static INFO_MEMBERS: [SubRecordDef; 8] = [
@@ -151,10 +187,15 @@ pub static INFO_SCHEMA: RecordSchema = RecordSchema {
     members: &INFO_MEMBERS,
 };
 
-
 static DLBR_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Unknown", kind: FieldType::UInt32 },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static DLBR_MEMBERS: [SubRecordDef; 5] = [
@@ -189,7 +230,6 @@ pub static DLBR_SCHEMA: RecordSchema = RecordSchema {
     name: "Dialogue Branch",
     members: &DLBR_MEMBERS,
 };
-
 
 static DLVW_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -230,7 +270,6 @@ pub static DLVW_SCHEMA: RecordSchema = RecordSchema {
     members: &DLVW_MEMBERS,
 };
 
-
 static SCEN_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
     VMAD_DEF,
@@ -258,7 +297,6 @@ pub static SCEN_SCHEMA: RecordSchema = RecordSchema {
     members: &SCEN_MEMBERS,
 };
 
-
 static SMBN_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
     SubRecordDef {
@@ -266,14 +304,22 @@ static SMBN_MEMBERS: [SubRecordDef; 3] = [
         name: "Parent",
         required: false,
         repeating: false,
-        field: FieldType::FormIdTyped(&[Signature(*b"SMQN"), Signature(*b"SMBN"), Signature(*b"SMEN")]),
+        field: FieldType::FormIdTyped(&[
+            Signature(*b"SMQN"),
+            Signature(*b"SMBN"),
+            Signature(*b"SMEN"),
+        ]),
     },
     SubRecordDef {
         sig: Signature(*b"SNAM"),
         name: "Child",
         required: false,
         repeating: true,
-        field: FieldType::FormIdTyped(&[Signature(*b"SMQN"), Signature(*b"SMBN"), Signature(*b"SMEN")]),
+        field: FieldType::FormIdTyped(&[
+            Signature(*b"SMQN"),
+            Signature(*b"SMBN"),
+            Signature(*b"SMEN"),
+        ]),
     },
 ];
 
@@ -284,7 +330,6 @@ pub static SMBN_SCHEMA: RecordSchema = RecordSchema {
     members: &SMBN_MEMBERS,
 };
 
-
 static SMQN_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
     SubRecordDef {
@@ -292,14 +337,22 @@ static SMQN_MEMBERS: [SubRecordDef; 5] = [
         name: "Parent",
         required: false,
         repeating: false,
-        field: FieldType::FormIdTyped(&[Signature(*b"SMQN"), Signature(*b"SMBN"), Signature(*b"SMEN")]),
+        field: FieldType::FormIdTyped(&[
+            Signature(*b"SMQN"),
+            Signature(*b"SMBN"),
+            Signature(*b"SMEN"),
+        ]),
     },
     SubRecordDef {
         sig: Signature(*b"SNAM"),
         name: "Child",
         required: false,
         repeating: true,
-        field: FieldType::FormIdTyped(&[Signature(*b"SMQN"), Signature(*b"SMBN"), Signature(*b"SMEN")]),
+        field: FieldType::FormIdTyped(&[
+            Signature(*b"SMQN"),
+            Signature(*b"SMBN"),
+            Signature(*b"SMEN"),
+        ]),
     },
     CTDA_DEF,
     SubRecordDef {
@@ -318,7 +371,6 @@ pub static SMQN_SCHEMA: RecordSchema = RecordSchema {
     members: &SMQN_MEMBERS,
 };
 
-
 static SMEN_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
     SubRecordDef {
@@ -326,14 +378,22 @@ static SMEN_MEMBERS: [SubRecordDef; 4] = [
         name: "Parent",
         required: false,
         repeating: false,
-        field: FieldType::FormIdTyped(&[Signature(*b"SMQN"), Signature(*b"SMBN"), Signature(*b"SMEN")]),
+        field: FieldType::FormIdTyped(&[
+            Signature(*b"SMQN"),
+            Signature(*b"SMBN"),
+            Signature(*b"SMEN"),
+        ]),
     },
     SubRecordDef {
         sig: Signature(*b"SNAM"),
         name: "Child",
         required: false,
         repeating: true,
-        field: FieldType::FormIdTyped(&[Signature(*b"SMQN"), Signature(*b"SMBN"), Signature(*b"SMEN")]),
+        field: FieldType::FormIdTyped(&[
+            Signature(*b"SMQN"),
+            Signature(*b"SMBN"),
+            Signature(*b"SMEN"),
+        ]),
     },
     CTDA_DEF,
 ];

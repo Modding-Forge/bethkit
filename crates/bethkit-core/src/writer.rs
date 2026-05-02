@@ -278,10 +278,9 @@ impl PluginWriter {
     ///
     /// Returns [`CoreError::Io`] if the file cannot be created or written.
     pub fn write_to_file(&self, path: &Path) -> Result<()> {
-        let file: std::fs::File = std::fs::File::create(path)
-            .map_err(|e| CoreError::Io(bethkit_io::IoError::Io(e)))?;
-        let mut writer: std::io::BufWriter<std::fs::File> =
-            std::io::BufWriter::new(file);
+        let file: std::fs::File =
+            std::fs::File::create(path).map_err(|e| CoreError::Io(bethkit_io::IoError::Io(e)))?;
+        let mut writer: std::io::BufWriter<std::fs::File> = std::io::BufWriter::new(file);
         let mut buf: Vec<u8> = Vec::new();
         self.write_tes4(&mut buf)?;
         writer
@@ -512,8 +511,8 @@ mod tests {
     /// Verifies that eslify() reassigns owned FormIDs to the ESL range (0x800+)
     /// and sets the LIGHT flag on the serialised plugin header.
     #[test]
-    fn eslify_compacts_form_ids_to_esl_range(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn eslify_compacts_form_ids_to_esl_range() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         // given — plugin with no masters and three records at standard offsets
         let ctx = GameContext::sse();
         let mut writer = PluginWriter::new(ctx, 1.7);

@@ -47,7 +47,9 @@ pub fn open(path: &std::path::Path) -> Result<Box<dyn Archive>> {
         Arc::new(bethkit_io::MappedFile::open(path).map_err(BsaError::Io)?);
     let bytes: &[u8] = mmap.as_bytes();
     if bytes.len() < 4 {
-        return Err(BsaError::Corrupt("file too small to detect archive format".into()));
+        return Err(BsaError::Corrupt(
+            "file too small to detect archive format".into(),
+        ));
     }
     let magic: [u8; 4] = [bytes[0], bytes[1], bytes[2], bytes[3]];
     match magic {

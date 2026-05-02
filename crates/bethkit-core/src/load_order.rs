@@ -28,7 +28,6 @@ impl std::fmt::Display for GlobalFormId {
     }
 }
 
-
 /// A single entry in the load order.
 pub struct LoadOrderEntry {
     /// Canonical plugin filename (lowercased, includes extension).
@@ -338,8 +337,8 @@ mod tests {
     /// Verifies that an ESL-encoded FormID (0xFE sentinel) resolves to the
     /// owning light plugin.
     #[test]
-    fn resolve_esl_form_id_to_light_plugin(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn resolve_esl_form_id_to_light_plugin() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         // given — ESL FormID: slot 0, object 0xABC → 0xFE_000_ABC
         let mut lo = LoadOrder::new();
         lo.push("LightMod.esp", PluginKind::Light)?;

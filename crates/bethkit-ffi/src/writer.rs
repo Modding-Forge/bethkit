@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! FFI functions for constructing and serializing plugin files.
 //!
@@ -24,12 +24,13 @@
 use std::ffi::c_char;
 use std::path::Path;
 
-use bethkit_core::{GameContext, PluginWriter, WritableGroup, WritableGroupChild, WritableRecord, WritableSubRecord};
+use bethkit_core::{
+    GameContext, PluginWriter, WritableGroup, WritableGroupChild, WritableRecord, WritableSubRecord,
+};
 
 use crate::error::FfiError;
 use crate::types::BethkitGame;
 use crate::{cstr_to_str, ffi_try, null_check};
-
 
 /// An opaque handle to a plugin writer.
 ///
@@ -50,7 +51,6 @@ pub struct BethkitWritableGroup(WritableGroup);
 /// the parent group when passed to [`bethkit_writable_group_add_record`].
 pub struct BethkitWritableRecord(WritableRecord);
 
-
 /// Creates a new plugin writer for `game` at the given form version.
 ///
 /// Returns a pointer to the handle.  Must be freed with
@@ -67,7 +67,10 @@ pub extern "C" fn bethkit_plugin_writer_new(
 ) -> *mut BethkitPluginWriter {
     // SAFETY: game discriminant is valid; crate::types guarantees repr.
     let ctx = game_to_context(game);
-    Box::into_raw(Box::new(BethkitPluginWriter(PluginWriter::new(ctx, form_version))))
+    Box::into_raw(Box::new(BethkitPluginWriter(PluginWriter::new(
+        ctx,
+        form_version,
+    ))))
 }
 
 /// Frees a plugin writer handle.  Passing a null pointer is a no-op.
@@ -79,7 +82,6 @@ pub extern "C" fn bethkit_plugin_writer_free(pw: *mut BethkitPluginWriter) {
     // SAFETY: pw was produced by Box::into_raw.
     drop(unsafe { Box::from_raw(pw) });
 }
-
 
 /// Adds a top-level group to the plugin writer.
 ///
@@ -110,7 +112,6 @@ pub extern "C" fn bethkit_plugin_writer_add_group(
     0
 }
 
-
 /// Serializes the plugin to a file at `path`.
 ///
 /// Returns 0 on success or -1 on failure.
@@ -138,7 +139,10 @@ pub extern "C" fn bethkit_plugin_writer_write_to_file(
     };
     // SAFETY: pw is non-null.
     ffi_try!(
-        unsafe { &*pw }.0.write_to_file(Path::new(path_str)).map_err(FfiError::Core),
+        unsafe { &*pw }
+            .0
+            .write_to_file(Path::new(path_str))
+            .map_err(FfiError::Core),
         -1
     );
     0
@@ -165,8 +169,16 @@ pub extern "C" fn bethkit_plugin_writer_write_to_bytes(
     pw: *const BethkitPluginWriter,
     out_len: *mut usize,
 ) -> *mut u8 {
-    null_check!(pw, "bethkit_plugin_writer_write_to_bytes", std::ptr::null_mut());
-    null_check!(out_len, "bethkit_plugin_writer_write_to_bytes/out_len", std::ptr::null_mut());
+    null_check!(
+        pw,
+        "bethkit_plugin_writer_write_to_bytes",
+        std::ptr::null_mut()
+    );
+    null_check!(
+        out_len,
+        "bethkit_plugin_writer_write_to_bytes/out_len",
+        std::ptr::null_mut()
+    );
 
     // SAFETY: pw is non-null.
     let bytes = ffi_try!(
@@ -181,7 +193,6 @@ pub extern "C" fn bethkit_plugin_writer_write_to_bytes(
     unsafe { *out_len = len };
     ptr
 }
-
 
 /// Creates a new writable group with the given 4-byte `label` and
 /// `group_type`.
@@ -225,7 +236,6 @@ pub extern "C" fn bethkit_writable_group_free(group: *mut BethkitWritableGroup) 
     drop(unsafe { Box::from_raw(group) });
 }
 
-
 /// Adds a record as a child of `group`.
 ///
 /// This function **takes ownership** of `record`.  The caller must not use
@@ -251,7 +261,10 @@ pub extern "C" fn bethkit_writable_group_add_record(
     // SAFETY: record is non-null and was produced by Box::into_raw.
     let r = unsafe { Box::from_raw(record) };
     // SAFETY: group is non-null.
-    unsafe { &mut *group }.0.children.push(WritableGroupChild::Record(r.0));
+    unsafe { &mut *group }
+        .0
+        .children
+        .push(WritableGroupChild::Record(r.0));
     0
 }
 
@@ -280,10 +293,12 @@ pub extern "C" fn bethkit_writable_group_add_group(
     // SAFETY: child is non-null and was produced by Box::into_raw.
     let c = unsafe { Box::from_raw(child) };
     // SAFETY: group is non-null.
-    unsafe { &mut *group }.0.children.push(WritableGroupChild::Group(c.0));
+    unsafe { &mut *group }
+        .0
+        .children
+        .push(WritableGroupChild::Group(c.0));
     0
 }
-
 
 /// Creates a new writable record.
 ///
@@ -307,7 +322,11 @@ pub extern "C" fn bethkit_writable_record_new(
     form_id: u32,
     form_version: u16,
 ) -> *mut BethkitWritableRecord {
-    null_check!(signature, "bethkit_writable_record_new", std::ptr::null_mut());
+    null_check!(
+        signature,
+        "bethkit_writable_record_new",
+        std::ptr::null_mut()
+    );
     // SAFETY: signature is non-null and at least 4 bytes by contract.
     let sig_bytes: [u8; 4] = unsafe { std::ptr::read(signature as *const [u8; 4]) };
     Box::into_raw(Box::new(BethkitWritableRecord(WritableRecord {
@@ -355,27 +374,43 @@ pub extern "C" fn bethkit_writable_record_add_subrecord(
     data_len: usize,
 ) -> i32 {
     null_check!(record, "bethkit_writable_record_add_subrecord", -1);
-    null_check!(signature, "bethkit_writable_record_add_subrecord/signature", -1);
+    null_check!(
+        signature,
+        "bethkit_writable_record_add_subrecord/signature",
+        -1
+    );
     null_check!(data, "bethkit_writable_record_add_subrecord/data", -1);
     // SAFETY: all three pointers are non-null; data is valid for data_len bytes.
     let sig_bytes: [u8; 4] = unsafe { std::ptr::read(signature as *const [u8; 4]) };
     let payload: Vec<u8> = unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec();
-    unsafe { &mut *record }.0.subrecords.push(WritableSubRecord {
-        signature: bethkit_core::Signature(sig_bytes),
-        data: payload,
-    });
+    unsafe { &mut *record }
+        .0
+        .subrecords
+        .push(WritableSubRecord {
+            signature: bethkit_core::Signature(sig_bytes),
+            data: payload,
+        });
     0
 }
-
 
 /// Maps a [`BethkitGame`] discriminant to a [`GameContext`].
 fn game_to_context(game: BethkitGame) -> GameContext {
     use bethkit_core::Game;
     match game {
-        BethkitGame::SkyrimSe => GameContext { game: Game::SkyrimSE },
-        BethkitGame::Fallout4 => GameContext { game: Game::Fallout4 },
-        BethkitGame::Skyrim => GameContext { game: Game::SkyrimLE },
-        BethkitGame::Fallout3 => GameContext { game: Game::Fallout3 },
-        BethkitGame::FalloutNv => GameContext { game: Game::FalloutNV },
+        BethkitGame::SkyrimSe => GameContext {
+            game: Game::SkyrimSE,
+        },
+        BethkitGame::Fallout4 => GameContext {
+            game: Game::Fallout4,
+        },
+        BethkitGame::Skyrim => GameContext {
+            game: Game::SkyrimLE,
+        },
+        BethkitGame::Fallout3 => GameContext {
+            game: Game::Fallout3,
+        },
+        BethkitGame::FalloutNv => GameContext {
+            game: Game::FalloutNV,
+        },
     }
 }

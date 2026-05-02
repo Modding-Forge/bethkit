@@ -245,27 +245,37 @@ impl GameContext {
 
     /// Creates a context targeting Skyrim Legendary Edition (Classic).
     pub fn skyrim_le() -> Self {
-        Self { game: Game::SkyrimLE }
+        Self {
+            game: Game::SkyrimLE,
+        }
     }
 
     /// Creates a context targeting Fallout 4.
     pub fn fallout4() -> Self {
-        Self { game: Game::Fallout4 }
+        Self {
+            game: Game::Fallout4,
+        }
     }
 
     /// Creates a context targeting Starfield.
     pub fn starfield() -> Self {
-        Self { game: Game::Starfield }
+        Self {
+            game: Game::Starfield,
+        }
     }
 
     /// Creates a context targeting The Elder Scrolls IV: Oblivion.
     pub fn oblivion() -> Self {
-        Self { game: Game::Oblivion }
+        Self {
+            game: Game::Oblivion,
+        }
     }
 
     /// Creates a context targeting The Elder Scrolls III: Morrowind.
     pub fn morrowind() -> Self {
-        Self { game: Game::Morrowind }
+        Self {
+            game: Game::Morrowind,
+        }
     }
 
     /// Returns the raw bit mask for the "light plugin" flag in record flags.

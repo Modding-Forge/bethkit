@@ -85,11 +85,10 @@ impl GnrlArchive {
                     .try_into()
                     .map_err(|_| BsaError::Corrupt(format!("GNRL record {i}: offset read")))?,
             ) as u64;
-            let packed_size = u32::from_le_bytes(
-                rec_bytes[20..24]
-                    .try_into()
-                    .map_err(|_| BsaError::Corrupt(format!("GNRL record {i}: packed_size read")))?,
-            );
+            let packed_size =
+                u32::from_le_bytes(rec_bytes[20..24].try_into().map_err(|_| {
+                    BsaError::Corrupt(format!("GNRL record {i}: packed_size read"))
+                })?);
             let size = u32::from_le_bytes(
                 rec_bytes[24..28]
                     .try_into()

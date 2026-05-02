@@ -27,12 +27,11 @@
 
 use std::sync::{Arc, OnceLock};
 
-use once_cell::sync::OnceCell;
 use bethkit_io::SliceCursor;
+use once_cell::sync::OnceCell;
 
 use crate::error::{CoreError, Result};
 use crate::types::{FormId, GameContext, PluginKind, RecordFlags, Signature};
-
 
 /// The raw data payload of a subrecord.
 ///
@@ -278,7 +277,11 @@ fn parse_subrecords(data: Arc<[u8]>) -> Result<Vec<SubRecord>> {
 
         subrecords.push(SubRecord {
             signature: sig,
-            data: SubRecordData::Borrowed { data: Arc::clone(&data), start, end },
+            data: SubRecordData::Borrowed {
+                data: Arc::clone(&data),
+                start,
+                end,
+            },
         });
     }
 

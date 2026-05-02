@@ -16,7 +16,7 @@ use bethkit_core::Plugin;
 
 use crate::group::BethkitGroup;
 use crate::record::BethkitRecord;
-use crate::types::{BethkitGame, BethkitPluginKind, game_to_ctx, plugin_kind_from_rust};
+use crate::types::{game_to_ctx, plugin_kind_from_rust, BethkitGame, BethkitPluginKind};
 use crate::{cstr_to_str, ffi_try, null_check, set_last_error};
 
 /// An opaque handle to an opened Bethesda plugin file.
@@ -37,21 +37,23 @@ impl BethkitPlugin {
             .masters()
             .iter()
             .map(|m| {
-                let sanitized: Vec<u8> =
-                    m.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
+                let sanitized: Vec<u8> = m.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
                 // PANICS: sanitized has no interior NUL bytes by construction.
                 CString::new(sanitized).expect("master name has no interior NULs")
             })
             .collect();
 
         let description_cstring = plugin.header.description.as_deref().map(|d| {
-            let sanitized: Vec<u8> =
-                d.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
+            let sanitized: Vec<u8> = d.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
             // PANICS: sanitized has no interior NUL bytes by construction.
             CString::new(sanitized).expect("description has no interior NULs")
         });
 
-        Self { inner: plugin, master_cstrings, description_cstring }
+        Self {
+            inner: plugin,
+            master_cstrings,
+            description_cstring,
+        }
     }
 }
 

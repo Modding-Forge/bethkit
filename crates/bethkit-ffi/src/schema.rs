@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! FFI functions for schema-guided record inspection.
 //!
@@ -23,15 +23,12 @@
 use std::ffi::c_char;
 use std::mem::ManuallyDrop;
 
-use bethkit_core::{FieldValue, Signature, RecordView, SchemaRegistry};
+use bethkit_core::{FieldValue, RecordView, SchemaRegistry, Signature};
 
-use crate::record::BethkitRecord;
-use crate::types::{
-    BethkitEnumVal, BethkitFieldValueKind, BethkitFlagsVal, BethkitTypedFormId,
-};
-use crate::{BethkitSlice, ffi_try, null_check, set_last_error};
 use crate::error::FfiError;
-
+use crate::record::BethkitRecord;
+use crate::types::{BethkitEnumVal, BethkitFieldValueKind, BethkitFlagsVal, BethkitTypedFormId};
+use crate::{ffi_try, null_check, set_last_error, BethkitSlice};
 
 /// A decoded field value stored as a `#[repr(C)]` tagged union.
 ///
@@ -110,7 +107,6 @@ pub struct BethkitFieldValues {
     values: Vec<BethkitFieldValue>,
 }
 
-
 /// An owned, schema-guided snapshot of all decoded fields from a record.
 ///
 /// Created by [`bethkit_record_view_new`].  Must be freed with
@@ -120,7 +116,6 @@ pub struct BethkitRecordView {
     /// Heap-allocated CStrings for inline string values.
     _owned_strings: Vec<std::ffi::CString>,
 }
-
 
 /// An opaque handle to a schema registry (a map from record signature to
 /// schema definition).
@@ -156,7 +151,6 @@ pub extern "C" fn bethkit_schema_registry_has(
     let sig_bytes: [u8; 4] = unsafe { std::ptr::read(sig as *const [u8; 4]) };
     reg.0.get(Signature(sig_bytes)).is_some()
 }
-
 
 /// Creates a schema-guided snapshot of all decoded fields in `record`.
 ///
@@ -225,7 +219,10 @@ pub extern "C" fn bethkit_record_view_new(
         })
         .collect();
 
-    Box::into_raw(Box::new(BethkitRecordView { fields, _owned_strings: owned_strings }))
+    Box::into_raw(Box::new(BethkitRecordView {
+        fields,
+        _owned_strings: owned_strings,
+    }))
 }
 
 /// Frees a record view and all owned sub-objects (field entries, values,
@@ -244,7 +241,6 @@ pub extern "C" fn bethkit_record_view_free(view: *mut BethkitRecordView) {
         drop_field_value(field.value);
     }
 }
-
 
 /// Returns the number of fields in the view.
 ///
@@ -285,7 +281,6 @@ pub extern "C" fn bethkit_record_view_field_get(
         }
     }
 }
-
 
 /// Returns the number of entries in a struct field list.
 ///
@@ -339,7 +334,6 @@ pub extern "C" fn bethkit_field_entries_free(entries: *mut BethkitFieldEntries) 
     }
 }
 
-
 /// Returns the number of values in an array field list.
 ///
 /// Returns 0 and sets the last error if `values` is null.
@@ -392,7 +386,6 @@ pub extern "C" fn bethkit_field_values_free(values: *mut BethkitFieldValues) {
     }
 }
 
-
 /// Recursively converts a [`FieldValue`] into a [`BethkitFieldValue`].
 ///
 /// String values are interned into `owned_strings` so their pointers remain
@@ -415,8 +408,7 @@ fn convert_field_value<'a>(
             payload: BethkitFieldValuePayload { float_val: *v },
         },
         FieldValue::Str(s) => {
-            let sanitized: Vec<u8> =
-                s.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
+            let sanitized: Vec<u8> = s.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
             let cs = std::ffi::CString::new(sanitized)
                 .unwrap_or_else(|_| std::ffi::CString::new("?").expect("single char is valid"));
             let ptr = cs.as_ptr();
@@ -443,7 +435,10 @@ fn convert_field_value<'a>(
         FieldValue::Bytes(b) => BethkitFieldValue {
             kind: BethkitFieldValueKind::Bytes,
             payload: BethkitFieldValuePayload {
-                bytes: ManuallyDrop::new(BethkitSlice { ptr: b.as_ptr(), len: b.len() }),
+                bytes: ManuallyDrop::new(BethkitSlice {
+                    ptr: b.as_ptr(),
+                    len: b.len(),
+                }),
             },
         },
         FieldValue::Enum { value, name } => BethkitFieldValue {

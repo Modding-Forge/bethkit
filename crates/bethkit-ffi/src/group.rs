@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! FFI functions for iterating record groups and their children.
 //!
@@ -12,7 +12,6 @@ use bethkit_core::{Group, GroupChild};
 use crate::record::BethkitRecord;
 use crate::{null_check, set_last_error};
 
-
 /// A borrowed, read-only handle to a record group.
 ///
 /// Obtained from [`bethkit_plugin_group_get`] or
@@ -20,7 +19,6 @@ use crate::{null_check, set_last_error};
 /// `BethkitPlugin`.  Never free this handle.
 #[repr(transparent)]
 pub struct BethkitGroup(pub(crate) Group);
-
 
 /// Returns the raw integer group type of `group`.
 ///
@@ -54,10 +52,7 @@ pub extern "C" fn bethkit_group_child_count(group: *const BethkitGroup) -> usize
 /// Returns `false` and sets the last error if `group` is null or `index` is
 /// out of bounds.
 #[no_mangle]
-pub extern "C" fn bethkit_group_child_is_record(
-    group: *const BethkitGroup,
-    index: usize,
-) -> bool {
+pub extern "C" fn bethkit_group_child_is_record(group: *const BethkitGroup, index: usize) -> bool {
     null_check!(group, "bethkit_group_child_is_record", false);
     // SAFETY: group is non-null.
     let g = unsafe { &*group };

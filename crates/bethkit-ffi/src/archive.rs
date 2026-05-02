@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! FFI functions for reading BSA / BA2 archives and writing new ones.
 //!
@@ -21,9 +21,10 @@ use bethkit_bsa::archive::{Archive, ArchiveEntry};
 use bethkit_bsa::write::{Ba2Dx10Writer, Ba2GnrlWriter, BsaWriter};
 
 use crate::error::FfiError;
-use crate::types::{BethkitBa2Version, BethkitBsaVersion, ba2_version_to_rust, bsa_version_to_rust};
+use crate::types::{
+    ba2_version_to_rust, bsa_version_to_rust, BethkitBa2Version, BethkitBsaVersion,
+};
 use crate::{cstr_to_str, ffi_try, null_check, set_last_error};
-
 
 /// An opaque handle to an opened BSA or BA2 archive.
 ///
@@ -56,7 +57,6 @@ pub struct BethkitBa2GnrlWriter(Option<Ba2GnrlWriter>);
 /// Created by [`bethkit_ba2_dx10_writer_new`].  Must be freed with
 /// [`bethkit_ba2_dx10_writer_free`].
 pub struct BethkitBa2Dx10Writer(Option<Ba2Dx10Writer>);
-
 
 /// Opens a BSA or BA2 archive at `path`.
 ///
@@ -97,7 +97,6 @@ pub extern "C" fn bethkit_archive_free(archive: *mut BethkitArchive) {
     // SAFETY: archive was produced by Box::into_raw.
     drop(unsafe { Box::from_raw(archive) });
 }
-
 
 /// Returns a pointer to a NUL-terminated string identifying the archive
 /// format (e.g. `"BSA"`, `"BA2-GNRL"`).
@@ -141,7 +140,6 @@ pub extern "C" fn bethkit_archive_file_count(archive: *const BethkitArchive) -> 
     unsafe { &*archive }.0.file_count()
 }
 
-
 /// Returns a borrowed pointer to the archive entry at `index`, or null if
 /// `index` is out of bounds.
 ///
@@ -182,9 +180,7 @@ pub extern "C" fn bethkit_archive_entry_get(
 ///
 /// Returns null and sets the last error if `entry` is null.
 #[no_mangle]
-pub extern "C" fn bethkit_archive_entry_path(
-    entry: *const BethkitArchiveEntry,
-) -> *const c_char {
+pub extern "C" fn bethkit_archive_entry_path(entry: *const BethkitArchiveEntry) -> *const c_char {
     null_check!(entry, "bethkit_archive_entry_path", std::ptr::null());
     // SAFETY: entry is non-null and points into the entries Vec of the archive.
     // The String data inside ArchiveEntry is stable (not moved) because the
@@ -206,7 +202,6 @@ pub extern "C" fn bethkit_archive_entry_uncompressed_size(
     // SAFETY: entry is non-null.
     unsafe { &*entry }.0.uncompressed_size
 }
-
 
 /// Extracts the file at virtual `path` from `archive` into a heap-allocated
 /// buffer.
@@ -235,7 +230,11 @@ pub extern "C" fn bethkit_archive_extract(
 ) -> *mut u8 {
     null_check!(archive, "bethkit_archive_extract", std::ptr::null_mut());
     null_check!(path, "bethkit_archive_extract/path", std::ptr::null_mut());
-    null_check!(out_len, "bethkit_archive_extract/out_len", std::ptr::null_mut());
+    null_check!(
+        out_len,
+        "bethkit_archive_extract/out_len",
+        std::ptr::null_mut()
+    );
 
     let path_str = match cstr_to_str(path, "bethkit_archive_extract") {
         Some(s) => s,
@@ -246,7 +245,9 @@ pub extern "C" fn bethkit_archive_extract(
     let arc = unsafe { &*archive };
     let result = match arc.0.extract(path_str) {
         None => {
-            set_last_error(format!("bethkit_archive_extract: path not found: {path_str}"));
+            set_last_error(format!(
+                "bethkit_archive_extract: path not found: {path_str}"
+            ));
             return std::ptr::null_mut();
         }
         Some(r) => r,
@@ -318,7 +319,6 @@ pub extern "C" fn bethkit_archive_extract_to_file(
     0
 }
 
-
 /// Creates a new BSA archive writer for the given `version`.
 ///
 /// Returns a pointer to the writer handle on success, or null on failure.
@@ -348,10 +348,7 @@ pub extern "C" fn bethkit_bsa_writer_free(w: *mut BethkitBsaWriter) {
 ///
 /// Returns 0 on success or -1 if `w` is null or already consumed.
 #[no_mangle]
-pub extern "C" fn bethkit_bsa_writer_set_compress(
-    w: *mut BethkitBsaWriter,
-    compress: bool,
-) -> i32 {
+pub extern "C" fn bethkit_bsa_writer_set_compress(w: *mut BethkitBsaWriter, compress: bool) -> i32 {
     null_check!(w, "bethkit_bsa_writer_set_compress", -1);
     // SAFETY: w is non-null.
     let bw = unsafe { &mut *w };
@@ -371,10 +368,7 @@ pub extern "C" fn bethkit_bsa_writer_set_compress(
 ///
 /// Returns 0 on success or -1 if `w` is null or already consumed.
 #[no_mangle]
-pub extern "C" fn bethkit_bsa_writer_set_embed_names(
-    w: *mut BethkitBsaWriter,
-    embed: bool,
-) -> i32 {
+pub extern "C" fn bethkit_bsa_writer_set_embed_names(w: *mut BethkitBsaWriter, embed: bool) -> i32 {
     null_check!(w, "bethkit_bsa_writer_set_embed_names", -1);
     // SAFETY: w is non-null.
     let bw = unsafe { &mut *w };
@@ -469,12 +463,14 @@ pub extern "C" fn bethkit_bsa_writer_write_to(
             -1
         }
         Some(inner) => {
-            ffi_try!(inner.write_to(Path::new(dest_str)).map_err(FfiError::Bsa), -1);
+            ffi_try!(
+                inner.write_to(Path::new(dest_str)).map_err(FfiError::Bsa),
+                -1
+            );
             0
         }
     }
 }
-
 
 /// Creates a new BA2 general-content archive writer for the given `version`.
 ///
@@ -572,12 +568,14 @@ pub extern "C" fn bethkit_ba2_gnrl_writer_write_to(
             -1
         }
         Some(inner) => {
-            ffi_try!(inner.write_to(Path::new(dest_str)).map_err(FfiError::Bsa), -1);
+            ffi_try!(
+                inner.write_to(Path::new(dest_str)).map_err(FfiError::Bsa),
+                -1
+            );
             0
         }
     }
 }
-
 
 /// Creates a new BA2 DX10 (texture) archive writer for the given `version`.
 ///
@@ -674,7 +672,10 @@ pub extern "C" fn bethkit_ba2_dx10_writer_write_to(
             -1
         }
         Some(inner) => {
-            ffi_try!(inner.write_to(Path::new(dest_str)).map_err(FfiError::Bsa), -1);
+            ffi_try!(
+                inner.write_to(Path::new(dest_str)).map_err(FfiError::Bsa),
+                -1
+            );
             0
         }
     }

@@ -300,7 +300,7 @@ mod tests {
         dds.extend_from_slice(b"DDS ");
         // DDS_HEADER (124 bytes starting with dwSize=124)
         dds.extend_from_slice(&124u32.to_le_bytes()); // dwSize
-        // dwFlags: CAPS | HEIGHT | WIDTH | PIXELFORMAT | MIPMAPCOUNT | LINEARSIZE
+                                                      // dwFlags: CAPS | HEIGHT | WIDTH | PIXELFORMAT | MIPMAPCOUNT | LINEARSIZE
         let flags: u32 = 0x0001 | 0x0002 | 0x0004 | 0x1000 | 0x2_0000 | 0x8_0000;
         dds.extend_from_slice(&flags.to_le_bytes());
         dds.extend_from_slice(&1u32.to_le_bytes()); // height = 1
@@ -309,12 +309,12 @@ mod tests {
         dds.extend_from_slice(&1u32.to_le_bytes()); // depth = 1
         dds.extend_from_slice(&1u32.to_le_bytes()); // mip count = 1
         dds.extend_from_slice(&[0u8; 44]); // dwReserved1[11]
-        // DDS_PIXELFORMAT (32 bytes)
+                                           // DDS_PIXELFORMAT (32 bytes)
         dds.extend_from_slice(&32u32.to_le_bytes()); // pf.dwSize
         dds.extend_from_slice(&4u32.to_le_bytes()); // pf.dwFlags = FOURCC
         dds.extend_from_slice(b"DXT1"); // FourCC
         dds.extend_from_slice(&[0u8; 20]); // remaining pf fields
-        // dwCaps, dwCaps2, dwCaps3, dwCaps4, dwReserved2 (20 bytes)
+                                           // dwCaps, dwCaps2, dwCaps3, dwCaps4, dwReserved2 (20 bytes)
         let caps: u32 = 0x0000_1000 | 0x0040_0000; // TEXTURE | MIPMAP
         dds.extend_from_slice(&caps.to_le_bytes());
         dds.extend_from_slice(&[0u8; 16]);
@@ -339,11 +339,17 @@ mod tests {
         // then
         let archive = crate::open(&path)?;
         assert_eq!(archive.file_count(), 1);
-        let extracted = archive.extract("textures/test.dds").expect("entry exists")?.to_vec();
+        let extracted = archive
+            .extract("textures/test.dds")
+            .expect("entry exists")?
+            .to_vec();
         // The extracted DDS should start with "DDS " and contain the same
         // pixel data (mip bytes).  Header is reconstructed so we only check
         // that the magic is present and the pixel data matches.
-        assert!(extracted.starts_with(b"DDS "), "extracted missing DDS magic");
+        assert!(
+            extracted.starts_with(b"DDS "),
+            "extracted missing DDS magic"
+        );
         // BC1 1×1 mip = 8 bytes; they appear after the reconstructed header.
         assert!(extracted.ends_with(&[0u8; 8]), "mip data mismatch");
         Ok(())

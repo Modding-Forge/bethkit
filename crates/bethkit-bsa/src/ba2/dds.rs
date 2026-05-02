@@ -375,7 +375,10 @@ pub fn build_dds_header(
                 | DdsCaps2::NEGATIVEZ,
         )
     } else if num_mips > 1 {
-        (DdsCaps::TEXTURE | DdsCaps::MIPMAP | DdsCaps::COMPLEX, DdsCaps2::empty())
+        (
+            DdsCaps::TEXTURE | DdsCaps::MIPMAP | DdsCaps::COMPLEX,
+            DdsCaps2::empty(),
+        )
     } else {
         (DdsCaps::TEXTURE, DdsCaps2::empty())
     };
@@ -413,9 +416,15 @@ pub fn build_dds_header(
             r,
             a,
         } => (*flags, [0u8; 4], *bit_count, *r, 0, 0, *a),
-        PixelFmt::Alpha { bit_count, a } => {
-            (DdsPixelFormatFlags::ALPHA, [0u8; 4], *bit_count, 0, 0, 0, *a)
-        }
+        PixelFmt::Alpha { bit_count, a } => (
+            DdsPixelFormatFlags::ALPHA,
+            [0u8; 4],
+            *bit_count,
+            0,
+            0,
+            0,
+            *a,
+        ),
     };
 
     // dwFlags is always DDSD_MIPMAPCOUNT; remove if 0 mips (shouldn't happen).

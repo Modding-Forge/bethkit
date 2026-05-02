@@ -514,7 +514,8 @@ mod tests {
 
     /// Verifies the file-extension detection helper.
     #[test]
-    fn from_path_detects_kind_case_insensitively() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn from_path_detects_kind_case_insensitively(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given
         let cases: &[(&str, Option<StringFileKind>)] = &[
             ("MyMod_English.STRINGS", Some(StringFileKind::Strings)),
@@ -536,7 +537,8 @@ mod tests {
 
     /// Verifies the sibling-path helper builds the conventional layout.
     #[test]
-    fn sibling_paths_use_strings_subdirectory() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn sibling_paths_use_strings_subdirectory(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given
         let plugin: PathBuf = PathBuf::from("C:/games/Skyrim/Data/MyMod.esp");
 

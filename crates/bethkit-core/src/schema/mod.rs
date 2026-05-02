@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Declarative record schema for Bethesda plugin files.
 //!
@@ -41,12 +41,11 @@ use ahash::HashMap;
 use crate::types::Signature;
 
 pub mod enums;
-pub mod view;
 pub(crate) mod shared;
 mod sse;
+pub mod view;
 
 pub use view::{FieldEntry, FieldValue, RecordView};
-
 
 /// Describes all subrecords expected by a single record type.
 #[derive(Clone, Copy)]
@@ -157,7 +156,6 @@ pub enum FieldType {
     Unused(u8),
 }
 
-
 /// A named integer enumeration.
 #[derive(Clone, Copy)]
 pub struct EnumDef {
@@ -196,7 +194,6 @@ impl FlagsDef {
     }
 }
 
-
 /// Maps record type signatures to their [`RecordSchema`] definitions.
 ///
 /// Currently only Skyrim SE is supported. Use [`SchemaRegistry::sse`] to
@@ -208,7 +205,9 @@ pub struct SchemaRegistry {
 impl SchemaRegistry {
     /// Creates an empty registry.
     pub(crate) fn new() -> Self {
-        Self { map: HashMap::default() }
+        Self {
+            map: HashMap::default(),
+        }
     }
 
     /// Registers a record schema. Later registrations for the same signature

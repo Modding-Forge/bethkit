@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Reusable static [`SubRecordDef`] helpers shared across many SSE record
 //! definitions.
@@ -14,7 +14,6 @@ use crate::types::Signature;
 // Re-export universal definitions so callers can use this module as a
 // one-stop import.
 pub use crate::schema::shared::{EDID_DEF, ICON_DEF, MICO_DEF, MODL_DEF};
-
 
 /// FULL — Full display name.
 ///
@@ -82,15 +81,32 @@ pub static VMAD_DEF: SubRecordDef = SubRecordDef {
     field: FieldType::ByteArray,
 };
 
-
 /// OBND field layout: 6 signed 16-bit integers (X1,Y1,Z1, X2,Y2,Z2).
 static OBND_FIELDS: [FieldDef; 6] = [
-    FieldDef { name: "X1", kind: FieldType::Int16 },
-    FieldDef { name: "Y1", kind: FieldType::Int16 },
-    FieldDef { name: "Z1", kind: FieldType::Int16 },
-    FieldDef { name: "X2", kind: FieldType::Int16 },
-    FieldDef { name: "Y2", kind: FieldType::Int16 },
-    FieldDef { name: "Z2", kind: FieldType::Int16 },
+    FieldDef {
+        name: "X1",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Y1",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Z1",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "X2",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Y2",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Z2",
+        kind: FieldType::Int16,
+    },
 ];
 
 /// OBND — Object bounds (bounding box).
@@ -101,7 +117,6 @@ pub static OBND_DEF: SubRecordDef = SubRecordDef {
     repeating: false,
     field: FieldType::Struct(&OBND_FIELDS),
 };
-
 
 /// KSIZ — keyword count (u32).
 pub static KSIZ_DEF: SubRecordDef = SubRecordDef {
@@ -126,7 +141,6 @@ pub static KWDA_DEF: SubRecordDef = SubRecordDef {
     },
 };
 
-
 /// DEST — Destruction data (raw byte array; complex sub-structure).
 pub static DEST_DEF: SubRecordDef = SubRecordDef {
     sig: Signature(*b"DEST"),
@@ -135,7 +149,6 @@ pub static DEST_DEF: SubRecordDef = SubRecordDef {
     repeating: false,
     field: FieldType::ByteArray,
 };
-
 
 /// EITM — Enchantment / Object Effect FormID.
 pub static EITM_DEF: SubRecordDef = SubRecordDef {
@@ -155,7 +168,6 @@ pub static EAMT_DEF: SubRecordDef = SubRecordDef {
     field: FieldType::UInt16,
 };
 
-
 /// EFID — Base Effect FormID (references MGEF).
 pub static EFID_DEF: SubRecordDef = SubRecordDef {
     sig: Signature(*b"EFID"),
@@ -166,9 +178,18 @@ pub static EFID_DEF: SubRecordDef = SubRecordDef {
 };
 
 static EFIT_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Magnitude", kind: FieldType::Float32 },
-    FieldDef { name: "Area of Effect", kind: FieldType::UInt32 },
-    FieldDef { name: "Duration", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Magnitude",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Area of Effect",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Duration",
+        kind: FieldType::UInt32,
+    },
 ];
 
 /// EFIT — Effect data (magnitude, area, duration).
@@ -189,7 +210,6 @@ pub static CTDA_DEF: SubRecordDef = SubRecordDef {
     field: FieldType::ByteArray,
 };
 
-
 /// ETYP — Equipment type FormID.
 pub static ETYP_DEF: SubRecordDef = SubRecordDef {
     sig: Signature(*b"ETYP"),
@@ -198,7 +218,6 @@ pub static ETYP_DEF: SubRecordDef = SubRecordDef {
     repeating: false,
     field: FieldType::FormIdTyped(&[Signature(*b"EQUP")]),
 };
-
 
 /// PRPS — Properties array (raw byte array).
 // NOTE: Reserved for future script-property schema expansion.
@@ -211,7 +230,6 @@ pub static PRPS_DEF: SubRecordDef = SubRecordDef {
     field: FieldType::ByteArray,
 };
 
-
 /// RNAM — Race FormID.
 pub static RNAM_DEF: SubRecordDef = SubRecordDef {
     sig: Signature(*b"RNAM"),
@@ -220,7 +238,6 @@ pub static RNAM_DEF: SubRecordDef = SubRecordDef {
     repeating: false,
     field: FieldType::FormIdTyped(&[Signature(*b"RACE")]),
 };
-
 
 /// SPCT — Spell count (u32).
 pub static SPCT_DEF: SubRecordDef = SubRecordDef {

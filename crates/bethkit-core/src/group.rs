@@ -112,7 +112,6 @@ impl GroupLabel {
     }
 }
 
-
 /// The 24-byte header of a GRUP block.
 pub struct GroupHeader {
     /// Total size of this group in bytes, including the 24-byte header.

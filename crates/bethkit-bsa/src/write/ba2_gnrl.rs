@@ -263,11 +263,17 @@ mod tests {
         let archive = crate::open(&path)?;
         assert_eq!(archive.file_count(), 2);
         assert_eq!(
-            archive.extract("meshes/iron.nif").expect("entry exists")?.to_vec(),
+            archive
+                .extract("meshes/iron.nif")
+                .expect("entry exists")?
+                .to_vec(),
             b"nif payload"
         );
         assert_eq!(
-            archive.extract("scripts/main.pex").expect("entry exists")?.to_vec(),
+            archive
+                .extract("scripts/main.pex")
+                .expect("entry exists")?
+                .to_vec(),
             b"pex payload"
         );
         Ok(())
@@ -288,7 +294,13 @@ mod tests {
 
         // then
         let archive = crate::open(&path)?;
-        assert_eq!(archive.extract("data/big_file.bin").expect("entry exists")?.to_vec(), payload);
+        assert_eq!(
+            archive
+                .extract("data/big_file.bin")
+                .expect("entry exists")?
+                .to_vec(),
+            payload
+        );
         Ok(())
     }
 }

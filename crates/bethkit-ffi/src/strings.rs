@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! FFI functions for string tables and localization sets.
 //!
@@ -18,9 +18,8 @@ use std::path::Path;
 use bethkit_core::{LocalizationSet, StringTable};
 
 use crate::error::FfiError;
-use crate::types::{BethkitStringFileKind, string_kind_from_rust, string_kind_to_rust};
+use crate::types::{string_kind_from_rust, string_kind_to_rust, BethkitStringFileKind};
 use crate::{cstr_to_str, ffi_try, null_check};
-
 
 /// An opaque handle to a single string table (`.strings`, `.dlstrings`, or
 /// `.ilstrings`).
@@ -38,9 +37,7 @@ pub struct BethkitStringTable(StringTable);
 ///
 /// * `kind` — The string file type to create.
 #[no_mangle]
-pub extern "C" fn bethkit_string_table_new(
-    kind: BethkitStringFileKind,
-) -> *mut BethkitStringTable {
+pub extern "C" fn bethkit_string_table_new(kind: BethkitStringFileKind) -> *mut BethkitStringTable {
     Box::into_raw(Box::new(BethkitStringTable(StringTable::new(
         string_kind_to_rust(kind),
     ))))
@@ -94,7 +91,11 @@ pub extern "C" fn bethkit_string_table_free(st: *mut BethkitStringTable) {
 pub extern "C" fn bethkit_string_table_kind(
     st: *const BethkitStringTable,
 ) -> BethkitStringFileKind {
-    null_check!(st, "bethkit_string_table_kind", BethkitStringFileKind::Strings);
+    null_check!(
+        st,
+        "bethkit_string_table_kind",
+        BethkitStringFileKind::Strings
+    );
     // SAFETY: st is non-null.
     string_kind_from_rust(unsafe { &*st }.0.kind())
 }
@@ -133,7 +134,11 @@ pub extern "C" fn bethkit_string_table_get(
     out_len: *mut usize,
 ) -> *const u8 {
     null_check!(st, "bethkit_string_table_get", std::ptr::null());
-    null_check!(out_len, "bethkit_string_table_get/out_len", std::ptr::null());
+    null_check!(
+        out_len,
+        "bethkit_string_table_get/out_len",
+        std::ptr::null()
+    );
     // SAFETY: st and out_len are non-null.
     match unsafe { &*st }.0.get(id) {
         None => std::ptr::null(),
@@ -213,10 +218,7 @@ pub extern "C" fn bethkit_string_table_insert_new(
 ///
 /// Returns `false` and sets the last error if `st` is null.
 #[no_mangle]
-pub extern "C" fn bethkit_string_table_remove(
-    st: *mut BethkitStringTable,
-    id: u32,
-) -> bool {
+pub extern "C" fn bethkit_string_table_remove(st: *mut BethkitStringTable, id: u32) -> bool {
     null_check!(st, "bethkit_string_table_remove", false);
     // SAFETY: st is non-null.
     unsafe { &mut *st }.0.remove(id).is_some()
@@ -254,12 +256,14 @@ pub extern "C" fn bethkit_string_table_write_to_file(
     );
     // SAFETY: st is non-null.
     ffi_try!(
-        unsafe { &*st }.0.write_to(&mut file).map_err(|e| FfiError::Io(e.into())),
+        unsafe { &*st }
+            .0
+            .write_to(&mut file)
+            .map_err(|e| FfiError::Io(e.into())),
         -1
     );
     0
 }
-
 
 /// An opaque handle to a localization set (the three sibling string tables
 /// `.strings`, `.dlstrings`, and `.ilstrings` for one plugin + language).
@@ -301,8 +305,16 @@ pub extern "C" fn bethkit_localization_set_open(
     plugin_path: *const c_char,
     language: *const c_char,
 ) -> *mut BethkitLocalizationSet {
-    null_check!(plugin_path, "bethkit_localization_set_open", std::ptr::null_mut());
-    null_check!(language, "bethkit_localization_set_open", std::ptr::null_mut());
+    null_check!(
+        plugin_path,
+        "bethkit_localization_set_open",
+        std::ptr::null_mut()
+    );
+    null_check!(
+        language,
+        "bethkit_localization_set_open",
+        std::ptr::null_mut()
+    );
 
     let path_str = match cstr_to_str(plugin_path, "bethkit_localization_set_open") {
         Some(s) => s,
@@ -356,7 +368,11 @@ pub extern "C" fn bethkit_localization_set_get(
     out_len: *mut usize,
 ) -> *const u8 {
     null_check!(ls, "bethkit_localization_set_get", std::ptr::null());
-    null_check!(out_len, "bethkit_localization_set_get/out_len", std::ptr::null());
+    null_check!(
+        out_len,
+        "bethkit_localization_set_get/out_len",
+        std::ptr::null()
+    );
     // SAFETY: ls and out_len are non-null.
     match unsafe { &*ls }.0.get(string_kind_to_rust(kind), id) {
         None => std::ptr::null(),
@@ -394,7 +410,9 @@ pub extern "C" fn bethkit_localization_set_set(
     null_check!(data, "bethkit_localization_set_set/data", -1);
     // SAFETY: ls and data are non-null; data is valid for len bytes.
     let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
-    unsafe { &mut *ls }.0.set(string_kind_to_rust(kind), id, bytes);
+    unsafe { &mut *ls }
+        .0
+        .set(string_kind_to_rust(kind), id, bytes);
     0
 }
 
@@ -420,7 +438,11 @@ pub extern "C" fn bethkit_localization_set_write(
     language: *const c_char,
 ) -> i32 {
     null_check!(ls, "bethkit_localization_set_write", -1);
-    null_check!(plugin_path, "bethkit_localization_set_write/plugin_path", -1);
+    null_check!(
+        plugin_path,
+        "bethkit_localization_set_write/plugin_path",
+        -1
+    );
     null_check!(language, "bethkit_localization_set_write/language", -1);
 
     let path_str = match cstr_to_str(plugin_path, "bethkit_localization_set_write") {
@@ -434,7 +456,10 @@ pub extern "C" fn bethkit_localization_set_write(
 
     // SAFETY: ls is non-null.
     ffi_try!(
-        unsafe { &*ls }.0.write(Path::new(path_str), lang_str).map_err(|e| FfiError::Io(e.into())),
+        unsafe { &*ls }
+            .0
+            .write(Path::new(path_str), lang_str)
+            .map_err(|e| FfiError::Io(e.into())),
         -1
     );
     0

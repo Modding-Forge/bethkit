@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Static enum and flags definitions for Skyrim SE records.
 //!
@@ -6,7 +6,6 @@
 //! suitable for use in [`FieldType::Enum`] and [`FieldType::Flags`].
 
 use super::{EnumDef, FlagsDef};
-
 
 /// Enum for the 44 actor value indices used in AVIF records and skill/stat
 /// references throughout the game.
@@ -180,7 +179,6 @@ pub static ACTOR_VALUE_ENUM: EnumDef = EnumDef {
     ],
 };
 
-
 /// Enum for the six schools of magic.
 pub static SCHOOL_ENUM: EnumDef = EnumDef {
     name: "School",
@@ -193,7 +191,6 @@ pub static SCHOOL_ENUM: EnumDef = EnumDef {
         (5, "Enchanting"),
     ],
 };
-
 
 /// Enum for weapon animation types (DNAM.animationType).
 pub static WEAPON_ANIM_TYPE_ENUM: EnumDef = EnumDef {
@@ -223,7 +220,6 @@ pub static STAGGER_ENUM: EnumDef = EnumDef {
         (4, "Largest"),
     ],
 };
-
 
 /// Enum for armor type (DNAM in ARMO/ARMA).
 pub static ARMOR_TYPE_ENUM: EnumDef = EnumDef {
@@ -272,7 +268,6 @@ pub static BIPED_OBJECT_ENUM: EnumDef = EnumDef {
     ],
 };
 
-
 /// Enum for book type (DATA.type).
 pub static BOOK_TYPE_ENUM: EnumDef = EnumDef {
     name: "BookType",
@@ -284,7 +279,6 @@ pub static BOOK_FLAGS: FlagsDef = FlagsDef {
     name: "BookFlags",
     bits: &[(0, "TeachesSkill"), (1, "CantBeTaken"), (2, "TeachesSpell")],
 };
-
 
 /// Flags for MGEF DATA.flags.
 pub static MAGIC_EFFECT_FLAGS: FlagsDef = FlagsDef {
@@ -345,7 +339,6 @@ pub static CASTING_TYPE_ENUM: EnumDef = EnumDef {
     ],
 };
 
-
 /// Enum for spell type (SPIT.type).
 pub static SPELL_TYPE_ENUM: EnumDef = EnumDef {
     name: "SpellType",
@@ -368,7 +361,6 @@ pub static CHARGE_TIME_ENUM: EnumDef = EnumDef {
     name: "CastingPerkType",
     values: &[(0, "None"), (1, "DualCasting")],
 };
-
 
 /// Flags for NPC_ ACBS.flags.
 pub static NPC_FLAGS: FlagsDef = FlagsDef {
@@ -417,7 +409,6 @@ pub static NPC_LEVEL_TYPE_ENUM: EnumDef = EnumDef {
     values: &[(0, "Fixed"), (1, "PCLevelMult")],
 };
 
-
 /// Flags for faction rank data.
 // NOTE: Reserved for future FACT schema expansion.
 #[allow(dead_code)]
@@ -444,7 +435,6 @@ pub static FACTION_FLAGS: FlagsDef = FlagsDef {
     ],
 };
 
-
 /// Enum for AI package type.
 pub static PACKAGE_TYPE_ENUM: EnumDef = EnumDef {
     name: "PackageType",
@@ -464,7 +454,6 @@ pub static PACKAGE_TYPE_ENUM: EnumDef = EnumDef {
         (37, "UseWeapon"),
     ],
 };
-
 
 /// Flags for LIGH DATA.flags.
 pub static LIGHT_FLAGS: FlagsDef = FlagsDef {
@@ -487,7 +476,6 @@ pub static LIGHT_FLAGS: FlagsDef = FlagsDef {
         (14, "ShadowsPortalOnly"),
     ],
 };
-
 
 /// Enum for quest type.
 pub static QUEST_TYPE_ENUM: EnumDef = EnumDef {
@@ -526,7 +514,6 @@ pub static QUEST_FLAGS: FlagsDef = FlagsDef {
     ],
 };
 
-
 /// Flags for CELL DATA.flags.
 pub static CELL_FLAGS: FlagsDef = FlagsDef {
     name: "CellFlags",
@@ -543,7 +530,6 @@ pub static CELL_FLAGS: FlagsDef = FlagsDef {
     ],
 };
 
-
 /// Enum for weather classification.
 pub static WEATHER_CLASS_ENUM: EnumDef = EnumDef {
     name: "WeatherClass",
@@ -555,7 +541,6 @@ pub static WEATHER_CLASS_ENUM: EnumDef = EnumDef {
         (4, "Snow"),
     ],
 };
-
 
 /// Flags for PROJ DATA.flags.
 pub static PROJECTILE_FLAGS: FlagsDef = FlagsDef {
@@ -588,7 +573,6 @@ pub static PROJECTILE_TYPE_ENUM: EnumDef = EnumDef {
         (64, "Arrow"),
     ],
 };
-
 
 /// Enum for sound level.
 pub static SOUND_LEVEL_ENUM: EnumDef = EnumDef {

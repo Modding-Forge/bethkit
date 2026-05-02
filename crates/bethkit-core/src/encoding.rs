@@ -83,7 +83,8 @@ mod tests {
 
     /// Verifies that known languages map to their documented code pages.
     #[test]
-    fn known_languages_map_to_expected_code_pages() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn known_languages_map_to_expected_code_pages(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given
         let cases: &[(&str, CodePage)] = &[
             ("English", CodePage::Windows1252),

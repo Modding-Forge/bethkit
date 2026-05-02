@@ -24,7 +24,10 @@ thread_local! {
 pub(crate) fn set_last_error(msg: impl Into<Vec<u8>>) {
     let msg_bytes = msg.into();
     // Replace interior NUL bytes with '?' so CString::new never fails.
-    let sanitized: Vec<u8> = msg_bytes.into_iter().map(|b| if b == 0 { b'?' } else { b }).collect();
+    let sanitized: Vec<u8> = msg_bytes
+        .into_iter()
+        .map(|b| if b == 0 { b'?' } else { b })
+        .collect();
     // PANICS: sanitized contains no interior NUL bytes by construction above.
     let cstring = CString::new(sanitized).expect("sanitized string has no interior NULs");
     LAST_ERROR.with(|cell| {
@@ -41,11 +44,9 @@ pub(crate) fn set_last_error(msg: impl Into<Vec<u8>>) {
 /// same thread. The caller must not free or write through this pointer.
 #[no_mangle]
 pub extern "C" fn bethkit_last_error() -> *const c_char {
-    LAST_ERROR.with(|cell| {
-        match cell.borrow().as_ref() {
-            Some(s) => s.as_ptr(),
-            None => c"".as_ptr(),
-        }
+    LAST_ERROR.with(|cell| match cell.borrow().as_ref() {
+        Some(s) => s.as_ptr(),
+        None => c"".as_ptr(),
     })
 }
 

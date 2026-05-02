@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Schema definitions for audio / sound SSE record types.
 //!
@@ -9,7 +9,6 @@ use crate::types::Signature;
 
 use super::common::{EDID_DEF, FULL_DEF, MODL_DEF, OBND_DEF};
 use crate::schema::enums::SOUND_LEVEL_ENUM;
-
 
 static SOUN_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -29,7 +28,6 @@ pub static SOUN_SCHEMA: RecordSchema = RecordSchema {
     name: "Sound Marker",
     members: &SOUN_MEMBERS,
 };
-
 
 static SNDR_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
@@ -95,11 +93,19 @@ pub static SNDR_SCHEMA: RecordSchema = RecordSchema {
     members: &SNDR_MEMBERS,
 };
 
-
 static MUSC_DATA_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Flags", kind: FieldType::UInt16 },
-    FieldDef { name: "Priority", kind: FieldType::UInt16 },
-    FieldDef { name: "Duck Decibels", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Priority",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Duck Decibels",
+        kind: FieldType::Float32,
+    },
 ];
 
 static MUSC_MEMBERS: [SubRecordDef; 3] = [
@@ -120,7 +126,6 @@ pub static MUSC_SCHEMA: RecordSchema = RecordSchema {
     name: "Music Type",
     members: &MUSC_MEMBERS,
 };
-
 
 static MUST_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -157,11 +162,19 @@ pub static MUST_SCHEMA: RecordSchema = RecordSchema {
     members: &MUST_MEMBERS,
 };
 
-
 static SNCT_DATA_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Default Menu Volume", kind: FieldType::Float32 },
-    FieldDef { name: "Default Menu Frequency", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Default Menu Volume",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Default Menu Frequency",
+        kind: FieldType::Float32,
+    },
 ];
 
 static SNCT_MEMBERS: [SubRecordDef; 4] = [
@@ -190,7 +203,6 @@ pub static SNCT_SCHEMA: RecordSchema = RecordSchema {
     members: &SNCT_MEMBERS,
 };
 
-
 static SOPM_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
     SubRecordDef {
@@ -215,7 +227,6 @@ pub static SOPM_SCHEMA: RecordSchema = RecordSchema {
     name: "Sound Output Model",
     members: &SOPM_MEMBERS,
 };
-
 
 static FSTP_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -242,7 +253,6 @@ pub static FSTP_SCHEMA: RecordSchema = RecordSchema {
     members: &FSTP_MEMBERS,
 };
 
-
 static FSTS_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -261,10 +271,10 @@ pub static FSTS_SCHEMA: RecordSchema = RecordSchema {
     members: &FSTS_MEMBERS,
 };
 
-
-static ARTO_DATA_FIELDS: [FieldDef; 1] = [
-    FieldDef { name: "Art Type", kind: FieldType::UInt32 },
-];
+static ARTO_DATA_FIELDS: [FieldDef; 1] = [FieldDef {
+    name: "Art Type",
+    kind: FieldType::UInt32,
+}];
 
 static ARTO_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -285,7 +295,6 @@ pub static ARTO_SCHEMA: RecordSchema = RecordSchema {
     name: "Art Object",
     members: &ARTO_MEMBERS,
 };
-
 
 static MATO_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,

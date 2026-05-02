@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! FFI functions for the multi-plugin record cache.
 //!
@@ -24,13 +24,11 @@ use crate::plugin::BethkitPlugin;
 use crate::record::BethkitRecord;
 use crate::{cstr_to_str, null_check, set_last_error};
 
-
 /// An opaque handle to a multi-plugin record cache.
 ///
 /// Created by [`bethkit_plugin_cache_new`].  Must be freed with
 /// [`bethkit_plugin_cache_free`].
 pub struct BethkitPluginCache(PluginCache);
-
 
 /// Creates a new, empty plugin cache.
 ///
@@ -52,7 +50,6 @@ pub extern "C" fn bethkit_plugin_cache_free(cache: *mut BethkitPluginCache) {
     // SAFETY: cache was produced by Box::into_raw.
     drop(unsafe { Box::from_raw(cache) });
 }
-
 
 /// Adds `plugin` to the cache under `name`.
 ///
@@ -100,7 +97,6 @@ pub extern "C" fn bethkit_plugin_cache_add(
     0
 }
 
-
 /// Returns the number of plugins in the cache.
 ///
 /// Returns 0 and sets the last error if `cache` is null.
@@ -115,9 +111,7 @@ pub extern "C" fn bethkit_plugin_cache_len(cache: *const BethkitPluginCache) -> 
 ///
 /// Returns 0 and sets the last error if `cache` is null.
 #[no_mangle]
-pub extern "C" fn bethkit_plugin_cache_record_count(
-    cache: *const BethkitPluginCache,
-) -> usize {
+pub extern "C" fn bethkit_plugin_cache_record_count(cache: *const BethkitPluginCache) -> usize {
     null_check!(cache, "bethkit_plugin_cache_record_count", 0);
     // SAFETY: cache is non-null.
     unsafe { &*cache }.0.record_count()
@@ -145,7 +139,11 @@ pub extern "C" fn bethkit_plugin_cache_resolve(
     object_id: u32,
 ) -> *const BethkitRecord {
     null_check!(cache, "bethkit_plugin_cache_resolve", std::ptr::null());
-    null_check!(plugin_name, "bethkit_plugin_cache_resolve/plugin_name", std::ptr::null());
+    null_check!(
+        plugin_name,
+        "bethkit_plugin_cache_resolve/plugin_name",
+        std::ptr::null()
+    );
 
     let name_str = match cstr_to_str(plugin_name, "bethkit_plugin_cache_resolve") {
         Some(s) => s,
@@ -188,8 +186,16 @@ pub extern "C" fn bethkit_plugin_cache_find_by_editor_id(
     edid: *const c_char,
     out_gfid: *mut BethkitGlobalFormId,
 ) -> *const BethkitRecord {
-    null_check!(cache, "bethkit_plugin_cache_find_by_editor_id", std::ptr::null());
-    null_check!(edid, "bethkit_plugin_cache_find_by_editor_id/edid", std::ptr::null());
+    null_check!(
+        cache,
+        "bethkit_plugin_cache_find_by_editor_id",
+        std::ptr::null()
+    );
+    null_check!(
+        edid,
+        "bethkit_plugin_cache_find_by_editor_id/edid",
+        std::ptr::null()
+    );
 
     let edid_str = match cstr_to_str(edid, "bethkit_plugin_cache_find_by_editor_id") {
         Some(s) => s,

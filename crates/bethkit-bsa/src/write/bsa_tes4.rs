@@ -96,7 +96,10 @@ pub(super) fn write(
     for entry in entries {
         // Split path into folder and filename.
         let (folder_str, file_str) = match entry.path.rfind('/') {
-            Some(idx) => (entry.path[..idx].to_owned(), entry.path[idx + 1..].to_owned()),
+            Some(idx) => (
+                entry.path[..idx].to_owned(),
+                entry.path[idx + 1..].to_owned(),
+            ),
             None => (String::new(), entry.path.clone()),
         };
 
@@ -152,12 +155,10 @@ pub(super) fn write(
     let mut folder_order: Vec<u64> = Vec::new();
     let mut folder_map: BTreeMap<u64, (String, Vec<usize>)> = BTreeMap::new();
     for (idx, fe) in file_entries.iter().enumerate() {
-        let slot = folder_map
-            .entry(fe.folder_hash)
-            .or_insert_with(|| {
-                folder_order.push(fe.folder_hash);
-                (fe.folder_name.clone(), Vec::new())
-            });
+        let slot = folder_map.entry(fe.folder_hash).or_insert_with(|| {
+            folder_order.push(fe.folder_hash);
+            (fe.folder_name.clone(), Vec::new())
+        });
         slot.1.push(idx);
     }
     // NOTE: BTreeMap iteration is sorted by key, which equals hash order since
@@ -266,9 +267,8 @@ pub(super) fn write(
             out.write_all(&0u32.to_le_bytes())?; // unknown
             out.write_all(&folder_data_offsets[i].to_le_bytes())?;
         } else {
-            let off32 = u32::try_from(folder_data_offsets[i]).map_err(|_| {
-                BsaError::Corrupt("BSA folder data offset exceeds 4 GiB".into())
-            })?;
+            let off32 = u32::try_from(folder_data_offsets[i])
+                .map_err(|_| BsaError::Corrupt("BSA folder data offset exceeds 4 GiB".into()))?;
             out.write_all(&off32.to_le_bytes())?;
         }
     }
@@ -344,9 +344,8 @@ fn compress_lz4_frame(data: &[u8]) -> Result<Vec<u8>> {
 
     let mut enc = FrameEncoder::new(Vec::new());
     enc.write_all(data)?;
-    enc.finish().map_err(|e| {
-        crate::error::BsaError::WriteIo(std::io::Error::other(e))
-    })
+    enc.finish()
+        .map_err(|e| crate::error::BsaError::WriteIo(std::io::Error::other(e)))
 }
 
 /// Splits a filename string into `(stem, ext)` where ext includes the dot.
@@ -396,11 +395,17 @@ mod tests {
         let archive = crate::open(&path)?;
         assert_eq!(archive.file_count(), 2);
         assert_eq!(
-            archive.extract("meshes/iron.nif").expect("entry exists")?.to_vec(),
+            archive
+                .extract("meshes/iron.nif")
+                .expect("entry exists")?
+                .to_vec(),
             b"nif data"
         );
         assert_eq!(
-            archive.extract("textures/iron.dds").expect("entry exists")?.to_vec(),
+            archive
+                .extract("textures/iron.dds")
+                .expect("entry exists")?
+                .to_vec(),
             b"dds data"
         );
         Ok(())
@@ -422,7 +427,10 @@ mod tests {
         // then
         let archive = crate::open(&path)?;
         assert_eq!(
-            archive.extract("meshes/big.nif").expect("entry exists")?.to_vec(),
+            archive
+                .extract("meshes/big.nif")
+                .expect("entry exists")?
+                .to_vec(),
             payload
         );
         Ok(())
@@ -444,7 +452,10 @@ mod tests {
         // then
         let archive = crate::open(&path)?;
         assert_eq!(
-            archive.extract("meshes/sse.nif").expect("entry exists")?.to_vec(),
+            archive
+                .extract("meshes/sse.nif")
+                .expect("entry exists")?
+                .to_vec(),
             payload
         );
         Ok(())
@@ -467,11 +478,17 @@ mod tests {
         let archive = crate::open(&path)?;
         assert_eq!(archive.file_count(), 2);
         assert_eq!(
-            archive.extract("meshes/a.nif").expect("entry exists")?.to_vec(),
+            archive
+                .extract("meshes/a.nif")
+                .expect("entry exists")?
+                .to_vec(),
             b"data_a"
         );
         assert_eq!(
-            archive.extract("scripts/b.pex").expect("entry exists")?.to_vec(),
+            archive
+                .extract("scripts/b.pex")
+                .expect("entry exists")?
+                .to_vec(),
             b"data_b"
         );
         Ok(())

@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! FFI functions for inspecting records and subrecords.
 //!
@@ -13,9 +13,8 @@ use std::ffi::{c_char, CString};
 
 use bethkit_core::{Record, SubRecord};
 
-use crate::{BethkitSlice, ffi_try, null_check, set_last_error};
 use crate::error::FfiError;
-
+use crate::{ffi_try, null_check, set_last_error, BethkitSlice};
 
 /// A borrowed, read-only handle to a plugin record.
 ///
@@ -31,17 +30,13 @@ pub struct BethkitRecord(pub(crate) Record);
 #[repr(transparent)]
 pub struct BethkitSubRecord(pub(crate) SubRecord);
 
-
 /// Writes the 4-byte record signature into `out`.
 ///
 /// `out` must point to at least 4 writable bytes.
 ///
 /// Returns 0 on success or -1 if `record` or `out` is null.
 #[no_mangle]
-pub extern "C" fn bethkit_record_signature(
-    record: *const BethkitRecord,
-    out: *mut u8,
-) -> i32 {
+pub extern "C" fn bethkit_record_signature(record: *const BethkitRecord, out: *mut u8) -> i32 {
     null_check!(record, "bethkit_record_signature", -1);
     null_check!(out, "bethkit_record_signature/out", -1);
     // SAFETY: record and out are non-null; out is guaranteed ≥4 bytes by contract.
@@ -99,15 +94,11 @@ pub extern "C" fn bethkit_record_editor_id(record: *const BethkitRecord) -> *con
     null_check!(record, "bethkit_record_editor_id", std::ptr::null());
     // SAFETY: record is non-null.
     let rec = unsafe { &*record };
-    let edid = ffi_try!(
-        rec.0.editor_id().map_err(FfiError::Core),
-        std::ptr::null()
-    );
+    let edid = ffi_try!(rec.0.editor_id().map_err(FfiError::Core), std::ptr::null());
     match edid {
         None => std::ptr::null(),
         Some(s) => {
-            let sanitized: Vec<u8> =
-                s.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
+            let sanitized: Vec<u8> = s.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
             match CString::new(sanitized) {
                 Ok(cs) => cs.into_raw(),
                 Err(e) => {
@@ -209,17 +200,13 @@ pub extern "C" fn bethkit_record_subrecord_find(
     }
 }
 
-
 /// Writes the 4-byte subrecord signature into `out`.
 ///
 /// `out` must point to at least 4 writable bytes.
 ///
 /// Returns 0 on success or -1 if `sr` or `out` is null.
 #[no_mangle]
-pub extern "C" fn bethkit_subrecord_signature(
-    sr: *const BethkitSubRecord,
-    out: *mut u8,
-) -> i32 {
+pub extern "C" fn bethkit_subrecord_signature(sr: *const BethkitSubRecord, out: *mut u8) -> i32 {
     null_check!(sr, "bethkit_subrecord_signature", -1);
     null_check!(out, "bethkit_subrecord_signature/out", -1);
     // SAFETY: sr and out are non-null; out is ≥4 bytes by contract.
@@ -239,10 +226,20 @@ pub extern "C" fn bethkit_subrecord_signature(
 /// is null.
 #[no_mangle]
 pub extern "C" fn bethkit_subrecord_bytes(sr: *const BethkitSubRecord) -> BethkitSlice {
-    null_check!(sr, "bethkit_subrecord_bytes", BethkitSlice { ptr: std::ptr::null(), len: 0 });
+    null_check!(
+        sr,
+        "bethkit_subrecord_bytes",
+        BethkitSlice {
+            ptr: std::ptr::null(),
+            len: 0
+        }
+    );
     // SAFETY: sr is non-null.
     let bytes = unsafe { &*sr }.0.as_bytes();
-    BethkitSlice { ptr: bytes.as_ptr(), len: bytes.len() }
+    BethkitSlice {
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
+    }
 }
 
 /// Reads the subrecord payload as a single `u8`.
@@ -255,10 +252,7 @@ pub extern "C" fn bethkit_subrecord_bytes(sr: *const BethkitSubRecord) -> Bethki
 /// Returns -1 and sets the last error if `sr` or `out` is null, or the
 /// payload length does not match.
 #[no_mangle]
-pub extern "C" fn bethkit_subrecord_as_u8(
-    sr: *const BethkitSubRecord,
-    out: *mut u8,
-) -> i32 {
+pub extern "C" fn bethkit_subrecord_as_u8(sr: *const BethkitSubRecord, out: *mut u8) -> i32 {
     null_check!(sr, "bethkit_subrecord_as_u8", -1);
     null_check!(out, "bethkit_subrecord_as_u8/out", -1);
     // SAFETY: sr is non-null.
@@ -278,10 +272,7 @@ pub extern "C" fn bethkit_subrecord_as_u8(
 /// Returns -1 and sets the last error if `sr` or `out` is null, or the
 /// payload length does not match.
 #[no_mangle]
-pub extern "C" fn bethkit_subrecord_as_u16(
-    sr: *const BethkitSubRecord,
-    out: *mut u16,
-) -> i32 {
+pub extern "C" fn bethkit_subrecord_as_u16(sr: *const BethkitSubRecord, out: *mut u16) -> i32 {
     null_check!(sr, "bethkit_subrecord_as_u16", -1);
     null_check!(out, "bethkit_subrecord_as_u16/out", -1);
     // SAFETY: sr is non-null.
@@ -301,10 +292,7 @@ pub extern "C" fn bethkit_subrecord_as_u16(
 /// Returns -1 and sets the last error if `sr` or `out` is null, or the
 /// payload length does not match.
 #[no_mangle]
-pub extern "C" fn bethkit_subrecord_as_u32(
-    sr: *const BethkitSubRecord,
-    out: *mut u32,
-) -> i32 {
+pub extern "C" fn bethkit_subrecord_as_u32(sr: *const BethkitSubRecord, out: *mut u32) -> i32 {
     null_check!(sr, "bethkit_subrecord_as_u32", -1);
     null_check!(out, "bethkit_subrecord_as_u32/out", -1);
     // SAFETY: sr is non-null.
@@ -324,10 +312,7 @@ pub extern "C" fn bethkit_subrecord_as_u32(
 /// Returns -1 and sets the last error if `sr` or `out` is null, or the
 /// payload length does not match.
 #[no_mangle]
-pub extern "C" fn bethkit_subrecord_as_f32(
-    sr: *const BethkitSubRecord,
-    out: *mut f32,
-) -> i32 {
+pub extern "C" fn bethkit_subrecord_as_f32(sr: *const BethkitSubRecord, out: *mut f32) -> i32 {
     null_check!(sr, "bethkit_subrecord_as_f32", -1);
     null_check!(out, "bethkit_subrecord_as_f32/out", -1);
     // SAFETY: sr is non-null.
@@ -353,7 +338,10 @@ pub extern "C" fn bethkit_subrecord_as_f32(
 pub extern "C" fn bethkit_subrecord_as_zstring(sr: *const BethkitSubRecord) -> *mut c_char {
     null_check!(sr, "bethkit_subrecord_as_zstring", std::ptr::null_mut());
     // SAFETY: sr is non-null.
-    let s = ffi_try!(unsafe { &*sr }.0.as_zstring().map_err(FfiError::Core), std::ptr::null_mut());
+    let s = ffi_try!(
+        unsafe { &*sr }.0.as_zstring().map_err(FfiError::Core),
+        std::ptr::null_mut()
+    );
     let sanitized: Vec<u8> = s.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
     match CString::new(sanitized) {
         Ok(cs) => cs.into_raw(),

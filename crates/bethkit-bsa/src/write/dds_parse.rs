@@ -104,14 +104,15 @@ pub fn parse(dds: &[u8]) -> Result<DdsInfo> {
     let (dxgi_format, header_len) = if pf_flags & PF_FOURCC != 0 && four_cc == FOURCC_DX10 {
         // DX10 extension header at byte 128.
         if dds.len() < 148 {
-            return Err(BsaError::InvalidDds("DDS too short for DX10 extension".into()));
+            return Err(BsaError::InvalidDds(
+                "DDS too short for DX10 extension".into(),
+            ));
         }
         let dxgi_raw = u32::from_le_bytes([dds[128], dds[129], dds[130], dds[131]]);
         (dxgi_raw as u8, 148usize)
     } else if pf_flags & PF_FOURCC != 0 {
-        let fmt = fourcc_to_dxgi(&four_cc).ok_or_else(|| {
-            BsaError::InvalidDds(format!("unknown FourCC {:?}", four_cc))
-        })?;
+        let fmt = fourcc_to_dxgi(&four_cc)
+            .ok_or_else(|| BsaError::InvalidDds(format!("unknown FourCC {:?}", four_cc)))?;
         (fmt as u8, 128usize)
     } else if pf_flags & PF_RGB != 0 {
         let fmt = uncompressed_to_dxgi(pf_flags, rgb_bit_count, r_mask, a_mask)?;
@@ -242,13 +243,13 @@ pub fn mip_byte_size(w: u32, h: u32, fmt: u8) -> Result<usize> {
             (bw * bh * 16) as usize
         }
         // 32-bpp uncompressed.
-        DxgiFormat::R8G8B8A8_UNORM
-        | DxgiFormat::B8G8R8A8_UNORM
-        | DxgiFormat::B8G8R8X8_UNORM => (w.max(1) * h.max(1) * 4) as usize,
+        DxgiFormat::R8G8B8A8_UNORM | DxgiFormat::B8G8R8A8_UNORM | DxgiFormat::B8G8R8X8_UNORM => {
+            (w.max(1) * h.max(1) * 4) as usize
+        }
         // 16-bpp.
-        DxgiFormat::R8G8_UNORM
-        | DxgiFormat::B5G6R5_UNORM
-        | DxgiFormat::B5G5R5A1_UNORM => (w.max(1) * h.max(1) * 2) as usize,
+        DxgiFormat::R8G8_UNORM | DxgiFormat::B5G6R5_UNORM | DxgiFormat::B5G5R5A1_UNORM => {
+            (w.max(1) * h.max(1) * 2) as usize
+        }
         // 8-bpp.
         DxgiFormat::A8_UNORM
         | DxgiFormat::R8_UNORM

@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Read-only, schema-guided view over a parsed [`Record`].
 //!
@@ -22,7 +22,6 @@ use crate::error::{CoreError, Result};
 use crate::record::{Record, SubRecord};
 use crate::schema::{ArrayCount, FieldDef, FieldType, RecordSchema, SubRecordDef};
 use crate::types::{FormId, RecordFlags, Signature};
-
 
 /// A decoded field value produced by a [`RecordView`].
 #[derive(Debug)]
@@ -126,7 +125,6 @@ impl fmt::Display for FieldValue<'_> {
     }
 }
 
-
 /// A named field value within a [`RecordView`] or a nested struct.
 #[derive(Debug)]
 pub struct FieldEntry<'a> {
@@ -135,7 +133,6 @@ pub struct FieldEntry<'a> {
     /// The decoded value.
     pub value: FieldValue<'a>,
 }
-
 
 /// A read-only, schema-guided view over a parsed [`Record`].
 ///
@@ -169,9 +166,12 @@ impl<'a> RecordView<'a> {
     /// * `plugin_localized` - Whether the plugin that contains this record has
     ///   the LOCALIZED flag set.
     pub fn new(record: &'a Record, schema: &'static RecordSchema, plugin_localized: bool) -> Self {
-        let localized =
-            plugin_localized || record.header.flags.contains(RecordFlags::LOCALIZED);
-        Self { record, schema, localized }
+        let localized = plugin_localized || record.header.flags.contains(RecordFlags::LOCALIZED);
+        Self {
+            record,
+            schema,
+            localized,
+        }
     }
 
     /// Returns all defined fields in schema order.
@@ -201,7 +201,10 @@ impl<'a> RecordView<'a> {
                 Err(CoreError::UnexpectedEof { .. }) => FieldValue::Missing,
                 Err(e) => return Err(e),
             };
-            entries.push(FieldEntry { name: def.name, value });
+            entries.push(FieldEntry {
+                name: def.name,
+                value,
+            });
         }
         Ok(entries)
     }
@@ -230,7 +233,10 @@ impl<'a> RecordView<'a> {
                     Err(CoreError::UnexpectedEof { .. }) => FieldValue::Missing,
                     Err(e) => return Err(e),
                 };
-                return Ok(Some(FieldEntry { name: def.name, value }));
+                return Ok(Some(FieldEntry {
+                    name: def.name,
+                    value,
+                }));
             }
         }
         Ok(None)
@@ -243,8 +249,10 @@ impl<'a> RecordView<'a> {
         subrecords: &'a [SubRecord],
     ) -> Result<FieldValue<'a>> {
         if def.repeating {
-            let matching: Vec<&'a SubRecord> =
-                subrecords.iter().filter(|sr| sr.signature == def.sig).collect();
+            let matching: Vec<&'a SubRecord> = subrecords
+                .iter()
+                .filter(|sr| sr.signature == def.sig)
+                .collect();
             if matching.is_empty() {
                 return Ok(FieldValue::Missing);
             }
@@ -265,66 +273,73 @@ impl<'a> RecordView<'a> {
     fn decode_field(&self, kind: FieldType, data: &'a [u8]) -> Result<FieldValue<'a>> {
         match kind {
             FieldType::UInt8 => {
-                let v: u8 = data
-                    .first()
-                    .copied()
-                    .ok_or(CoreError::UnexpectedEof { context: "UInt8 field" })?;
+                let v: u8 = data.first().copied().ok_or(CoreError::UnexpectedEof {
+                    context: "UInt8 field",
+                })?;
                 Ok(FieldValue::Int(i64::from(v)))
             }
             FieldType::UInt16 => {
                 if data.len() < 2 {
-                    return Err(CoreError::UnexpectedEof { context: "UInt16 field" });
+                    return Err(CoreError::UnexpectedEof {
+                        context: "UInt16 field",
+                    });
                 }
                 let v: u16 = u16::from_le_bytes([data[0], data[1]]);
                 Ok(FieldValue::Int(i64::from(v)))
             }
             FieldType::UInt32 => {
                 if data.len() < 4 {
-                    return Err(CoreError::UnexpectedEof { context: "UInt32 field" });
+                    return Err(CoreError::UnexpectedEof {
+                        context: "UInt32 field",
+                    });
                 }
                 let v: u32 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 Ok(FieldValue::Int(i64::from(v)))
             }
             FieldType::UInt64 => {
                 if data.len() < 8 {
-                    return Err(CoreError::UnexpectedEof { context: "UInt64 field" });
+                    return Err(CoreError::UnexpectedEof {
+                        context: "UInt64 field",
+                    });
                 }
                 let v: u64 = u64::from_le_bytes(data[..8].try_into().expect("slice is 8 bytes"));
                 Ok(FieldValue::UInt(v))
             }
             FieldType::Int8 => {
-                let v: i8 = data
-                    .first()
-                    .copied()
-                    .ok_or(CoreError::UnexpectedEof { context: "Int8 field" })? as i8;
+                let v: i8 = data.first().copied().ok_or(CoreError::UnexpectedEof {
+                    context: "Int8 field",
+                })? as i8;
                 Ok(FieldValue::Int(i64::from(v)))
             }
             FieldType::Int16 => {
                 if data.len() < 2 {
-                    return Err(CoreError::UnexpectedEof { context: "Int16 field" });
+                    return Err(CoreError::UnexpectedEof {
+                        context: "Int16 field",
+                    });
                 }
                 let v: i16 = i16::from_le_bytes([data[0], data[1]]);
                 Ok(FieldValue::Int(i64::from(v)))
             }
             FieldType::Int32 => {
                 if data.len() < 4 {
-                    return Err(CoreError::UnexpectedEof { context: "Int32 field" });
+                    return Err(CoreError::UnexpectedEof {
+                        context: "Int32 field",
+                    });
                 }
                 let v: i32 = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 Ok(FieldValue::Int(i64::from(v)))
             }
             FieldType::Float32 => {
                 if data.len() < 4 {
-                    return Err(CoreError::UnexpectedEof { context: "Float32 field" });
+                    return Err(CoreError::UnexpectedEof {
+                        context: "Float32 field",
+                    });
                 }
                 let bits: u32 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 Ok(FieldValue::Float(f64::from(f32::from_bits(bits))))
             }
             FieldType::ZString => {
-                let end: usize = data
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(data.len());
+                let end: usize = data.iter().position(|&b| b == 0).unwrap_or(data.len());
                 let s: &str = std::str::from_utf8(&data[..end])
                     .map_err(|e| CoreError::InvalidEncoding(e.to_string()))?;
                 Ok(FieldValue::Str(s))
@@ -332,15 +347,14 @@ impl<'a> RecordView<'a> {
             FieldType::LString => {
                 if self.localized {
                     if data.len() < 4 {
-                        return Err(CoreError::UnexpectedEof { context: "LString ID" });
+                        return Err(CoreError::UnexpectedEof {
+                            context: "LString ID",
+                        });
                     }
                     let id: u32 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                     Ok(FieldValue::LocalizedId(id))
                 } else {
-                    let end: usize = data
-                        .iter()
-                        .position(|&b| b == 0)
-                        .unwrap_or(data.len());
+                    let end: usize = data.iter().position(|&b| b == 0).unwrap_or(data.len());
                     let s: &str = std::str::from_utf8(&data[..end])
                         .map_err(|e| CoreError::InvalidEncoding(e.to_string()))?;
                     Ok(FieldValue::Str(s))
@@ -349,21 +363,30 @@ impl<'a> RecordView<'a> {
             FieldType::ByteArray => Ok(FieldValue::Bytes(data)),
             FieldType::FormId => {
                 if data.len() < 4 {
-                    return Err(CoreError::UnexpectedEof { context: "FormId field" });
+                    return Err(CoreError::UnexpectedEof {
+                        context: "FormId field",
+                    });
                 }
                 let raw: u32 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 Ok(FieldValue::FormId(FormId(raw)))
             }
             FieldType::FormIdTyped(allowed) => {
                 if data.len() < 4 {
-                    return Err(CoreError::UnexpectedEof { context: "FormId field" });
+                    return Err(CoreError::UnexpectedEof {
+                        context: "FormId field",
+                    });
                 }
                 let raw: u32 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(FieldValue::FormIdTyped { raw: FormId(raw), allowed })
+                Ok(FieldValue::FormIdTyped {
+                    raw: FormId(raw),
+                    allowed,
+                })
             }
             FieldType::Enum(def) => {
                 if data.len() < 4 {
-                    return Err(CoreError::UnexpectedEof { context: "Enum field" });
+                    return Err(CoreError::UnexpectedEof {
+                        context: "Enum field",
+                    });
                 }
                 let raw: u32 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 let value: i64 = raw as i64;
@@ -372,7 +395,9 @@ impl<'a> RecordView<'a> {
             }
             FieldType::Flags(def) => {
                 if data.len() < 4 {
-                    return Err(CoreError::UnexpectedEof { context: "Flags field" });
+                    return Err(CoreError::UnexpectedEof {
+                        context: "Flags field",
+                    });
                 }
                 let raw: u32 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 let value: u64 = u64::from(raw);
@@ -414,7 +439,10 @@ fn decode_struct_fields<'a>(
     for field in fields {
         let (value, consumed): (FieldValue<'a>, usize) =
             decode_one_field(field.kind, &data[offset..], localized)?;
-        entries.push(FieldEntry { name: field.name, value });
+        entries.push(FieldEntry {
+            name: field.name,
+            value,
+        });
         offset += consumed;
     }
 
@@ -429,7 +457,9 @@ fn decode_one_field<'a>(
 ) -> Result<(FieldValue<'a>, usize)> {
     match kind {
         FieldType::UInt8 => {
-            let v: u8 = *data.first().ok_or(CoreError::UnexpectedEof { context: "UInt8" })?;
+            let v: u8 = *data
+                .first()
+                .ok_or(CoreError::UnexpectedEof { context: "UInt8" })?;
             Ok((FieldValue::Int(i64::from(v)), 1))
         }
         FieldType::UInt16 => {
@@ -454,7 +484,9 @@ fn decode_one_field<'a>(
             Ok((FieldValue::UInt(v), 8))
         }
         FieldType::Int8 => {
-            let v: i8 = *data.first().ok_or(CoreError::UnexpectedEof { context: "Int8" })? as i8;
+            let v: i8 = *data
+                .first()
+                .ok_or(CoreError::UnexpectedEof { context: "Int8" })? as i8;
             Ok((FieldValue::Int(i64::from(v)), 1))
         }
         FieldType::Int16 => {
@@ -487,7 +519,9 @@ fn decode_one_field<'a>(
         FieldType::LString => {
             if localized {
                 if data.len() < 4 {
-                    return Err(CoreError::UnexpectedEof { context: "LString ID" });
+                    return Err(CoreError::UnexpectedEof {
+                        context: "LString ID",
+                    });
                 }
                 let id: u32 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 Ok((FieldValue::LocalizedId(id), 4))
@@ -511,7 +545,13 @@ fn decode_one_field<'a>(
                 return Err(CoreError::UnexpectedEof { context: "FormId" });
             }
             let raw: u32 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            Ok((FieldValue::FormIdTyped { raw: FormId(raw), allowed }, 4))
+            Ok((
+                FieldValue::FormIdTyped {
+                    raw: FormId(raw),
+                    allowed,
+                },
+                4,
+            ))
         }
         FieldType::Enum(def) => {
             if data.len() < 4 {
@@ -620,7 +660,7 @@ fn field_byte_size(kind: FieldType) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{EnumDef, FlagsDef, FieldDef, FieldType, RecordSchema, SubRecordDef};
+    use crate::schema::{EnumDef, FieldDef, FieldType, FlagsDef, RecordSchema, SubRecordDef};
     use crate::types::Signature;
 
     fn make_u32_subrecord(sig: [u8; 4], value: u32) -> Vec<u8> {
@@ -806,8 +846,14 @@ mod tests {
     #[test]
     fn record_view_struct_field() -> std::result::Result<(), Box<dyn std::error::Error>> {
         static STRUCT_FIELDS: [FieldDef; 2] = [
-            FieldDef { name: "A", kind: FieldType::UInt16 },
-            FieldDef { name: "B", kind: FieldType::UInt16 },
+            FieldDef {
+                name: "A",
+                kind: FieldType::UInt16,
+            },
+            FieldDef {
+                name: "B",
+                kind: FieldType::UInt16,
+            },
         ];
         static STRUCT_SCHEMA: RecordSchema = RecordSchema {
             sig: Signature(*b"STRT"),

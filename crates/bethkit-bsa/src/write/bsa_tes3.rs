@@ -38,11 +38,7 @@ pub(super) fn write(dest: &Path, entries: Vec<BuilderEntry>) -> Result<()> {
         .into_iter()
         .map(|e| {
             // NOTE: TES3 hashes the filename only (no directory prefix).
-            let filename = e
-                .path
-                .rsplit('/')
-                .next()
-                .unwrap_or(e.path.as_str());
+            let filename = e.path.rsplit('/').next().unwrap_or(e.path.as_str());
             let h = hash_tes3(filename);
             (h, e)
         })

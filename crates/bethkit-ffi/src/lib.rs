@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! `bethkit-ffi` - C ABI layer for `bethkit-core` and `bethkit-bsa`.
 //!
@@ -21,21 +21,20 @@
 //! the same thread.
 
 use std::ffi::{c_char, CStr};
+mod archive;
+mod cache;
 mod error;
-mod types;
+mod group;
+mod load_order;
 mod plugin;
 mod record;
-mod group;
-mod archive;
-mod load_order;
-mod cache;
-mod strings;
 mod schema;
+mod strings;
+mod types;
 mod writer;
 
-pub use error::{FfiError, Result, bethkit_last_error};
 pub(crate) use error::set_last_error;
-
+pub use error::{bethkit_last_error, FfiError, Result};
 
 /// A non-owning view of a byte slice passed across the FFI boundary.
 ///
@@ -70,7 +69,6 @@ pub unsafe extern "C" fn bethkit_bytes_free(ptr: *mut u8, len: usize) {
     // SAFETY: it is valid, non-null, correctly aligned, and `len` bytes long.
     drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) });
 }
-
 
 /// Checks that `$ptr` is not null; if it is, sets the last error and returns
 /// `$ret` from the enclosing function.
@@ -113,7 +111,6 @@ macro_rules! ffi_try {
 }
 
 pub(crate) use {ffi_try, null_check};
-
 
 /// Converts a raw `*const c_char` to a `&str`, storing the last error and
 /// returning `None` if the pointer is null or the bytes are not valid UTF-8.

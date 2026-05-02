@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! FFI functions for building a load order and resolving FormIDs.
 //!
@@ -16,10 +16,9 @@ use std::ffi::c_char;
 
 use bethkit_core::LoadOrder;
 
+use crate::error::FfiError;
 use crate::types::BethkitPluginKind;
 use crate::{cstr_to_str, ffi_try, null_check, set_last_error};
-use crate::error::FfiError;
-
 
 /// A globally unique FormID, combining the source plugin name and a
 /// 24-bit object ID.
@@ -43,7 +42,6 @@ pub struct BethkitLoadOrder {
     name_cstrings: Vec<std::ffi::CString>,
 }
 
-
 /// Creates a new, empty load order.
 ///
 /// Returns a pointer to the handle.  Must be freed with
@@ -65,7 +63,6 @@ pub extern "C" fn bethkit_load_order_free(lo: *mut BethkitLoadOrder) {
     // SAFETY: lo was produced by Box::into_raw.
     drop(unsafe { Box::from_raw(lo) });
 }
-
 
 /// Appends `name` to the load order with the given plugin `kind`.
 ///
@@ -102,12 +99,11 @@ pub extern "C" fn bethkit_load_order_push(
     }
 
     // Intern a stable CString so resolve can return borrowed plugin_name ptrs.
-    let sanitized: Vec<u8> =
-        name_str.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
-    let cs = ffi_try!(
-        std::ffi::CString::new(sanitized).map_err(FfiError::Nul),
-        -1
-    );
+    let sanitized: Vec<u8> = name_str
+        .bytes()
+        .map(|b| if b == 0 { b'?' } else { b })
+        .collect();
+    let cs = ffi_try!(std::ffi::CString::new(sanitized).map_err(FfiError::Nul), -1);
     handle.name_cstrings.push(cs);
     0
 }
@@ -149,7 +145,11 @@ pub extern "C" fn bethkit_load_order_resolve(
     out: *mut BethkitGlobalFormId,
 ) -> i32 {
     null_check!(lo, "bethkit_load_order_resolve", -1);
-    null_check!(source_plugin, "bethkit_load_order_resolve/source_plugin", -1);
+    null_check!(
+        source_plugin,
+        "bethkit_load_order_resolve/source_plugin",
+        -1
+    );
     null_check!(out, "bethkit_load_order_resolve/out", -1);
 
     let src = match cstr_to_str(source_plugin, "bethkit_load_order_resolve") {
@@ -163,11 +163,10 @@ pub extern "C" fn bethkit_load_order_resolve(
     // The LoadOrder::resolve method requires the list of masters from the
     // source plugin, which we do not have here. Resolve with empty masters
     // for now — the caller is expected to pass a top-level plugin name.
-    let gfid = match handle.inner.resolve(
-        bethkit_core::FormId(form_id),
-        src,
-        &[],
-    ) {
+    let gfid = match handle
+        .inner
+        .resolve(bethkit_core::FormId(form_id), src, &[])
+    {
         Some(g) => g,
         None => {
             set_last_error(format!(
@@ -188,8 +187,10 @@ pub extern "C" fn bethkit_load_order_resolve(
 
     // SAFETY: out is non-null.
     unsafe {
-        *out = BethkitGlobalFormId { plugin_name: name_ptr, object_id: gfid.object_id };
+        *out = BethkitGlobalFormId {
+            plugin_name: name_ptr,
+            object_id: gfid.object_id,
+        };
     }
     0
 }
-

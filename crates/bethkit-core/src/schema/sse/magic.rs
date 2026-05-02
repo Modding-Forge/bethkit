@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Schema definitions for magic / effect SSE record types.
 //!
@@ -17,15 +17,35 @@ use crate::schema::enums::{
     SCHOOL_ENUM, SOUND_LEVEL_ENUM, SPELL_TYPE_ENUM,
 };
 
-
 static SPEL_SPIT_FIELDS: [FieldDef; 7] = [
-    FieldDef { name: "Cost", kind: FieldType::UInt32 },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Type", kind: FieldType::Enum(&SPELL_TYPE_ENUM) },
-    FieldDef { name: "Charge Time", kind: FieldType::Float32 },
-    FieldDef { name: "Casting Type", kind: FieldType::Enum(&CASTING_TYPE_ENUM) },
-    FieldDef { name: "Delivery", kind: FieldType::Enum(&DELIVERY_ENUM) },
-    FieldDef { name: "Cast Duration", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Cost",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Type",
+        kind: FieldType::Enum(&SPELL_TYPE_ENUM),
+    },
+    FieldDef {
+        name: "Charge Time",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Casting Type",
+        kind: FieldType::Enum(&CASTING_TYPE_ENUM),
+    },
+    FieldDef {
+        name: "Delivery",
+        kind: FieldType::Enum(&DELIVERY_ENUM),
+    },
+    FieldDef {
+        name: "Cast Duration",
+        kind: FieldType::Float32,
+    },
 ];
 
 static SPEL_MEMBERS: [SubRecordDef; 8] = [
@@ -52,20 +72,46 @@ pub static SPEL_SCHEMA: RecordSchema = RecordSchema {
     members: &SPEL_MEMBERS,
 };
 
-
 static SCRL_SPIT_FIELDS: [FieldDef; 7] = [
-    FieldDef { name: "Cost", kind: FieldType::UInt32 },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Type", kind: FieldType::Enum(&SPELL_TYPE_ENUM) },
-    FieldDef { name: "Charge Time", kind: FieldType::Float32 },
-    FieldDef { name: "Casting Type", kind: FieldType::Enum(&CASTING_TYPE_ENUM) },
-    FieldDef { name: "Delivery", kind: FieldType::Enum(&DELIVERY_ENUM) },
-    FieldDef { name: "Cast Duration", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Cost",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Type",
+        kind: FieldType::Enum(&SPELL_TYPE_ENUM),
+    },
+    FieldDef {
+        name: "Charge Time",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Casting Type",
+        kind: FieldType::Enum(&CASTING_TYPE_ENUM),
+    },
+    FieldDef {
+        name: "Delivery",
+        kind: FieldType::Enum(&DELIVERY_ENUM),
+    },
+    FieldDef {
+        name: "Cast Duration",
+        kind: FieldType::Float32,
+    },
 ];
 
 static SCRL_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static SCRL_MEMBERS: [SubRecordDef; 10] = [
@@ -106,24 +152,71 @@ pub static SCRL_SCHEMA: RecordSchema = RecordSchema {
     members: &SCRL_MEMBERS,
 };
 
-
 static MGEF_DATA_FIELDS: [FieldDef; 16] = [
-    FieldDef { name: "Flags", kind: FieldType::Flags(&MAGIC_EFFECT_FLAGS) },
-    FieldDef { name: "Base Cost", kind: FieldType::Float32 },
-    FieldDef { name: "Related ID", kind: FieldType::FormId },
-    FieldDef { name: "Skill", kind: FieldType::Enum(&SCHOOL_ENUM) },
-    FieldDef { name: "Resist", kind: FieldType::Int32 },
-    FieldDef { name: "Counter Effect Count", kind: FieldType::UInt32 },
-    FieldDef { name: "Light", kind: FieldType::FormIdTyped(&[Signature(*b"LIGH")]) },
-    FieldDef { name: "Taper Weight", kind: FieldType::Float32 },
-    FieldDef { name: "Hit Shader", kind: FieldType::FormIdTyped(&[Signature(*b"EFSH")]) },
-    FieldDef { name: "Enchant Shader", kind: FieldType::FormIdTyped(&[Signature(*b"EFSH")]) },
-    FieldDef { name: "Minimum Skill Level", kind: FieldType::UInt32 },
-    FieldDef { name: "Spellmaking Area", kind: FieldType::UInt32 },
-    FieldDef { name: "Spellmaking Casting Time", kind: FieldType::Float32 },
-    FieldDef { name: "Taper Curve", kind: FieldType::Float32 },
-    FieldDef { name: "Taper Duration", kind: FieldType::Float32 },
-    FieldDef { name: "Second AV Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::Flags(&MAGIC_EFFECT_FLAGS),
+    },
+    FieldDef {
+        name: "Base Cost",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Related ID",
+        kind: FieldType::FormId,
+    },
+    FieldDef {
+        name: "Skill",
+        kind: FieldType::Enum(&SCHOOL_ENUM),
+    },
+    FieldDef {
+        name: "Resist",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Counter Effect Count",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Light",
+        kind: FieldType::FormIdTyped(&[Signature(*b"LIGH")]),
+    },
+    FieldDef {
+        name: "Taper Weight",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Hit Shader",
+        kind: FieldType::FormIdTyped(&[Signature(*b"EFSH")]),
+    },
+    FieldDef {
+        name: "Enchant Shader",
+        kind: FieldType::FormIdTyped(&[Signature(*b"EFSH")]),
+    },
+    FieldDef {
+        name: "Minimum Skill Level",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Spellmaking Area",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Spellmaking Casting Time",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Taper Curve",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Taper Duration",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Second AV Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static MGEF_MEMBERS: [SubRecordDef; 10] = [
@@ -164,14 +257,31 @@ pub static MGEF_SCHEMA: RecordSchema = RecordSchema {
     members: &MGEF_MEMBERS,
 };
 
-
 static ENCH_ENIT_FIELDS: [FieldDef; 6] = [
-    FieldDef { name: "Enchantment Cost", kind: FieldType::UInt32 },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Cast Type", kind: FieldType::Enum(&CASTING_TYPE_ENUM) },
-    FieldDef { name: "Enchantment Amount", kind: FieldType::UInt32 },
-    FieldDef { name: "Target Type", kind: FieldType::Enum(&DELIVERY_ENUM) },
-    FieldDef { name: "Enchant Type", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Enchantment Cost",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Cast Type",
+        kind: FieldType::Enum(&CASTING_TYPE_ENUM),
+    },
+    FieldDef {
+        name: "Enchantment Amount",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Target Type",
+        kind: FieldType::Enum(&DELIVERY_ENUM),
+    },
+    FieldDef {
+        name: "Enchant Type",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static ENCH_MEMBERS: [SubRecordDef; 6] = [
@@ -196,11 +306,19 @@ pub static ENCH_SCHEMA: RecordSchema = RecordSchema {
     members: &ENCH_MEMBERS,
 };
 
-
 static RFCT_DATA_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Effect Art Object", kind: FieldType::FormIdTyped(&[Signature(*b"ARTO")]) },
-    FieldDef { name: "Shader", kind: FieldType::FormIdTyped(&[Signature(*b"EFSH")]) },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Effect Art Object",
+        kind: FieldType::FormIdTyped(&[Signature(*b"ARTO")]),
+    },
+    FieldDef {
+        name: "Shader",
+        kind: FieldType::FormIdTyped(&[Signature(*b"EFSH")]),
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static RFCT_MEMBERS: [SubRecordDef; 2] = [
@@ -221,22 +339,63 @@ pub static RFCT_SCHEMA: RecordSchema = RecordSchema {
     members: &RFCT_MEMBERS,
 };
 
-
 static PROJ_DATA_FIELDS: [FieldDef; 14] = [
-    FieldDef { name: "Flags", kind: FieldType::Flags(&PROJECTILE_FLAGS) },
-    FieldDef { name: "Type", kind: FieldType::Enum(&PROJECTILE_TYPE_ENUM) },
-    FieldDef { name: "Gravity", kind: FieldType::Float32 },
-    FieldDef { name: "Speed", kind: FieldType::Float32 },
-    FieldDef { name: "Range", kind: FieldType::Float32 },
-    FieldDef { name: "Light", kind: FieldType::FormIdTyped(&[Signature(*b"LIGH")]) },
-    FieldDef { name: "Muzzle Flash", kind: FieldType::FormIdTyped(&[Signature(*b"LIGH")]) },
-    FieldDef { name: "Tracer Chance", kind: FieldType::Float32 },
-    FieldDef { name: "Explosion Alt Trigger Prox", kind: FieldType::Float32 },
-    FieldDef { name: "Explosion Alt Trigger Timer", kind: FieldType::Float32 },
-    FieldDef { name: "Explosion", kind: FieldType::FormIdTyped(&[Signature(*b"EXPL")]) },
-    FieldDef { name: "Sound", kind: FieldType::FormIdTyped(&[Signature(*b"SNDR")]) },
-    FieldDef { name: "Muzzle Flash Duration", kind: FieldType::Float32 },
-    FieldDef { name: "Fade Duration", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::Flags(&PROJECTILE_FLAGS),
+    },
+    FieldDef {
+        name: "Type",
+        kind: FieldType::Enum(&PROJECTILE_TYPE_ENUM),
+    },
+    FieldDef {
+        name: "Gravity",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Speed",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Range",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Light",
+        kind: FieldType::FormIdTyped(&[Signature(*b"LIGH")]),
+    },
+    FieldDef {
+        name: "Muzzle Flash",
+        kind: FieldType::FormIdTyped(&[Signature(*b"LIGH")]),
+    },
+    FieldDef {
+        name: "Tracer Chance",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Explosion Alt Trigger Prox",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Explosion Alt Trigger Timer",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Explosion",
+        kind: FieldType::FormIdTyped(&[Signature(*b"EXPL")]),
+    },
+    FieldDef {
+        name: "Sound",
+        kind: FieldType::FormIdTyped(&[Signature(*b"SNDR")]),
+    },
+    FieldDef {
+        name: "Muzzle Flash Duration",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Fade Duration",
+        kind: FieldType::Float32,
+    },
 ];
 
 static PROJ_MEMBERS: [SubRecordDef; 4] = [
@@ -259,20 +418,55 @@ pub static PROJ_SCHEMA: RecordSchema = RecordSchema {
     members: &PROJ_MEMBERS,
 };
 
-
 static EXPL_DATA_FIELDS: [FieldDef; 12] = [
-    FieldDef { name: "Light", kind: FieldType::FormIdTyped(&[Signature(*b"LIGH")]) },
-    FieldDef { name: "Sound 1", kind: FieldType::FormIdTyped(&[Signature(*b"SNDR")]) },
-    FieldDef { name: "Sound 2", kind: FieldType::FormIdTyped(&[Signature(*b"SNDR")]) },
-    FieldDef { name: "Impact Dataset", kind: FieldType::FormIdTyped(&[Signature(*b"IPDS")]) },
-    FieldDef { name: "Place Hazard", kind: FieldType::FormId },
-    FieldDef { name: "Force", kind: FieldType::Float32 },
-    FieldDef { name: "Damage", kind: FieldType::Float32 },
-    FieldDef { name: "Inner Radius", kind: FieldType::Float32 },
-    FieldDef { name: "Outer Radius", kind: FieldType::Float32 },
-    FieldDef { name: "IS Radius", kind: FieldType::Float32 },
-    FieldDef { name: "Vertical Offset Mult", kind: FieldType::Float32 },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Light",
+        kind: FieldType::FormIdTyped(&[Signature(*b"LIGH")]),
+    },
+    FieldDef {
+        name: "Sound 1",
+        kind: FieldType::FormIdTyped(&[Signature(*b"SNDR")]),
+    },
+    FieldDef {
+        name: "Sound 2",
+        kind: FieldType::FormIdTyped(&[Signature(*b"SNDR")]),
+    },
+    FieldDef {
+        name: "Impact Dataset",
+        kind: FieldType::FormIdTyped(&[Signature(*b"IPDS")]),
+    },
+    FieldDef {
+        name: "Place Hazard",
+        kind: FieldType::FormId,
+    },
+    FieldDef {
+        name: "Force",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Damage",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Inner Radius",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Outer Radius",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "IS Radius",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Vertical Offset Mult",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static EXPL_MEMBERS: [SubRecordDef; 4] = [
@@ -295,19 +489,51 @@ pub static EXPL_SCHEMA: RecordSchema = RecordSchema {
     members: &EXPL_MEMBERS,
 };
 
-
 static HAZD_DATA_FIELDS: [FieldDef; 11] = [
-    FieldDef { name: "Limit", kind: FieldType::UInt32 },
-    FieldDef { name: "Radius", kind: FieldType::Float32 },
-    FieldDef { name: "Lifetime", kind: FieldType::Float32 },
-    FieldDef { name: "Image Space Radius", kind: FieldType::Float32 },
-    FieldDef { name: "Target Interval", kind: FieldType::Float32 },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Spell", kind: FieldType::FormIdTyped(&[Signature(*b"SPEL"), Signature(*b"ENCH")]) },
-    FieldDef { name: "Light", kind: FieldType::FormIdTyped(&[Signature(*b"LIGH")]) },
-    FieldDef { name: "Impact Dataset", kind: FieldType::FormIdTyped(&[Signature(*b"IPDS")]) },
-    FieldDef { name: "Sound", kind: FieldType::FormIdTyped(&[Signature(*b"SNDR")]) },
-    FieldDef { name: "Sound Level", kind: FieldType::Enum(&SOUND_LEVEL_ENUM) },
+    FieldDef {
+        name: "Limit",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Radius",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Lifetime",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Image Space Radius",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Target Interval",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Spell",
+        kind: FieldType::FormIdTyped(&[Signature(*b"SPEL"), Signature(*b"ENCH")]),
+    },
+    FieldDef {
+        name: "Light",
+        kind: FieldType::FormIdTyped(&[Signature(*b"LIGH")]),
+    },
+    FieldDef {
+        name: "Impact Dataset",
+        kind: FieldType::FormIdTyped(&[Signature(*b"IPDS")]),
+    },
+    FieldDef {
+        name: "Sound",
+        kind: FieldType::FormIdTyped(&[Signature(*b"SNDR")]),
+    },
+    FieldDef {
+        name: "Sound Level",
+        kind: FieldType::Enum(&SOUND_LEVEL_ENUM),
+    },
 ];
 
 static HAZD_MEMBERS: [SubRecordDef; 4] = [
@@ -329,7 +555,6 @@ pub static HAZD_SCHEMA: RecordSchema = RecordSchema {
     name: "Hazard",
     members: &HAZD_MEMBERS,
 };
-
 
 static PERK_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
@@ -355,7 +580,6 @@ pub static PERK_SCHEMA: RecordSchema = RecordSchema {
     members: &PERK_MEMBERS,
 };
 
-
 static IMGS_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -373,7 +597,6 @@ pub static IMGS_SCHEMA: RecordSchema = RecordSchema {
     name: "Image Space",
     members: &IMGS_MEMBERS,
 };
-
 
 static IMAD_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -393,14 +616,31 @@ pub static IMAD_SCHEMA: RecordSchema = RecordSchema {
     members: &IMAD_MEMBERS,
 };
 
-
 static IPCT_DATA_FIELDS: [FieldDef; 6] = [
-    FieldDef { name: "Effect Duration", kind: FieldType::Float32 },
-    FieldDef { name: "Effect Orientation", kind: FieldType::UInt32 },
-    FieldDef { name: "Angle Threshold", kind: FieldType::Float32 },
-    FieldDef { name: "Placement Radius", kind: FieldType::Float32 },
-    FieldDef { name: "Sound Level", kind: FieldType::Enum(&SOUND_LEVEL_ENUM) },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Effect Duration",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Effect Orientation",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Angle Threshold",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Placement Radius",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Sound Level",
+        kind: FieldType::Enum(&SOUND_LEVEL_ENUM),
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static IPCT_MEMBERS: [SubRecordDef; 4] = [
@@ -429,7 +669,6 @@ pub static IPCT_SCHEMA: RecordSchema = RecordSchema {
     members: &IPCT_MEMBERS,
 };
 
-
 static IPDS_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -448,10 +687,15 @@ pub static IPDS_SCHEMA: RecordSchema = RecordSchema {
     members: &IPDS_MEMBERS,
 };
 
-
 static ADDN_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Node Index", kind: FieldType::Int32 },
-    FieldDef { name: "Flags", kind: FieldType::UInt16 },
+    FieldDef {
+        name: "Node Index",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt16,
+    },
 ];
 
 static ADDN_MEMBERS: [SubRecordDef; 4] = [
@@ -473,7 +717,6 @@ pub static ADDN_SCHEMA: RecordSchema = RecordSchema {
     name: "Addon Node",
     members: &ADDN_MEMBERS,
 };
-
 
 static SPGD_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -499,7 +742,6 @@ pub static SPGD_SCHEMA: RecordSchema = RecordSchema {
     name: "Shader Particle Geometry",
     members: &SPGD_MEMBERS,
 };
-
 
 static EFSH_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,

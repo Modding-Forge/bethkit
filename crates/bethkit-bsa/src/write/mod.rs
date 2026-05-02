@@ -19,13 +19,13 @@
 
 pub mod dds_parse;
 
-mod ba2_gnrl;
 mod ba2_dx10;
+mod ba2_gnrl;
 mod bsa_tes3;
 mod bsa_tes4;
 
-pub use ba2_gnrl::Ba2GnrlWriter;
 pub use ba2_dx10::Ba2Dx10Writer;
+pub use ba2_gnrl::Ba2GnrlWriter;
 
 use std::path::Path;
 

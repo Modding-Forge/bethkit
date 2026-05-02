@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Schema definitions for item / inventory SSE record types.
 //!
@@ -9,7 +9,7 @@ use crate::schema::{FieldDef, FieldType, RecordSchema, SubRecordDef};
 use crate::types::Signature;
 
 use super::common::{
-    CTDA_DEF, DESC_DEF, DEST_DEF, EDID_DEF, EAMT_DEF, EFID_DEF, EFIT_DEF, EITM_DEF, ETYP_DEF,
+    CTDA_DEF, DESC_DEF, DEST_DEF, EAMT_DEF, EDID_DEF, EFID_DEF, EFIT_DEF, EITM_DEF, ETYP_DEF,
     FULL_DEF, ICON_DEF, KSIZ_DEF, KWDA_DEF, MICO_DEF, MOD2_DEF, MOD3_DEF, MODL_DEF, OBND_DEF,
     RNAM_DEF, VMAD_DEF, YNAM_DEF, ZNAM_DEF,
 };
@@ -17,36 +17,110 @@ use crate::schema::enums::{
     ARMOR_TYPE_ENUM, BOOK_FLAGS, BOOK_TYPE_ENUM, SCHOOL_ENUM, STAGGER_ENUM, WEAPON_ANIM_TYPE_ENUM,
 };
 
-
 static WEAP_DATA_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
-    FieldDef { name: "Damage", kind: FieldType::UInt16 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Damage",
+        kind: FieldType::UInt16,
+    },
 ];
 
 static WEAP_DNAM_FIELDS: [FieldDef; 22] = [
-    FieldDef { name: "Animation Type", kind: FieldType::Enum(&WEAPON_ANIM_TYPE_ENUM) },
-    FieldDef { name: "Animation Multiplier", kind: FieldType::Float32 },
-    FieldDef { name: "Reach", kind: FieldType::Float32 },
-    FieldDef { name: "Flags", kind: FieldType::UInt16 },
-    FieldDef { name: "Unknown", kind: FieldType::UInt8 },
-    FieldDef { name: "Unknown2", kind: FieldType::UInt8 },
-    FieldDef { name: "Sight FoV", kind: FieldType::Float32 },
-    FieldDef { name: "Unknown3", kind: FieldType::Float32 },
-    FieldDef { name: "VATS to-hit chance", kind: FieldType::UInt8 },
-    FieldDef { name: "Unknown4", kind: FieldType::UInt8 },
-    FieldDef { name: "Proj per Shot", kind: FieldType::UInt8 },
-    FieldDef { name: "Unknown5", kind: FieldType::UInt8 },
-    FieldDef { name: "Attack Animation Mult", kind: FieldType::Float32 },
-    FieldDef { name: "Rugged", kind: FieldType::Float32 },
-    FieldDef { name: "Unknown6", kind: FieldType::Float32 },
-    FieldDef { name: "Override - Skill", kind: FieldType::Int32 },
-    FieldDef { name: "Override - Actor Value", kind: FieldType::Int32 },
-    FieldDef { name: "Physical Damage", kind: FieldType::Float32 },
-    FieldDef { name: "Base VATS to-hit Chance", kind: FieldType::Float32 },
-    FieldDef { name: "Projectile Count Override", kind: FieldType::UInt32 },
-    FieldDef { name: "Embedded Weapon AV", kind: FieldType::Int32 },
-    FieldDef { name: "Stagger", kind: FieldType::Enum(&STAGGER_ENUM) },
+    FieldDef {
+        name: "Animation Type",
+        kind: FieldType::Enum(&WEAPON_ANIM_TYPE_ENUM),
+    },
+    FieldDef {
+        name: "Animation Multiplier",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Reach",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Unknown2",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Sight FoV",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Unknown3",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "VATS to-hit chance",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Unknown4",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Proj per Shot",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Unknown5",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Attack Animation Mult",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Rugged",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Unknown6",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Override - Skill",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Override - Actor Value",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Physical Damage",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Base VATS to-hit Chance",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Projectile Count Override",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Embedded Weapon AV",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Stagger",
+        kind: FieldType::Enum(&STAGGER_ENUM),
+    },
 ];
 
 static WEAP_MEMBERS: [SubRecordDef; 16] = [
@@ -87,16 +161,30 @@ pub static WEAP_SCHEMA: RecordSchema = RecordSchema {
     members: &WEAP_MEMBERS,
 };
 
-
 static ARMO_DATA_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
-    FieldDef { name: "Health", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Health",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static ARMO_DNAM_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Armor Rating", kind: FieldType::Float32 },
-    FieldDef { name: "Base Rating Override", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Armor Rating",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Base Rating Override",
+        kind: FieldType::Float32,
+    },
 ];
 
 static ARMO_MEMBERS: [SubRecordDef; 14] = [
@@ -135,17 +223,43 @@ pub static ARMO_SCHEMA: RecordSchema = RecordSchema {
     members: &ARMO_MEMBERS,
 };
 
-
 static ARMA_DNAM_FIELDS: [FieldDef; 9] = [
-    FieldDef { name: "Biped Object Slot (Primary)", kind: FieldType::UInt32 },
-    FieldDef { name: "Biped Object Slot (Secondary)", kind: FieldType::UInt32 },
-    FieldDef { name: "Priority", kind: FieldType::UInt8 },
-    FieldDef { name: "Unknown", kind: FieldType::UInt8 },
-    FieldDef { name: "Unknown2", kind: FieldType::UInt16 },
-    FieldDef { name: "Detect Sound Value", kind: FieldType::Float32 },
-    FieldDef { name: "Weapon Adjust", kind: FieldType::Float32 },
-    FieldDef { name: "Armor Type", kind: FieldType::Enum(&ARMOR_TYPE_ENUM) },
-    FieldDef { name: "Unknown3", kind: FieldType::UInt8 },
+    FieldDef {
+        name: "Biped Object Slot (Primary)",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Biped Object Slot (Secondary)",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Priority",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Unknown2",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Detect Sound Value",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Weapon Adjust",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Armor Type",
+        kind: FieldType::Enum(&ARMOR_TYPE_ENUM),
+    },
+    FieldDef {
+        name: "Unknown3",
+        kind: FieldType::UInt8,
+    },
 ];
 
 static ARMA_MEMBERS: [SubRecordDef; 7] = [
@@ -171,13 +285,27 @@ pub static ARMA_SCHEMA: RecordSchema = RecordSchema {
     members: &ARMA_MEMBERS,
 };
 
-
 static AMMO_DATA_FIELDS: [FieldDef; 5] = [
-    FieldDef { name: "Projectile", kind: FieldType::FormIdTyped(&[Signature(*b"PROJ")]) },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Damage", kind: FieldType::Float32 },
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Projectile",
+        kind: FieldType::FormIdTyped(&[Signature(*b"PROJ")]),
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Damage",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static AMMO_MEMBERS: [SubRecordDef; 9] = [
@@ -205,14 +333,31 @@ pub static AMMO_SCHEMA: RecordSchema = RecordSchema {
     members: &AMMO_MEMBERS,
 };
 
-
 static BOOK_DATA_FIELDS: [FieldDef; 6] = [
-    FieldDef { name: "Flags", kind: FieldType::Flags(&BOOK_FLAGS) },
-    FieldDef { name: "Type", kind: FieldType::Enum(&BOOK_TYPE_ENUM) },
-    FieldDef { name: "Unused", kind: FieldType::Unused(2) },
-    FieldDef { name: "Teaches (Skill / Spell)", kind: FieldType::FormIdTyped(&[Signature(*b"SPEL")]) },
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::Flags(&BOOK_FLAGS),
+    },
+    FieldDef {
+        name: "Type",
+        kind: FieldType::Enum(&BOOK_TYPE_ENUM),
+    },
+    FieldDef {
+        name: "Unused",
+        kind: FieldType::Unused(2),
+    },
+    FieldDef {
+        name: "Teaches (Skill / Spell)",
+        kind: FieldType::FormIdTyped(&[Signature(*b"SPEL")]),
+    },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static BOOK_MEMBERS: [SubRecordDef; 10] = [
@@ -241,17 +386,34 @@ pub static BOOK_SCHEMA: RecordSchema = RecordSchema {
     members: &BOOK_MEMBERS,
 };
 
-
 static ALCH_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static ALCH_ENIT_FIELDS: [FieldDef; 4] = [
-    FieldDef { name: "Value", kind: FieldType::Int32 },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Addiction Chance", kind: FieldType::Float32 },
-    FieldDef { name: "Sound - Use", kind: FieldType::FormIdTyped(&[Signature(*b"SNDR")]) },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Addiction Chance",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Sound - Use",
+        kind: FieldType::FormIdTyped(&[Signature(*b"SNDR")]),
+    },
 ];
 
 static ALCH_MEMBERS: [SubRecordDef; 11] = [
@@ -287,16 +449,30 @@ pub static ALCH_SCHEMA: RecordSchema = RecordSchema {
     members: &ALCH_MEMBERS,
 };
 
-
 static INGR_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static INGR_ENIT_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Value", kind: FieldType::Int32 },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Unknown", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static INGR_MEMBERS: [SubRecordDef; 9] = [
@@ -330,10 +506,15 @@ pub static INGR_SCHEMA: RecordSchema = RecordSchema {
     members: &INGR_MEMBERS,
 };
 
-
 static MISC_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static MISC_MEMBERS: [SubRecordDef; 9] = [
@@ -361,10 +542,15 @@ pub static MISC_SCHEMA: RecordSchema = RecordSchema {
     members: &MISC_MEMBERS,
 };
 
-
 static KEYM_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static KEYM_MEMBERS: [SubRecordDef; 8] = [
@@ -391,10 +577,15 @@ pub static KEYM_SCHEMA: RecordSchema = RecordSchema {
     members: &KEYM_MEMBERS,
 };
 
-
 static SLGM_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static SLGM_MEMBERS: [SubRecordDef; 8] = [
@@ -421,12 +612,23 @@ pub static SLGM_SCHEMA: RecordSchema = RecordSchema {
     members: &SLGM_MEMBERS,
 };
 
-
 static APPA_DATA_FIELDS: [FieldDef; 4] = [
-    FieldDef { name: "Type", kind: FieldType::UInt8 },
-    FieldDef { name: "Unknown", kind: FieldType::Unused(3) },
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Type",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Unknown",
+        kind: FieldType::Unused(3),
+    },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static APPA_MEMBERS: [SubRecordDef; 8] = [
@@ -452,7 +654,6 @@ pub static APPA_SCHEMA: RecordSchema = RecordSchema {
     name: "Apparatus",
     members: &APPA_MEMBERS,
 };
-
 
 static COBJ_MEMBERS: [SubRecordDef; 6] = [
     EDID_DEF,
@@ -494,10 +695,15 @@ pub static COBJ_SCHEMA: RecordSchema = RecordSchema {
     members: &COBJ_MEMBERS,
 };
 
-
 static CONT_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Flags", kind: FieldType::UInt8 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static CONT_MEMBERS: [SubRecordDef; 8] = [
@@ -530,7 +736,6 @@ pub static CONT_SCHEMA: RecordSchema = RecordSchema {
     members: &CONT_MEMBERS,
 };
 
-
 static DOOR_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
     VMAD_DEF,
@@ -555,16 +760,8 @@ pub static DOOR_SCHEMA: RecordSchema = RecordSchema {
     members: &DOOR_MEMBERS,
 };
 
-
 static FURN_MEMBERS: [SubRecordDef; 8] = [
-    EDID_DEF,
-    VMAD_DEF,
-    OBND_DEF,
-    FULL_DEF,
-    MODL_DEF,
-    DEST_DEF,
-    KSIZ_DEF,
-    KWDA_DEF,
+    EDID_DEF, VMAD_DEF, OBND_DEF, FULL_DEF, MODL_DEF, DEST_DEF, KSIZ_DEF, KWDA_DEF,
 ];
 
 /// FURN — Furniture (chair, bench, etc.).

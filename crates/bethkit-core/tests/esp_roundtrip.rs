@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Integration tests for `bethkit-core` using real plugin files.
 //!
@@ -146,7 +146,9 @@ fn all_record_signatures_are_valid_ascii() -> Result<(), Box<dyn std::error::Err
                 {
                     bad.push(format!(
                         "{}: invalid signature {sig} in FormID {:08X}",
-                        path.file_name().expect("path ends in file name").to_string_lossy(),
+                        path.file_name()
+                            .expect("path ends in file name")
+                            .to_string_lossy(),
                         record.header.form_id.0,
                     ));
                 }
@@ -214,7 +216,9 @@ fn esm_files_are_never_update_kind() -> Result<(), Box<dyn std::error::Error>> {
         if ext.as_deref() == Some("esm") && plugin.kind() == PluginKind::Update {
             failures.push(format!(
                 "{}: .esm detected as Update (unexpected for SSE)",
-                path.file_name().expect("path ends in file name").to_string_lossy()
+                path.file_name()
+                    .expect("path ends in file name")
+                    .to_string_lossy()
             ));
         }
     }
@@ -250,13 +254,17 @@ fn all_master_names_are_non_empty_ascii() -> Result<(), Box<dyn std::error::Erro
             if master.is_empty() {
                 failures.push(format!(
                     "{}: empty master filename",
-                    path.file_name().expect("path ends in file name").to_string_lossy()
+                    path.file_name()
+                        .expect("path ends in file name")
+                        .to_string_lossy()
                 ));
             }
             if !master.is_ascii() {
                 failures.push(format!(
                     "{}: non-ASCII master filename: {master:?}",
-                    path.file_name().expect("path ends in file name").to_string_lossy()
+                    path.file_name()
+                        .expect("path ends in file name")
+                        .to_string_lossy()
                 ));
             }
         }
@@ -296,7 +304,9 @@ fn all_subrecords_parse_without_error() -> Result<(), Box<dyn std::error::Error>
                 if let Err(e) = record.subrecords() {
                     failures.push(format!(
                         "{}: FormID {:08X} subrecord parse failed: {e}",
-                        path.file_name().expect("path ends in file name").to_string_lossy(),
+                        path.file_name()
+                            .expect("path ends in file name")
+                            .to_string_lossy(),
                         record.header.form_id.0,
                     ));
                 }
@@ -346,7 +356,9 @@ fn edid_subrecords_are_valid_utf8() -> Result<(), Box<dyn std::error::Error>> {
                 if let Err(e) = edid_sr.as_zstring() {
                     failures.push(format!(
                         "{}: FormID {:08X} EDID decode failed: {e}",
-                        path.file_name().expect("path ends in file name").to_string_lossy(),
+                        path.file_name()
+                            .expect("path ends in file name")
+                            .to_string_lossy(),
                         record.header.form_id.0,
                     ));
                 }
@@ -392,7 +404,9 @@ fn compressed_records_decompress_correctly() -> Result<(), Box<dyn std::error::E
                 if let Err(e) = record.subrecords() {
                     failures.push(format!(
                         "{}: FormID {:08X} decompression failed: {e}",
-                        path.file_name().expect("path ends in file name").to_string_lossy(),
+                        path.file_name()
+                            .expect("path ends in file name")
+                            .to_string_lossy(),
                         record.header.form_id.0,
                     ));
                 }
@@ -434,7 +448,9 @@ fn all_plugins_have_valid_hedr_version() -> Result<(), Box<dyn std::error::Error
         if !v.is_finite() || v <= 0.0 {
             failures.push(format!(
                 "{}: invalid HEDR version {v}",
-                path.file_name().expect("path ends in file name").to_string_lossy()
+                path.file_name()
+                    .expect("path ends in file name")
+                    .to_string_lossy()
             ));
         }
     }
@@ -477,7 +493,9 @@ fn find_record_returns_correct_record() -> Result<(), Box<dyn std::error::Error>
             assert!(
                 found.is_some(),
                 "{}: find_record({:08X}) returned None",
-                path.file_name().expect("path ends in file name").to_string_lossy(),
+                path.file_name()
+                    .expect("path ends in file name")
+                    .to_string_lossy(),
                 fid.0,
             );
             assert_eq!(
@@ -516,7 +534,9 @@ fn print_plugin_summary() -> Result<(), Box<dyn std::error::Error>> {
                 ok += 1;
                 eprintln!(
                     "{:<52} {:8} {:6} {:7}",
-                    path.file_name().expect("path ends in file name").to_string_lossy(),
+                    path.file_name()
+                        .expect("path ends in file name")
+                        .to_string_lossy(),
                     format!("{:?}", plugin.kind()),
                     plugin.groups().len(),
                     plugin.masters().len(),
@@ -526,7 +546,9 @@ fn print_plugin_summary() -> Result<(), Box<dyn std::error::Error>> {
                 err += 1;
                 eprintln!(
                     "{:<52} ERROR: {e}",
-                    path.file_name().expect("path ends in file name").to_string_lossy()
+                    path.file_name()
+                        .expect("path ends in file name")
+                        .to_string_lossy()
                 );
             }
         }
@@ -571,7 +593,9 @@ fn no_op_patcher_is_byte_identical_for_all_plugins() -> Result<(), Box<dyn std::
         for (path, orig_len, rewritten_len) in &mismatches {
             eprintln!(
                 "MISMATCH {:<52} original={} rewritten={}",
-                path.file_name().expect("path ends in file name").to_string_lossy(),
+                path.file_name()
+                    .expect("path ends in file name")
+                    .to_string_lossy(),
                 orig_len,
                 rewritten_len,
             );
