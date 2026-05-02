@@ -7,6 +7,14 @@
 //! 2. Add files with the respective `add` method.
 //! 3. Call `write_to` to produce the archive on disk.
 //!
+//! # Parallel compression
+//!
+//! The TES4 / FO3 / SSE (`bsa_tes4`), BA2 GNRL (`ba2_gnrl`), and BA2 DX10
+//! (`ba2_dx10`) writers compress individual files in parallel using
+//! [`rayon`].  Output is deterministic: the BSA variants sort by hash before
+//! writing, and BA2 variants preserve the insertion order (rayon's collect
+//! preserves order).  All compression functions are pure and thread-safe.
+//!
 //! # Example
 //!
 //! ```no_run

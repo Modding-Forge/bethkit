@@ -126,26 +126,29 @@ fn write(
         packed_size: u32,
     }
 
-    let mut files: Vec<GnrlFile> = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let should_compress = entry.compress_override.unwrap_or(compress);
-        let uncompressed_size = entry.data.len() as u32;
-
-        let (stored, packed_size) = if should_compress {
-            let compressed = compress_zlib(&entry.data)?;
-            let packed = compressed.len() as u32;
-            (compressed, packed)
-        } else {
-            (entry.data, 0u32)
-        };
-
-        files.push(GnrlFile {
-            path: entry.path,
-            uncompressed_size,
-            stored,
-            packed_size,
-        });
-    }
+    // Compress files in parallel.  rayon's collect preserves input order, so
+    // the name-table and record-offset calculations remain correct.
+    use rayon::prelude::*;
+    let files: Vec<GnrlFile> = entries
+        .into_par_iter()
+        .map(|entry| {
+            let should_compress = entry.compress_override.unwrap_or(compress);
+            let uncompressed_size = entry.data.len() as u32;
+            let (stored, packed_size) = if should_compress {
+                let compressed = compress_zlib(&entry.data)?;
+                let packed = compressed.len() as u32;
+                (compressed, packed)
+            } else {
+                (entry.data, 0u32)
+            };
+            Ok(GnrlFile {
+                path: entry.path,
+                uncompressed_size,
+                stored,
+                packed_size,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     // Layout:
     //   Header (24):            MAGIC + version + "GNRL" + file_count + table_offset
@@ -301,6 +304,33 @@ mod tests {
                 .to_vec(),
             payload
         );
+        Ok(())
+    }
+
+    /// Verifies that writing the same BA2 GNRL archive twice produces
+    /// bit-identical output.
+    #[test]
+    fn gnrl_write_is_deterministic() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let dir = tempfile::tempdir()?;
+        let path_a = dir.path().join("a.ba2");
+        let path_b = dir.path().join("b.ba2");
+        let payload = b"gnrl determinism payload ".repeat(20);
+        let build = || -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let path = if path_a.exists() { &path_b } else { &path_a };
+            let mut w = Ba2GnrlWriter::new(Ba2Version::V1).compress(true);
+            w.add("meshes/nif.nif", payload.to_vec());
+            w.add("scripts/pex.pex", b"script_data".to_vec());
+            w.write_to(path)?;
+            Ok(())
+        };
+        build()?;
+        build()?;
+
+        // when / then — archives must be byte-identical
+        let bytes_a = std::fs::read(&path_a)?;
+        let bytes_b = std::fs::read(&path_b)?;
+        assert_eq!(bytes_a, bytes_b, "BA2 GNRL output is not deterministic");
         Ok(())
     }
 }

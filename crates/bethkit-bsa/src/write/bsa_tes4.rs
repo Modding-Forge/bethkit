@@ -90,65 +90,59 @@ pub(super) fn write(
         is_compressed: bool,
     }
 
-    let mut file_entries: Vec<FileEntry> = Vec::with_capacity(entries.len());
-    let mut content_flags = ContentFlags::empty();
-
-    for entry in entries {
-        // Split path into folder and filename.
-        let (folder_str, file_str) = match entry.path.rfind('/') {
-            Some(idx) => (
-                entry.path[..idx].to_owned(),
-                entry.path[idx + 1..].to_owned(),
-            ),
-            None => (String::new(), entry.path.clone()),
-        };
-
-        // Compute content flags from extension.
-        if let Some(ext) = file_str.rfind('.').map(|i| &file_str[i..]) {
-            content_flags |= content_flag_for_ext(ext);
-        }
-
-        // Split filename stem/extension for hashing.
-        let (stem, ext) = split_stem_ext(&file_str);
-        let folder_hash = hash_tes4_dir(&folder_str.replace('/', "\\"));
-        let file_hash = hash_tes4_file(stem, ext);
-
-        // Determine whether this file is compressed.
-        let should_compress = entry.compress_override.unwrap_or(compress);
-
-        let is_compressed = should_compress;
-
-        // Build the payload (data that will be stored at the file's offset).
-        let mut stored: Vec<u8> = Vec::new();
-
-        // Optional embedded file name prefix.
-        if do_embed {
-            let fname_bytes = file_str.as_bytes();
-            let name_len = fname_bytes.len().min(255) as u8;
-            stored.push(name_len);
-            stored.extend_from_slice(&fname_bytes[..name_len as usize]);
-        }
-
-        if is_compressed {
-            let compressed = compress_data(&entry.data, is_sse)?;
-            stored.extend_from_slice(&(entry.data.len() as u32).to_le_bytes());
-            stored.extend_from_slice(&compressed);
-        } else {
-            stored.extend_from_slice(&entry.data);
-        }
-
-        file_entries.push(FileEntry {
-            folder_name: folder_str,
-            file_name: file_str,
-            folder_hash,
-            file_hash,
-            stored,
-            is_compressed,
-        });
-    }
+    // Compress and hash files in parallel; output order is restored by the
+    // sort below.  Each closure is independent: only Copy-typed flags are
+    // captured, and every entry owns its data.
+    use rayon::prelude::*;
+    let mut file_entries: Vec<FileEntry> = entries
+        .into_par_iter()
+        .map(|entry| {
+            let (folder_str, file_str) = match entry.path.rfind('/') {
+                Some(idx) => (
+                    entry.path[..idx].to_owned(),
+                    entry.path[idx + 1..].to_owned(),
+                ),
+                None => (String::new(), entry.path.clone()),
+            };
+            let (stem, ext_str) = split_stem_ext(&file_str);
+            let folder_hash = hash_tes4_dir(&folder_str.replace('/', "\\"));
+            let file_hash = hash_tes4_file(stem, ext_str);
+            let is_compressed = entry.compress_override.unwrap_or(compress);
+            let mut stored: Vec<u8> = Vec::new();
+            if do_embed {
+                let fname_bytes = file_str.as_bytes();
+                let name_len = fname_bytes.len().min(255) as u8;
+                stored.push(name_len);
+                stored.extend_from_slice(&fname_bytes[..name_len as usize]);
+            }
+            if is_compressed {
+                let compressed = compress_data(&entry.data, is_sse)?;
+                stored.extend_from_slice(&(entry.data.len() as u32).to_le_bytes());
+                stored.extend_from_slice(&compressed);
+            } else {
+                stored.extend_from_slice(&entry.data);
+            }
+            Ok(FileEntry {
+                folder_name: folder_str,
+                file_name: file_str,
+                folder_hash,
+                file_hash,
+                stored,
+                is_compressed,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     // Sort: primary by folder hash, secondary by file hash.
     file_entries.sort_by_key(|e| (e.folder_hash, e.file_hash));
+
+    // Accumulate content flags after the sort so the pass is sequential.
+    let mut content_flags = ContentFlags::empty();
+    for fe in &file_entries {
+        if let Some(ext) = fe.file_name.rfind('.').map(|i| &fe.file_name[i..]) {
+            content_flags |= content_flag_for_ext(ext);
+        }
+    }
 
     // Group into folders (preserve sorted order).
     // folder_hash → (folder_name, Vec<index_into_file_entries>)
@@ -491,6 +485,57 @@ mod tests {
                 .to_vec(),
             b"data_b"
         );
+        Ok(())
+    }
+
+    /// Verifies that writing the same TES4 BSA twice produces bit-identical output.
+    #[test]
+    fn tes4_write_is_deterministic() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let dir = tempfile::tempdir()?;
+        let path_a = dir.path().join("a.bsa");
+        let path_b = dir.path().join("b.bsa");
+        let payload = b"repeated payload for determinism check ".repeat(10);
+        let build = || -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let path = if path_a.exists() { &path_b } else { &path_a };
+            let mut w = BsaWriter::new(BsaVersion::Tes4).compress(true);
+            w.add("meshes/a.nif", payload.to_vec());
+            w.add("textures/b.dds", b"tex".to_vec());
+            w.write_to(path)?;
+            Ok(())
+        };
+        build()?;
+        build()?;
+
+        // when / then — both archives must be byte-identical
+        let bytes_a = std::fs::read(&path_a)?;
+        let bytes_b = std::fs::read(&path_b)?;
+        assert_eq!(bytes_a, bytes_b, "TES4 BSA output is not deterministic");
+        Ok(())
+    }
+
+    /// Verifies that writing the same SSE BSA twice produces bit-identical output.
+    #[test]
+    fn sse_write_is_deterministic() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let dir = tempfile::tempdir()?;
+        let path_a = dir.path().join("a.bsa");
+        let path_b = dir.path().join("b.bsa");
+        let payload = b"sse determinism payload ".repeat(20);
+        let build = || -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let path = if path_a.exists() { &path_b } else { &path_a };
+            let mut w = BsaWriter::new(BsaVersion::Sse).compress(true);
+            w.add("meshes/armor.nif", payload.to_vec());
+            w.write_to(path)?;
+            Ok(())
+        };
+        build()?;
+        build()?;
+
+        // when / then
+        let bytes_a = std::fs::read(&path_a)?;
+        let bytes_b = std::fs::read(&path_b)?;
+        assert_eq!(bytes_a, bytes_b, "SSE BSA output is not deterministic");
         Ok(())
     }
 }

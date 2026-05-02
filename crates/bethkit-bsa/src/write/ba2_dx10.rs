@@ -154,35 +154,37 @@ fn write(
         chunk: TexChunk,
     }
 
-    let mut records: Vec<TexRecord> = Vec::with_capacity(entries.len());
-
-    for entry in entries {
-        let info = entry.info;
-        let all_mip_bytes: Vec<u8> = info.mip_data.clone();
-        let uncompressed = all_mip_bytes.len() as u32;
-
-        let (stored, packed_size) = if compress {
-            let compressed = compress_zlib(&all_mip_bytes)?;
-            let packed = compressed.len() as u32;
-            (compressed, packed)
-        } else {
-            (all_mip_bytes, 0u32)
-        };
-
-        records.push(TexRecord {
-            path: entry.path,
-            width: info.width,
-            height: info.height,
-            num_mips: info.num_mips,
-            dxgi_format: info.dxgi_format,
-            cube_maps: info.cube_maps,
-            chunk: TexChunk {
-                stored,
-                uncompressed,
-                packed_size,
-            },
-        });
-    }
+    // Compress mip data in parallel.  rayon preserves input order, keeping
+    // the record table and offset calculations deterministic.
+    use rayon::prelude::*;
+    let records: Vec<TexRecord> = entries
+        .into_par_iter()
+        .map(|entry| {
+            let info = entry.info;
+            let all_mip_bytes: Vec<u8> = info.mip_data.clone();
+            let uncompressed = all_mip_bytes.len() as u32;
+            let (stored, packed_size) = if compress {
+                let compressed = compress_zlib(&all_mip_bytes)?;
+                let packed = compressed.len() as u32;
+                (compressed, packed)
+            } else {
+                (all_mip_bytes, 0u32)
+            };
+            Ok(TexRecord {
+                path: entry.path,
+                width: info.width,
+                height: info.height,
+                num_mips: info.num_mips,
+                dxgi_format: info.dxgi_format,
+                cube_maps: info.cube_maps,
+                chunk: TexChunk {
+                    stored,
+                    uncompressed,
+                    packed_size,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     // Layout:
     //   Header (24):              MAGIC + version + "DX10" + file_count + table_offset
@@ -352,6 +354,32 @@ mod tests {
         );
         // BC1 1×1 mip = 8 bytes; they appear after the reconstructed header.
         assert!(extracted.ends_with(&[0u8; 8]), "mip data mismatch");
+        Ok(())
+    }
+
+    /// Verifies that writing the same BA2 DX10 archive twice produces
+    /// bit-identical output.
+    #[test]
+    fn dx10_write_is_deterministic() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let dir = tempfile::tempdir()?;
+        let path_a = dir.path().join("a.ba2");
+        let path_b = dir.path().join("b.ba2");
+        let dds = minimal_bc1_dds();
+        let build = || -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let path = if path_a.exists() { &path_b } else { &path_a };
+            let mut w = Ba2Dx10Writer::new(Ba2Version::V1).compress(true);
+            w.add("textures/test.dds", dds.clone())?;
+            w.write_to(path)?;
+            Ok(())
+        };
+        build()?;
+        build()?;
+
+        // when / then — archives must be byte-identical
+        let bytes_a = std::fs::read(&path_a)?;
+        let bytes_b = std::fs::read(&path_b)?;
+        assert_eq!(bytes_a, bytes_b, "BA2 DX10 output is not deterministic");
         Ok(())
     }
 }
