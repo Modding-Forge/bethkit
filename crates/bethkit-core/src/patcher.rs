@@ -269,49 +269,9 @@ fn io_err(err: io::Error) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::{build_grup, build_hedr, build_record, build_subrecord};
     use crate::types::GameContext;
 
-    fn build_hedr(version: f32, num_records: u32, next_id: u32) -> Vec<u8> {
-        let mut data = Vec::new();
-        data.extend_from_slice(&version.to_le_bytes());
-        data.extend_from_slice(&num_records.to_le_bytes());
-        data.extend_from_slice(&next_id.to_le_bytes());
-        data
-    }
-
-    fn build_subrecord(sig: &[u8; 4], data: &[u8]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(sig);
-        buf.extend_from_slice(&(data.len() as u16).to_le_bytes());
-        buf.extend_from_slice(data);
-        buf
-    }
-
-    fn build_record(sig: &[u8; 4], flags: u32, form_id: u32, data: &[u8]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(sig);
-        buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&flags.to_le_bytes());
-        buf.extend_from_slice(&form_id.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes());
-        buf.extend_from_slice(data);
-        buf
-    }
-
-    fn build_grup(label: &[u8; 4], group_type: i32, children: &[u8]) -> Vec<u8> {
-        let size: u32 = 24 + children.len() as u32;
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"GRUP");
-        buf.extend_from_slice(&size.to_le_bytes());
-        buf.extend_from_slice(label);
-        buf.extend_from_slice(&group_type.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(children);
-        buf
-    }
 
     fn sample_plugin_bytes() -> Vec<u8> {
         let hedr = build_hedr(1.7, 0, 0x800);

@@ -32,14 +32,16 @@ mod plugin;
 mod record;
 mod schema;
 mod strings;
+#[cfg(test)]
+mod test_helpers;
 mod types;
 mod writer;
 
 pub use cache::{CacheEntry, PluginCache};
-pub use implicits::ImplicitRecords;
 pub use encoding::{code_page_for_language, CodePage};
 pub use error::{CoreError, Result};
 pub use group::{Group, GroupChild, GroupHeader, GroupLabel, GroupType};
+pub use implicits::ImplicitRecords;
 pub use load_order::{GlobalFormId, LoadOrder, LoadOrderEntry};
 pub use localized::{
     apply_edits, extract_strings, localized_subrecords, resolve_string_kind, LocalizationSet,
