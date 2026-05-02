@@ -8,10 +8,6 @@ bethkit provides two complementary APIs for producing plugin files:
 
 == PluginWriter — build from scratch
 
-NOTE: `PluginWriter` and the write-from-scratch API (`WritableGroup`, `WritableRecord`,
-`WritableSubRecord`) are planned but not yet implemented.
-Only `PluginPatcher` is available in the current release.
-
 `PluginWriter` constructs a valid plugin file byte-by-byte.
 It handles the TES4 header, GRUP wrappers, record headers, and group-size fields automatically.
 
@@ -20,29 +16,39 @@ It handles the TES4 header, GRUP wrappers, record headers, and group-size fields
 [source,rust]
 ----
 use bethkit_core::{
-    FormId, GameContext, PluginKind, Signature,
-    WritableGroup, WritableGroupChild, WritableHeader,
+    FormId, GameContext, RecordFlags, Signature,
+    WritableGroup, WritableGroupChild,
     WritableRecord, WritableSubRecord, PluginWriter,
 };
-use std::fs::File;
+use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut out = File::create("MyMod.esp")?;
-    let mut writer = PluginWriter::new(GameContext::sse(), PluginKind::Plugin);
+    let mut writer = PluginWriter::new(GameContext::sse(), 1.71);
 
     // Add master files
-    writer.header_mut().add_master("Skyrim.esm");
-    writer.header_mut().set_author("My Name");
-    writer.header_mut().set_description("A demonstration plugin.");
+    writer.add_master("Skyrim.esm");
+    writer.set_description("A demonstration plugin.");
 
-    // Add a KYWD group with one record
-    let mut group = WritableGroup::new(Signature(*b"KYWD"));
-    let mut record = WritableRecord::new(Signature(*b"KYWD"), FormId(0x00_000D62));
-    record.add_subrecord(WritableSubRecord::zstring(Signature(*b"EDID"), "MyKeyword"));
-    group.add_record(record);
+    // Build a KYWD group with one record using struct literals.
+    let subrecord = WritableSubRecord {
+        signature: Signature(*b"EDID"),
+        data: b"MyKeyword\0".to_vec(),
+    };
+    let record = WritableRecord {
+        signature: Signature(*b"KYWD"),
+        flags: RecordFlags::empty(),
+        form_id: FormId(0x00_000D62),
+        form_version: 44,
+        subrecords: vec![subrecord],
+    };
+    let group = WritableGroup {
+        label: *b"KYWD",
+        group_type: 0,
+        children: vec![WritableGroupChild::Record(record)],
+    };
     writer.add_group(group);
 
-    writer.write_to(&mut out)?;
+    writer.write_to_file(Path::new("MyMod.esp"))?;
     Ok(())
 }
 ----
@@ -51,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 [source,rust]
 ----
-writer.header_mut().set_localized(true);
+writer.set_localized(true);
 ----
 
 When `set_localized` is true the writer sets bit 7 of the TES4 record flags.
@@ -59,26 +65,26 @@ String-table generation is your responsibility — see xref:string-tables.adoc[L
 
 === ESLification
 
-NOTE: `Plugin::eslify()` is planned but not yet implemented.
-
-To produce a light plugin (ESL) from an existing set of records, first write the plugin
-with `PluginKind::Light` and ensure all object IDs stay within the 0x000–0xFFF range.
-`Plugin::eslify()` compacts a fully loaded plugin in-memory before writing:
+`PluginWriter::eslify` reassigns all plugin-owned FormIDs to the ESL range
+(`0xFE_000800`–`0xFE_000FFF`), patches inline FormID references inside subrecord data,
+and sets the `LIGHT` flag on the `TES4` header.
 
 [source,rust]
 ----
-use bethkit_core::{GameContext, Plugin};
+use bethkit_core::{GameContext, PluginWriter};
+use std::path::Path;
 
 let ctx = GameContext::sse();
-let mut plugin = Plugin::open("MyMod.esp".as_ref(), ctx)?;
-let eslified = plugin.eslify()?; // returns a new Plugin with compacted FormIDs
+let mut writer = PluginWriter::new(ctx, 1.71);
+// … populate writer with add_group(…) calls …
+writer.eslify()?; // reassigns FormIDs and sets the LIGHT flag
 
-let mut out = std::fs::File::create("MyMod.esl")?;
-eslified.write_to(&mut out)?;
+writer.write_to_file(Path::new("MyMod.esl"))?;
 ----
 
 `eslify()` returns `Err(CoreError::EslRecordLimitExceeded)` if the plugin defines more than
-2048 records (the practical ESL limit).
+2048 new records, or `Err(CoreError::UnsupportedGame)` if the target game does not support
+light plugins.
 
 == PluginPatcher — streaming replacement
 
@@ -94,7 +100,10 @@ original.
 
 [source,rust]
 ----
-use bethkit_core::{FormId, GameContext, Plugin, PluginPatcher, RecordPatch};
+use bethkit_core::{
+    FormId, GameContext, Plugin, PluginPatcher,
+    RecordFlags, RecordPatch, Signature, WritableRecord, WritableSubRecord,
+};
 use std::fs::File;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -102,34 +111,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plugin = Plugin::open("MyMod.esp".as_ref(), ctx)?;
     let mut patcher = PluginPatcher::new(&plugin);
 
-    // Build replacement bytes — complete record (24-byte header + data)
-    let new_bytes: Vec<u8> = build_replacement();
-    patcher.replace_record(FormId(0x00_000ABC), RecordPatch::RawBytes(new_bytes));
+    // Build a replacement record — data_size is computed automatically.
+    let patch = RecordPatch::from_writable_record(build_replacement());
+    patcher.replace_record(FormId(0x00_000ABC), patch);
 
     let mut out = File::create("MyMod_patched.esp")?;
     patcher.write_to(&mut out)?;
     Ok(())
 }
 
-fn build_replacement() -> Vec<u8> {
-    // … assemble 24-byte record header followed by subrecord bytes …
-    Vec::new()
+fn build_replacement() -> WritableRecord {
+    WritableRecord {
+        signature: Signature(*b"KYWD"),
+        flags: RecordFlags::empty(),
+        form_id: FormId(0x00_000ABC),
+        form_version: 44,
+        subrecords: vec![
+            WritableSubRecord {
+                signature: Signature(*b"EDID"),
+                data: b"MyReplacementKeyword\0".to_vec(),
+            },
+        ],
+    }
 }
 ----
 
-=== RecordPatch variants
+=== RecordPatch constructors
 
 [cols="1,3",options="header"]
 |===
-| Variant | Description
+| Constructor | Description
 
-| `RecordPatch::RawBytes(Vec<u8>)`
-| Complete replacement bytes including the 24-byte record header.
-  Use this when you have already constructed the full record binary.
+| `RecordPatch::from_writable_record(record)`
+| Serialises a `WritableRecord` into a patch.
+  `data_size` in the 24-byte header is computed automatically from the
+  subrecords.  This is the preferred way to build patches.
 
-| `RecordPatch::Delete`
-| Removes the record from the output entirely.
-  The containing group is still written (possibly empty).
+| `RecordPatch::from_record_verbatim(record, source)`
+| Copies the original bytes of a parsed `Record` from `source` verbatim.
+  Returns `None` when no source range is available (i.e. the record was
+  constructed in memory, not parsed from a file).
+
+| `RecordPatch::RawBytes(bytes)`
+| Low-level escape hatch.  Provide the complete record bytes including the
+  24-byte header.  The caller must keep `data_size` and the data block in
+  sync.  Use this only when you need full binary control, for example when
+  patching a zlib-compressed record.
 |===
 
 === Combining PluginPatcher with PluginWriter

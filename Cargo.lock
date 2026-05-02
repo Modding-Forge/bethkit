@@ -91,6 +91,7 @@ name = "bethkit-core"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "bethkit-bsa",
  "bethkit-io",
  "bitflags",
  "bstr",

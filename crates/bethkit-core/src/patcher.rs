@@ -24,6 +24,7 @@ use crate::group::{Group, GroupChild, GROUP_HEADER_SIZE};
 use crate::plugin::Plugin;
 use crate::record::Record;
 use crate::types::{FormId, RecordFlags};
+use crate::writer::WritableRecord;
 
 /// Modifications to apply to the TES4/TES3 plugin header during
 /// [`PluginPatcher::write_to`].
@@ -49,10 +50,43 @@ pub enum RecordPatch {
     /// The caller is responsible for ensuring `data_size` in the header is
     /// consistent with the trailing data length and for setting / clearing
     /// the [`crate::RecordFlags::COMPRESSED`] flag as appropriate.
+    ///
+    /// Prefer [`RecordPatch::from_writable_record`] or
+    /// [`RecordPatch::from_record_verbatim`] — those compute `data_size`
+    /// automatically. Use `RawBytes` directly only when you need full binary
+    /// control, for example when patching a record that must remain
+    /// zlib-compressed.
     RawBytes(Vec<u8>),
 }
 
 impl RecordPatch {
+    /// Serialises `record` into a [`RecordPatch::RawBytes`] variant,
+    /// computing `data_size` automatically from the subrecords.
+    ///
+    /// This is the safe alternative to constructing [`RecordPatch::RawBytes`]
+    /// by hand, which requires the caller to keep `data_size` and the data
+    /// block in sync manually.
+    pub fn from_writable_record(record: WritableRecord) -> Self {
+        let mut buf: Vec<u8> = Vec::new();
+        record.write_to(&mut buf);
+        Self::RawBytes(buf)
+    }
+
+    /// Copies the original bytes of `record` from `source` verbatim into a
+    /// [`RecordPatch::RawBytes`] variant.
+    ///
+    /// Returns `None` when the parser did not capture a source range for
+    /// `record` (e.g. the record was constructed in memory rather than parsed
+    /// from a file), in which case no bytes are available to copy.
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The parsed record whose bytes should be preserved.
+    /// * `source` - The original file bytes that `record` was parsed from.
+    pub fn from_record_verbatim(record: &Record, source: &[u8]) -> Option<Self> {
+        record.source_bytes(source).map(|b| Self::RawBytes(b.to_vec()))
+    }
+
     /// Returns the byte length of this patch when serialised.
     pub fn byte_len(&self) -> usize {
         match self {

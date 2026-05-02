@@ -23,7 +23,7 @@ impl WritableSubRecord {
     ///
     /// If the data exceeds 65 535 bytes, a `XXXX` size-override subrecord is
     /// prepended automatically.
-    fn write_to(&self, buf: &mut Vec<u8>) {
+    pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
         let data_len: usize = self.data.len();
 
         if data_len > u16::MAX as usize {
@@ -59,7 +59,7 @@ pub struct WritableRecord {
 
 impl WritableRecord {
     /// Serialises this record into `buf`.
-    fn write_to(&self, buf: &mut Vec<u8>) {
+    pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
         // Serialise subrecords first to know data_size.
         let mut data_buf: Vec<u8> = Vec::new();
         for sr in &self.subrecords {
