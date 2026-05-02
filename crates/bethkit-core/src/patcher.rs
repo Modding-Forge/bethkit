@@ -84,7 +84,9 @@ impl RecordPatch {
     /// * `record` - The parsed record whose bytes should be preserved.
     /// * `source` - The original file bytes that `record` was parsed from.
     pub fn from_record_verbatim(record: &Record, source: &[u8]) -> Option<Self> {
-        record.source_bytes(source).map(|b| Self::RawBytes(b.to_vec()))
+        record
+            .source_bytes(source)
+            .map(|b| Self::RawBytes(b.to_vec()))
     }
 
     /// Returns the byte length of this patch when serialised.

@@ -1714,10 +1714,7 @@ fn live_19_load_order_resolve() -> Result<(), Box<dyn std::error::Error>> {
                 "ESL FormID resolved to wrong plugin: expected {name}, got {}",
                 gfid.plugin_name,
             );
-            assert_eq!(
-                gfid.object_id, 0x0800,
-                "ESL object_id mismatch for {name}"
-            );
+            assert_eq!(gfid.object_id, 0x0800, "ESL object_id mismatch for {name}");
             esl_ok += 1;
         }
         eprintln!(
