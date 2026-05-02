@@ -23,7 +23,24 @@ use crate::error::{CoreError, Result};
 use crate::group::{Group, GroupChild, GROUP_HEADER_SIZE};
 use crate::plugin::Plugin;
 use crate::record::Record;
-use crate::types::FormId;
+use crate::types::{FormId, RecordFlags};
+
+/// Modifications to apply to the TES4/TES3 plugin header during
+/// [`PluginPatcher::write_to`].
+///
+/// All fields are optional. Fields left as `None` inherit the value from
+/// the original header record.
+pub struct PluginHeaderPatch {
+    /// Replacement master plugin list.  When set, replaces the original MAST
+    /// subrecords in their entirety.
+    pub masters: Option<Vec<String>>,
+    /// Replacement plugin description (written to SNAM).
+    pub description: Option<String>,
+    /// Flag bits to set on the TES4 record header.
+    pub flags_set: Option<RecordFlags>,
+    /// Flag bits to clear on the TES4 record header.
+    pub flags_clear: Option<RecordFlags>,
+}
 
 /// How a single record should be rewritten by [`PluginPatcher`].
 pub enum RecordPatch {
@@ -57,6 +74,7 @@ impl RecordPatch {
 pub struct PluginPatcher<'p> {
     plugin: &'p Plugin,
     patches: HashMap<FormId, RecordPatch>,
+    header_patch: Option<PluginHeaderPatch>,
 }
 
 impl<'p> PluginPatcher<'p> {
