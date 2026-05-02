@@ -1608,6 +1608,8 @@ fn live_19_load_order_resolve() -> Result<(), Box<dyn std::error::Error>> {
     // Build the load order from all discovered plugins.
     let mut load_order = LoadOrder::new();
     let mut plugin_masters: Vec<(String, Vec<String>)> = Vec::new();
+    // (canonical_name, esl_slot) pairs collected for light plugins.
+    let mut light_entries: Vec<(String, u16)> = Vec::new();
     let mut skipped = 0usize;
 
     for path in &paths {
@@ -1620,18 +1622,26 @@ fn live_19_load_order_resolve() -> Result<(), Box<dyn std::error::Error>> {
             Ok(plugin) => {
                 let kind = plugin.kind();
                 let masters: Vec<String> = plugin.masters().iter().map(|s| s.to_string()).collect();
-                if load_order.push(&file_name, kind).is_err() {
-                    // Index full — stop adding regular plugins gracefully.
-                    skipped += 1;
-                    continue;
+                match load_order.push(&file_name, kind) {
+                    Err(_) => {
+                        // Regular index full (0xFE) or ESL slots exhausted.
+                        skipped += 1;
+                        continue;
+                    }
+                    Ok(entry) => {
+                        if let Some(slot) = entry.light_slot {
+                            light_entries.push((entry.name.clone(), slot));
+                        }
+                        plugin_masters.push((file_name, masters));
+                    }
                 }
-                plugin_masters.push((file_name, masters));
             }
             Err(_) => skipped += 1,
         }
     }
 
     eprintln!("  Load order entries : {}", load_order.len());
+    eprintln!("  Light (ESL) plugins: {}", light_entries.len());
     eprintln!("  Skipped            : {skipped}");
 
     // Verify the Player reference (FormID 0x00000014) resolves to Skyrim.esm.
@@ -1677,6 +1687,44 @@ fn live_19_load_order_resolve() -> Result<(), Box<dyn std::error::Error>> {
         "  Self-authored FormID resolution: {} / 10 OK",
         sample.len()
     );
+
+    // Verify ESL-encoded FormID resolution for light plugins.
+    //
+    // For a light plugin with ESL slot S, a self-authored FormID is:
+    //   0xFE_00_00_00  | (S << 12) | 0x0800
+    // The source_plugin and masters arguments are irrelevant for 0xFE FormIDs;
+    // the slot encoded in bits 23:12 uniquely identifies the owner.
+    if light_entries.is_empty() {
+        eprintln!("  ESL FormID resolution: no light plugins in load order, skipped");
+    } else {
+        let esl_sample: Vec<&(String, u16)> = light_entries.iter().take(10).collect();
+        let mut esl_ok = 0usize;
+        for (name, slot) in &esl_sample {
+            let raw: u32 = (0xFE_u32 << 24) | ((*slot as u32) << 12) | 0x0800;
+            let fid = FormId(raw);
+            let gfid = load_order.resolve(fid, name, &[]);
+            assert!(
+                gfid.is_some(),
+                "ESL FormID for {name} (slot {slot:#05X}) failed to resolve"
+            );
+            let gfid = gfid.expect("just checked is_some");
+            assert_eq!(
+                gfid.plugin_name,
+                name.to_lowercase(),
+                "ESL FormID resolved to wrong plugin: expected {name}, got {}",
+                gfid.plugin_name,
+            );
+            assert_eq!(
+                gfid.object_id, 0x0800,
+                "ESL object_id mismatch for {name}"
+            );
+            esl_ok += 1;
+        }
+        eprintln!(
+            "  ESL FormID resolution: {esl_ok} / {} OK",
+            esl_sample.len()
+        );
+    }
 
     Ok(())
 }
