@@ -47,7 +47,7 @@ pub use localized::{
     apply_edits, extract_strings, localized_subrecords, resolve_string_kind, LocalizationSet,
     LocalizedString,
 };
-pub use patcher::{PluginPatcher, RecordPatch};
+pub use patcher::{PluginHeaderPatch, PluginPatcher, RecordPatch};
 pub use plugin::{Plugin, PluginHeader};
 pub use record::{Record, RecordHeader, SubRecord, SubRecordData};
 pub use schema::{FieldEntry, FieldValue, RecordView, SchemaRegistry};
