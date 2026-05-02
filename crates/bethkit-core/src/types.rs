@@ -132,18 +132,16 @@ bitflags::bitflags! {
         /// Plugin has externalized strings (`.strings` files). Only valid on
         /// `TES4`.
         const LOCALIZED        = 0x0000_0080;
-        /// Light plugin flag for SSE / FO4 (bit 25).
+        /// Light plugin flag for SSE / FO4 / FO76 (bit 9, `0x0000_0200`).
         ///
-        /// For Starfield the bit position differs — use
-        /// [`GameContext::light_flag`] instead of comparing this constant
-        /// directly.
-        const LIGHT            = 0x0200_0000;
+        /// For Starfield this bit is instead used as the Update flag; the
+        /// light flag moved to bit 8. Always use [`GameContext::light_flag`]
+        /// when checking for ESL status across games.
+        const LIGHT            = 0x0000_0200;
         /// Record has been deleted.
         const DELETED          = 0x0000_0020;
         /// Record has a LOD tree.
         const HAS_LOD_TREE     = 0x0000_0040;
-        /// Record casts shadows.
-        const CASTS_SHADOWS    = 0x0000_0200;
         /// Record is persistent (never unloaded).
         const PERSISTENT       = 0x0000_0400;
         /// Record starts disabled.
@@ -280,12 +278,12 @@ impl GameContext {
 
     /// Returns the raw bit mask for the "light plugin" flag in record flags.
     ///
-    /// Starfield moved this flag to bit 8; all other supported games use
-    /// bit 25.
+    /// SSE / FO4 / FO76 use bit 9 (`0x0000_0200`). Starfield moved the flag
+    /// to bit 8 (`0x0000_0100`).
     pub fn light_flag(&self) -> u32 {
         match self.game {
             Game::Starfield => 0x0000_0100,
-            _ => 0x0200_0000,
+            _ => 0x0000_0200,
         }
     }
 
@@ -460,7 +458,7 @@ mod tests {
         Ok(())
     }
 
-    /// Verifies that the SSE light flag is at bit 25.
+    /// Verifies that the SSE light flag is at bit 9 (0x0000_0200).
     #[test]
     fn sse_light_flag_position() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given
@@ -470,7 +468,7 @@ mod tests {
         let flag = ctx.light_flag();
 
         // then
-        assert_eq!(flag, 0x0200_0000);
+        assert_eq!(flag, 0x0000_0200);
         Ok(())
     }
 
