@@ -133,6 +133,11 @@ impl LoadOrder {
         self.entries.is_empty()
     }
 
+    /// Returns a slice of all entries in insertion order.
+    pub fn entries(&self) -> &[LoadOrderEntry] {
+        &self.entries
+    }
+
     /// Resolves a raw FormID from `source_plugin` to a [`GlobalFormId`].
     ///
     /// For regular FormIDs, the top byte indexes into `source_plugin`'s master

@@ -35,10 +35,10 @@ It knows how to handle both regular plugins (indices 0x00–0xFD) and light plug
 use bethkit_core::{LoadOrder, PluginKind};
 
 let mut lo = LoadOrder::new();
-lo.push("Skyrim.esm", PluginKind::Master); // assigned index 0x00
-lo.push("Update.esm", PluginKind::Master); // index 0x01
-lo.push("MyMod.esp",  PluginKind::Plugin);  // index 0x02
-lo.push("Tiny.esl",   PluginKind::Light);   // ESL slot 0x000
+lo.push("Skyrim.esm", PluginKind::Master)?; // assigned index 0x00
+lo.push("Update.esm", PluginKind::Master)?; // index 0x01
+lo.push("MyMod.esp",  PluginKind::Plugin)?;  // index 0x02
+lo.push("Tiny.esl",   PluginKind::Light)?;   // ESL slot 0x000
 ----
 
 In practice `LoadOrder` is used internally by `PluginCache`, which manages `push` calls
@@ -67,7 +67,7 @@ let mut cache = PluginCache::new();
 // Add plugins in load order — later plugins override earlier ones.
 for name in &["Skyrim.esm", "Update.esm", "Dawnguard.esm", "MyMod.esp"] {
     let plugin = Plugin::open(name.as_ref(), ctx)?;
-    cache.add(name, plugin);
+    cache.add(name, plugin)?;
 }
 ----
 
@@ -190,6 +190,9 @@ for entry in cache.entries() {
 ----
 for entry in cache.load_order().entries() {
     println!("slot {:02X}  {}  {:?}", entry.index, entry.name, entry.kind);
+    if let Some(slot) = entry.light_slot {
+        println!("  ESL slot: {:#05X}", slot);
+    }
 }
 ----
 
@@ -207,7 +210,7 @@ for entry in cache.load_order().entries() {
 
 | `kind`
 | `PluginKind`
-| `Master`, `Plugin`, or `Light`.
+| `Master`, `Plugin`, `Light`, `Medium` (Starfield), or `Update` (Starfield / SkyrimVR).
 
 | `light_slot`
 | `Option<u16>`

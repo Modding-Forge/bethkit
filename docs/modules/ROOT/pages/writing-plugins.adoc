@@ -8,6 +8,10 @@ bethkit provides two complementary APIs for producing plugin files:
 
 == PluginWriter — build from scratch
 
+NOTE: `PluginWriter` and the write-from-scratch API (`WritableGroup`, `WritableRecord`,
+`WritableSubRecord`) are planned but not yet implemented.
+Only `PluginPatcher` is available in the current release.
+
 `PluginWriter` constructs a valid plugin file byte-by-byte.
 It handles the TES4 header, GRUP wrappers, record headers, and group-size fields automatically.
 
@@ -24,7 +28,7 @@ use std::fs::File;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = File::create("MyMod.esp")?;
-    let mut writer = PluginWriter::new(GameContext::sse(), PluginKind::Esp);
+    let mut writer = PluginWriter::new(GameContext::sse(), PluginKind::Plugin);
 
     // Add master files
     writer.header_mut().add_master("Skyrim.esm");
@@ -55,8 +59,10 @@ String-table generation is your responsibility — see xref:string-tables.adoc[L
 
 === ESLification
 
+NOTE: `Plugin::eslify()` is planned but not yet implemented.
+
 To produce a light plugin (ESL) from an existing set of records, first write the plugin
-with `PluginKind::Esl` and ensure all object IDs stay within the 0x000–0xFFF range.
+with `PluginKind::Light` and ensure all object IDs stay within the 0x000–0xFFF range.
 `Plugin::eslify()` compacts a fully loaded plugin in-memory before writing:
 
 [source,rust]
