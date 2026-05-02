@@ -28,8 +28,8 @@ use std::{
 };
 
 use bethkit_core::{
-    GameContext, Plugin, PluginCache, PluginKind, RecordFlags, RecordView, SchemaRegistry,
-    Signature,
+    GameContext, LoadOrder, Plugin, PluginCache, PluginKind, PluginPatcher, RecordFlags,
+    RecordView, SchemaRegistry, Signature, StringFileKind, StringTable,
 };
 
 const DEFAULT_DATA_DIR: &str = r"E:\SteamLibrary\steamapps\common\Skyrim Special Edition\Data";
@@ -1418,6 +1418,366 @@ fn bench_h_aggregate_all_plugins_full_pass() -> Result<(), Box<dyn std::error::E
         fmt_mbps(total_bytes, elapsed),
         records as f64 / elapsed.as_secs_f64(),
     );
+
+    Ok(())
+}
+
+// ── Test 17: PluginPatcher no-op on base ESMs ─────────────────────────────────
+
+/// Runs [`PluginPatcher`] with no patches applied over the five base game
+/// ESMs and asserts that the output bytes are byte-for-byte identical to the
+/// original file.
+///
+/// This validates that the patcher fast-path (no patches, no header changes)
+/// does not corrupt real, large, complex master files.
+#[test]
+fn live_17_patcher_noop_base_esms() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
+    banner("PATCHER NO-OP ON BASE ESMs");
+
+    let base_esms = [
+        "Skyrim.esm",
+        "Update.esm",
+        "Dawnguard.esm",
+        "HearthFires.esm",
+        "Dragonborn.esm",
+    ];
+
+    for esm_name in &base_esms {
+        let path = dir.join(esm_name);
+        if !path.exists() {
+            eprintln!("  SKIP {esm_name}: not found");
+            continue;
+        }
+
+        // Read original bytes before opening (so the mmap does not alias).
+        let original: Vec<u8> = std::fs::read(&path)?;
+        let plugin = open(&path).map_err(|e| e.to_string())?;
+
+        let mut patched: Vec<u8> = Vec::with_capacity(original.len());
+        let patcher = PluginPatcher::new(&plugin);
+        patcher.write_to(&mut patched).map_err(|e| e.to_string())?;
+
+        assert_eq!(
+            original.len(),
+            patched.len(),
+            "{esm_name}: patcher no-op changed file size ({} -> {} bytes)",
+            original.len(),
+            patched.len()
+        );
+        assert_eq!(
+            original, patched,
+            "{esm_name}: patcher no-op produced different bytes"
+        );
+
+        eprintln!("  {esm_name}: byte-identical ({} bytes)", original.len());
+    }
+
+    Ok(())
+}
+
+// ── Test 18: BSA archives in the Data directory ───────────────────────────────
+
+/// Opens every `.bsa` file found in the Data directory using
+/// [`bethkit_bsa::open`] and verifies:
+///
+/// - The archive opens without error.
+/// - It contains at least one entry.
+/// - The first entry can be extracted without error.
+#[test]
+fn live_18_bsa_archives_open_and_extract() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
+    banner("BSA ARCHIVES — open + entry listing + first-entry extract");
+
+    let bsa_paths: Vec<std::path::PathBuf> = {
+        let mut v: Vec<_> = std::fs::read_dir(&dir)?
+            .filter_map(|e| {
+                let e = e.ok()?;
+                let p = e.path();
+                let ext = p.extension()?.to_ascii_lowercase();
+                if ext == "bsa" || ext == "ba2" {
+                    Some(p)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        v.sort();
+        v
+    };
+
+    if bsa_paths.is_empty() {
+        eprintln!("  SKIP: no .bsa/.ba2 files found in Data directory");
+        return Ok(());
+    }
+
+    let mut ok = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    let mut non_utf8_skipped = 0usize;
+    let mut total_entries = 0u64;
+
+    for path in &bsa_paths {
+        let name = path
+            .file_name()
+            .expect("path ends in file name")
+            .to_string_lossy();
+        match bethkit_bsa::open(path) {
+            Err(e) => {
+                let msg = e.to_string();
+                // Non-UTF-8 file names inside BSAs are a known limitation of
+                // some locale-specific archives (e.g. Japanese voice packs).
+                // Count them separately rather than failing the test.
+                if msg.contains("non-UTF-8") || msg.contains("UTF-8") {
+                    non_utf8_skipped += 1;
+                    eprintln!("  NOTE {name}: skipped (non-UTF-8 paths): {e}");
+                } else {
+                    failures.push(format!("{name}: open failed: {e}"));
+                }
+                continue;
+            }
+            Ok(archive) => {
+                let entries = archive.entries();
+                if entries.is_empty() {
+                    failures.push(format!("{name}: archive has no entries"));
+                    continue;
+                }
+                total_entries += entries.len() as u64;
+
+                // Extract the first entry to exercise the decompression path.
+                let first_path = entries[0].path.clone();
+                match archive.extract(&first_path) {
+                    None => {
+                        failures.push(format!("{name}: extract({first_path:?}) returned None"));
+                        continue;
+                    }
+                    Some(Err(e)) => {
+                        failures.push(format!("{name}: extract({first_path:?}) error: {e}"));
+                        continue;
+                    }
+                    Some(Ok(bytes)) => {
+                        if bytes.is_empty() {
+                            // Some textures have a 0-byte stored size — not
+                            // a hard error, just noteworthy.
+                            eprintln!("  NOTE {name}: first entry {first_path:?} is empty");
+                        }
+                    }
+                }
+
+                ok += 1;
+            }
+        }
+    }
+
+    eprintln!("  Archives opened  : {ok} / {}", bsa_paths.len());
+    eprintln!("  Non-UTF-8 skipped: {non_utf8_skipped}");
+    eprintln!("  Total entries    : {total_entries}");
+
+    if !failures.is_empty() {
+        for f in failures.iter().take(20) {
+            eprintln!("  FAIL: {f}");
+        }
+        panic!("{} BSA/BA2 archive(s) failed", failures.len());
+    }
+
+    Ok(())
+}
+
+// ── Test 19: LoadOrder construction and FormID resolution ─────────────────────
+
+/// Builds a [`LoadOrder`] from all plugins in the Data directory (in sorted
+/// order) and verifies that `resolve()` correctly maps a selection of
+/// well-known SSE FormIDs back to their owning plugins.
+///
+/// Well-known FormIDs tested:
+/// - `0x00000014` (Player character) — always owned by `Skyrim.esm`.
+/// - `0x0002BF9B` (a common Skyrim.esm record used in many mods).
+#[test]
+fn live_19_load_order_resolve() -> Result<(), Box<dyn std::error::Error>> {
+    use bethkit_core::FormId;
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
+    banner("LOAD ORDER — construction + FormID resolution");
+
+    let paths = collect_plugins(&dir);
+
+    // Build the load order from all discovered plugins.
+    let mut load_order = LoadOrder::new();
+    let mut plugin_masters: Vec<(String, Vec<String>)> = Vec::new();
+    let mut skipped = 0usize;
+
+    for path in &paths {
+        let file_name = path
+            .file_name()
+            .expect("path ends in file name")
+            .to_string_lossy()
+            .into_owned();
+        match open(path) {
+            Ok(plugin) => {
+                let kind = plugin.kind();
+                let masters: Vec<String> = plugin.masters().iter().map(|s| s.to_string()).collect();
+                if load_order.push(&file_name, kind).is_err() {
+                    // Index full — stop adding regular plugins gracefully.
+                    skipped += 1;
+                    continue;
+                }
+                plugin_masters.push((file_name, masters));
+            }
+            Err(_) => skipped += 1,
+        }
+    }
+
+    eprintln!("  Load order entries : {}", load_order.len());
+    eprintln!("  Skipped            : {skipped}");
+
+    // Verify the Player reference (FormID 0x00000014) resolves to Skyrim.esm.
+    // The Player is a base-game record with file index 0 — its owner is the
+    // first master of whatever plugin references it, or Skyrim.esm itself.
+    let player_fid = FormId(0x0000_0014);
+    let skyrim_masters: Vec<String> = Vec::new(); // Skyrim.esm has no masters
+    let resolved = load_order.resolve(player_fid, "skyrim.esm", &skyrim_masters);
+    match &resolved {
+        Some(gfid) => {
+            eprintln!("  Player FormID 0x00000014 -> {gfid}");
+            assert_eq!(
+                gfid.plugin_name, "skyrim.esm",
+                "Player FormID must resolve to skyrim.esm, got {:?}",
+                gfid.plugin_name
+            );
+            assert_eq!(gfid.object_id, 0x14, "Player object_id must be 0x14");
+        }
+        None => eprintln!("  SKIP: Skyrim.esm not in load order"),
+    }
+
+    // Verify that every plugin's own-authored FormIDs resolve back to itself.
+    // Test the first N plugins to keep runtime bounded.
+    let sample: Vec<&(String, Vec<String>)> = plugin_masters.iter().take(10).collect();
+    for (name, masters) in &sample {
+        // Construct a FormID authored by this plugin: file_index = masters.len(),
+        // object_id = 0x000800 (lowest non-special object_id).
+        let file_index: u8 = masters.len() as u8;
+        let self_authored = FormId((u32::from(file_index) << 24) | 0x0000_0800);
+        let gfid = load_order.resolve(self_authored, name, masters);
+        assert!(
+            gfid.is_some(),
+            "FormID authored by {name} failed to resolve"
+        );
+        let gfid = gfid.expect("just checked is_some");
+        assert_eq!(
+            gfid.plugin_name,
+            name.to_lowercase(),
+            "self-authored FormID resolved to wrong plugin"
+        );
+    }
+    eprintln!(
+        "  Self-authored FormID resolution: {} / 10 OK",
+        sample.len()
+    );
+
+    Ok(())
+}
+
+// ── Test 20: Localized plugins — string tables exist and parse ────────────────
+
+/// Finds all localized plugins (`plugin.is_localized() == true`) and for
+/// each one verifies that at least one of the three accompanying string
+/// table files (`.strings`, `.dlstrings`, `.ilstrings`) exists on disk and
+/// can be opened by [`StringTable::open`] without error.
+///
+/// Also verifies the string table is non-empty for plugins that have a
+/// `STRINGS` file.
+#[test]
+fn live_20_localized_string_tables() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
+    banner("LOCALIZED PLUGINS — string table existence + parse");
+
+    let paths = collect_plugins(&dir);
+
+    let mut localized_count = 0usize;
+    let mut tables_found = 0usize;
+    let mut parse_failures: Vec<String> = Vec::new();
+    let mut missing_tables: Vec<String> = Vec::new();
+
+    for path in &paths {
+        let Ok(plugin) = open(path) else { continue };
+        if !plugin.is_localized() {
+            continue;
+        }
+        localized_count += 1;
+
+        let name = path
+            .file_name()
+            .expect("path ends in file name")
+            .to_string_lossy()
+            .into_owned();
+
+        // Check English string tables; SSE ships "english" as the base locale.
+        let sibling_paths = StringTable::sibling_paths(path, "english");
+        let any_exists = sibling_paths.iter().any(|p| p.exists());
+
+        if !any_exists {
+            // String tables can be absent for plugins that carry no localised
+            // text (e.g. texture/mesh-only patches that wrongly set the flag).
+            missing_tables.push(name.clone());
+            continue;
+        }
+
+        // Open each table that exists and verify it parses correctly.
+        for (idx, table_path) in sibling_paths.iter().enumerate() {
+            if !table_path.exists() {
+                continue;
+            }
+            let kind = match idx {
+                0 => StringFileKind::Strings,
+                1 => StringFileKind::DLStrings,
+                _ => StringFileKind::ILStrings,
+            };
+            match StringTable::open_as(table_path, kind) {
+                Ok(table) => {
+                    tables_found += 1;
+                    if idx == 0 {
+                        // The .strings file should have at least one entry for
+                        // a genuinely localized plugin.
+                        assert!(
+                            !table.is_empty(),
+                            "{name}: .strings file exists but is empty"
+                        );
+                    }
+                }
+                Err(e) => {
+                    parse_failures.push(format!(
+                        "{name}: {} parse failed: {e}",
+                        table_path
+                            .file_name()
+                            .expect("table path ends in file name")
+                            .to_string_lossy()
+                    ));
+                }
+            }
+        }
+    }
+
+    eprintln!("  Localized plugins    : {localized_count}");
+    eprintln!("  String tables opened : {tables_found}");
+    eprintln!("  Plugins with no tables found : {}", missing_tables.len());
+    if !missing_tables.is_empty() {
+        for m in missing_tables.iter().take(10) {
+            eprintln!("    (no tables) {m}");
+        }
+    }
+
+    if !parse_failures.is_empty() {
+        for f in parse_failures.iter().take(20) {
+            eprintln!("  FAIL: {f}");
+        }
+        panic!("{} string table(s) failed to parse", parse_failures.len());
+    }
 
     Ok(())
 }

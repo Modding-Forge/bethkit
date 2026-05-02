@@ -3,6 +3,9 @@ name    = "bethkit-core"
 version = "0.1.0"
 edition = "2021"
 
+[dev-dependencies]
+bethkit-bsa = { path = "../bethkit-bsa" }
+
 [dependencies]
 bethkit-io = { path = "../bethkit-io" }
 bitflags   = { workspace = true }
