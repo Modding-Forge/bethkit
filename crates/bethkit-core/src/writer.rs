@@ -538,7 +538,7 @@ mod tests {
             for record in group.records_recursive() {
                 let obj_id: u32 = record.header.form_id.0 & 0x00_000FFF;
                 assert!(
-                    obj_id >= 0x001 && obj_id <= 0xFFF && obj_id != 0x000,
+                    (0x001..=0xFFF).contains(&obj_id),
                     "FormID {:#010x} has object ID {:#05x} outside ESL range 0x001..=0xFFF",
                     record.header.form_id.0,
                     obj_id,
