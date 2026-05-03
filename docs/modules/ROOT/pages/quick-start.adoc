@@ -11,10 +11,10 @@ Add the ones you need to your `Cargo.toml`:
 ----
 [dependencies]
 # Plugin parser, writer, string tables, schema
-bethkit-core = { git = "https://github.com/your-org/bethkit" }
+bethkit-core = { git = "https://github.com/Modding-Forge/bethkit" }
 
 # BSA / BA2 archive reader (optional)
-bethkit-bsa  = { git = "https://github.com/your-org/bethkit" }
+bethkit-bsa  = { git = "https://github.com/Modding-Forge/bethkit" }
 ----
 
 NOTE: Once bethkit is published to crates.io the dependency path will simply be

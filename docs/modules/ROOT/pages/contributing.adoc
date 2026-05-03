@@ -20,7 +20,7 @@ rustup component add clippy rustfmt
 
 [source,shell]
 ----
-git clone https://github.com/your-org/bethkit.git
+git clone https://github.com/Modding-Forge/bethkit.git
 cd bethkit
 cargo build --all
 ----
