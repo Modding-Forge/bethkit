@@ -1,7 +1,35 @@
-﻿= Record Schema
+= Record Schema
 
 The schema system turns raw subrecord bytes into named, typed values without any heap allocation
 for the definition data itself.
+
+== Why a schema?
+
+Without a schema you have raw `&[u8]` subrecord payloads.
+Knowing that bytes 0-3 of `NPC_.ACBS` are flag bits, that `WEAP.DATA.damage` sits at byte
+offset 8, or that `ALCH.ENIT` encodes an enum in its second `u32` requires cross-referencing
+the https://en.uesp.net/wiki/Skyrim_Mod:Mod_File_Format[UESP plugin format documentation]
+for every record type you touch.
+
+The schema layer removes all of that:
+
+* **Translation tools** - extract every localizable string field (`FULL`, `DESC`, `NAM1`, ...)
+  across all record types without hardcoding per-record offsets.
+  Works over an entire load order via `PluginCache`.
+
+* **Validators / linters** - check that a `WEAP` has a valid sound reference, that an `NPC_`
+  level is within a reasonable range, or that required fields are present - all by name,
+  not by byte offset.
+
+* **Automated patchers** - read a typed field value, modify it, and write the record back via
+  `PluginPatcher` without touching anything in the surrounding binary layout.
+
+* **Analytics / search** - iterate all records of a type and filter by any field value across
+  an entire load order without a custom parser per record type.
+
+All schema definitions are `&'static` - zero heap allocation for the definitions at runtime.
+Absent or version-truncated fields yield `FieldValue::Missing` instead of an error, so
+partial records in mods do not break the consumer.
 
 == Core types
 
@@ -124,8 +152,8 @@ if let Some(entry) = view.get_field("Full Name")? {
 
 Returns:
 
-* `Ok(Some(FieldEntry))` — field found and decoded.
-* `Ok(None)` — no `SubRecordDef` with that name exists in this schema.
+* `Ok(Some(FieldEntry))` - field found and decoded.
+* `Ok(None)` - no `SubRecordDef` with that name exists in this schema.
 
 If the subrecord is absent from the record, the returned `FieldEntry` has `value = FieldValue::Missing`.
 
@@ -150,7 +178,7 @@ pub struct FieldEntry<'a> {
 | `Int(i64)` | Any unsigned or signed integer value, widened to i64.
 | `Float(f64)` | 32-bit float widened to f64.
 | `Str(&str)` | Inline NUL-terminated string borrowed from the record data.
-| `FormId(FormId)` | A 32-bit FormID (still file-local — resolve with `PluginCache` if needed).
+| `FormId(FormId)` | A 32-bit FormID (still file-local - resolve with `PluginCache` if needed).
 | `Bytes(&[u8])` | Raw byte slice for types that are not further decoded.
 | `Enum { value, name }` | Integer plus optional resolved name from `EnumDef`.
 | `Flags { value, active }` | Integer plus list of active flag names from `FlagsDef`.
@@ -164,16 +192,16 @@ pub struct FieldEntry<'a> {
 
 [source,rust]
 ----
-// Str      → the string text
-// Int      → decimal number
-// Float    → decimal number
-// FormId   → "00012345"
-// Enum     → "Alteration (6)" or just "6" if unknown
-// Flags    → "0x41 [FlagA, FlagC]"
-// Struct   → "{FieldA: 1, FieldB: 2}"
-// Array    → "[1, 2, 3]"
-// LocalizedId → "<LSTRING:0x0001234>"
-// Missing  → "<missing>"
+// Str      ? the string text
+// Int      ? decimal number
+// Float    ? decimal number
+// FormId   ? "00012345"
+// Enum     ? "Alteration (6)" or just "6" if unknown
+// Flags    ? "0x41 [FlagA, FlagC]"
+// Struct   ? "{FieldA: 1, FieldB: 2}"
+// Array    ? "[1, 2, 3]"
+// LocalizedId ? "<LSTRING:0x0001234>"
+// Missing  ? "<missing>"
 println!("{}", entry.value);
 ----
 
@@ -230,26 +258,26 @@ fields in SSE records:
 |===
 | Static name | Covers
 
-| `ACTOR_VALUE_ENUM` | Actor values (Strength, Alteration, …), 163 values
-| `SCHOOL_ENUM` | Magic school (Alteration, Conjuration, …)
+| `ACTOR_VALUE_ENUM` | Actor values (Strength, Alteration, �), 163 values
+| `SCHOOL_ENUM` | Magic school (Alteration, Conjuration, �)
 | `WEAPON_ANIM_TYPE_ENUM` | Weapon animation type
 | `STAGGER_ENUM` | Stagger values
 | `ARMOR_TYPE_ENUM` | Light / Heavy / Clothing
 | `BOOK_TYPE_ENUM` | Tome / Note / Journal / Scroll
-| `BOOK_FLAGS` | Book flags (Teaches Skill, Teaches Spell, …)
-| `MAGIC_EFFECT_FLAGS` | MGEF flags (Hostile, Detrimental, …)
-| `DELIVERY_ENUM` | Spell delivery (Self, Touch, Aimed, …)
+| `BOOK_FLAGS` | Book flags (Teaches Skill, Teaches Spell, �)
+| `MAGIC_EFFECT_FLAGS` | MGEF flags (Hostile, Detrimental, �)
+| `DELIVERY_ENUM` | Spell delivery (Self, Touch, Aimed, �)
 | `CASTING_TYPE_ENUM` | Casting type (Constant, FireForget, Concentration, Scroll)
-| `SPELL_TYPE_ENUM` | Spell / Disease / Power / LesserPower / …
-| `NPC_FLAGS` | NPC ACBS flags (Female, Essential, Unique, …)
+| `SPELL_TYPE_ENUM` | Spell / Disease / Power / LesserPower / �
+| `NPC_FLAGS` | NPC ACBS flags (Female, Essential, Unique, �)
 | `PACKAGE_TYPE_ENUM` | AI package types
-| `LIGHT_FLAGS` | Light flags (Dynamic, Can Carry, …)
-| `QUEST_TYPE_ENUM` | Quest type (None, MainQuest, BrotherhoodOfSteel, …)
-| `QUEST_FLAGS` | Quest flags (Start Game Enabled, Allow Repeated Stages, …)
-| `CELL_FLAGS` | Cell flags (Interior, Has Water, …)
+| `LIGHT_FLAGS` | Light flags (Dynamic, Can Carry, �)
+| `QUEST_TYPE_ENUM` | Quest type (None, MainQuest, BrotherhoodOfSteel, �)
+| `QUEST_FLAGS` | Quest flags (Start Game Enabled, Allow Repeated Stages, �)
+| `CELL_FLAGS` | Cell flags (Interior, Has Water, �)
 | `WEATHER_CLASS_ENUM` | Weather class (None, Pleasant, Cloudy, Rainy, Snow)
-| `PROJECTILE_FLAGS` | Projectile flags (Hitscan, Explosive, Alt Trigger, …)
-| `PROJECTILE_TYPE_ENUM` | Projectile type (Missile, Lobber, Beam, Flame, …)
+| `PROJECTILE_FLAGS` | Projectile flags (Hitscan, Explosive, Alt Trigger, �)
+| `PROJECTILE_TYPE_ENUM` | Projectile type (Missile, Lobber, Beam, Flame, �)
 | `SOUND_LEVEL_ENUM` | Sound attenuation level
 | `EQUIP_TYPE_ENUM` | Equip slot _(reserved for future use)_
 | `MATERIAL_TYPE_ENUM` | Impact material type _(reserved for future use)_

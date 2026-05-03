@@ -9,8 +9,7 @@ use crate::schema::{RecordSchema, SubRecordDef, FieldType};
 use crate::types::Signature;
 
 use super::common::{
-    CTDA_DEF, DATA_DEF, DESC_DEF, DNAM_DEF, EDID_DEF, FULL_DEF, MODL_DEF, MODT_DEF, OBND_DEF,
-    SCRI_DEF,
+    DATA_DEF, DESC_DEF, EDID_DEF, FULL_DEF, MODL_DEF, MODT_DEF, OBND_DEF, SCRI_DEF,
 };
 
 
@@ -408,13 +407,29 @@ pub static LAND_SCHEMA: RecordSchema =
     RecordSchema { sig: Signature(*b"LAND"), name: "Landscape", members: &LAND_MEMBERS };
 
 
-static SCEN_MEMBERS: [SubRecordDef; 4] = [
+static ADDN_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
-    FULL_DEF,
-    CTDA_DEF,
-    DNAM_DEF,
+    OBND_DEF,
+    MODL_DEF,
+    SubRecordDef {
+        sig: Signature(*b"DATA"),
+        name: "Node Index",
+        required: false,
+        repeating: false,
+        field: FieldType::Int32,
+    },
 ];
 
-/// SCEN — scripted scene (sequence of actor actions and dialogue).
-pub static SCEN_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"SCEN"), name: "Scene", members: &SCEN_MEMBERS };
+/// ADDN - addon node (attaches a particle or mesh to a skeleton node).
+pub static ADDN_SCHEMA: RecordSchema =
+    RecordSchema { sig: Signature(*b"ADDN"), name: "Addon Node", members: &ADDN_MEMBERS };
+
+
+static PLYR_MEMBERS: [SubRecordDef; 1] = [EDID_DEF];
+
+/// PLYR - player reference singleton (only one per plugin).
+pub static PLYR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"PLYR"),
+    name: "Player Reference",
+    members: &PLYR_MEMBERS,
+};

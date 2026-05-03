@@ -7,13 +7,13 @@ A fast, zero-copy Rust library for reading and writing Bethesda game plugin and 
 ## Features
 
 - **Zero-copy parsing** - plugin files are memory-mapped; records reference bytes directly into the mapping without extra allocations
-- **Skyrim SE first** - primary target is Skyrim Special Edition / AE; the binary format (`GameContext`) is prepared for other games (LE, VR, Fallout 3/NV/4/76, Starfield, Oblivion, Morrowind), but record-schema definitions outside SSE are not yet implemented
+- **Multi-game record schemas** - `SchemaRegistry::sse()` covers all 126 SSE record types; `SchemaRegistry::fo4()` covers all 137 Fallout 4 record types (verified against 725 plugins / 938 MiB including all DLC ESMs); `GameContext` encodes binary differences for every other Bethesda game (Skyrim LE/VR, Fallout 3/NV/76, Starfield, Oblivion, Morrowind) — schema definitions for those games are work-in-progress
 - **BSA / BA2 archives** - read, extract, and write all major archive formats: BSA TES3 (Morrowind), BSA TES4/FO3/SSE (Oblivion through Skyrim SE), BA2 GNRL and BA2 DX10 (Fallout 4); auto-detection via `bethkit_bsa::open`; concurrent extraction via `Archive::extract`; new archives created with `BsaWriter`, `Ba2GnrlWriter`, and `Ba2Dx10Writer`
 - **Group / Record / SubRecord hierarchy** - full access to the GRUP structure, lazy subrecord parsing, XXXX large-data override, transparent zlib and LZ4 decompression
 - **Localized strings** - read and write `.STRINGS` / `.DLSTRINGS` / `.ILSTRINGS` sibling files; extract every translatable string from a plugin in one call; apply translation edits without touching the plugin binary at all
 - **Streaming rewrite** - `PluginPatcher` replaces arbitrary records while copying everything else verbatim; group sizes are recomputed automatically; cost is linear in the number of edits, not the plugin size
 - **Writer** - build new plugin files from scratch; eslify existing plugins to fit the light-plugin FormID range; set the `LOCALIZED` flag for new localized plugins
-- **Record schema** - `SchemaRegistry::sse()` covers all 126 SSE record types; `RecordView` decodes any subrecord into typed `FieldValue` variants (integers, floats, ZStrings, FormIDs, structs, arrays, enums with resolved names, bit-flags with resolved names, localized string-table IDs) without allocating schema data at runtime — all definitions are `&'static`; absent or version-truncated fields yield `FieldValue::Missing` rather than an error
+- **Record schema** - `SchemaRegistry::sse()` (126 SSE types) and `SchemaRegistry::fo4()` (137 FO4 types); `RecordView` decodes any subrecord into typed `FieldValue` variants (integers, floats, ZStrings, FormIDs, structs, arrays, enums with resolved names, bit-flags with resolved names, localized string-table IDs) without allocating schema data at runtime — all definitions are `&'static`; absent or version-truncated fields yield `FieldValue::Missing` rather than an error — see [Record Schema](docs/modules/ROOT/pages/schema.adoc) for use cases and examples
 - **Load-order utilities** - `LoadOrder`, `GlobalFormId`, and `PluginCache` for multi-plugin winning-override lookups; `GlobalFormId` identifies a record by owning plugin name + object ID, independent of the current load order so FormIDs remain stable across load-order changes
 - **C ABI** - `bethkit-ffi` exposes a stable `extern "C"` surface so Python, C#, C++, and any other language can call in without a Rust toolchain
 
@@ -42,20 +42,19 @@ Full API documentation, guides, and examples are available in the [docs/](docs/)
 
 ## Supported games
 
-The primary target is Skyrim Special Edition. Support for other games is planned but not yet implemented beyond the binary format layer.
+The primary targets are Skyrim Special Edition and Fallout 4. The binary format layer (parser, writer, patcher) works for all TES4-era games. Record-schema definitions are complete for SSE (126 types) and Fallout 4 (137 types); work-in-progress schema data exists for several other games in the repository but is not yet integrated.
 
 | Variant                                   | Game                                        | Status                                             |
 | ----------------------------------------- | ------------------------------------------- | -------------------------------------------------- |
 | `Game::SkyrimSE`                        | The Elder Scrolls V: Skyrim Special Edition | ✅ Full support (parser, schema, writer, archives) |
-| `Game::SkyrimLE`                        | Skyrim Legendary Edition                    | 🔲 Format layer only — no record schema           |
-| `Game::SkyrimVR`                        | Skyrim VR                                   | 🔲 Format layer only — no record schema           |
-| `Game::Fallout4` / `Game::Fallout4VR` | Fallout 4 / VR                              | 🔲 Planned                                         |
-| `Game::Fallout76`                       | Fallout 76                                  | 🔲 Planned                                         |
-| `Game::Starfield`                       | Starfield                                   | 🔲 Planned                                         |
-| `Game::Oblivion`                        | The Elder Scrolls IV: Oblivion              | 🔲 Planned                                         |
-| `Game::Fallout3`                        | Fallout 3                                   | 🔲 Planned                                         |
-| `Game::FalloutNV`                       | Fallout: New Vegas                          | 🔲 Planned                                         |
-| `Game::Morrowind`                       | The Elder Scrolls III: Morrowind            | 🔲 Planned                                         |
+| `Game::SkyrimLE`                        | Skyrim Legendary Edition                    | ⚠️ Format layer only — no record schema           |
+| `Game::SkyrimVR`                        | Skyrim VR                                   | ⚠️ Format layer only — no record schema           |
+| `Game::Fallout4` / `Game::Fallout4VR` | Fallout 4 / VR                              | ✅ Full support (parser, schema, writer, archives) |
+| `Game::Starfield`                       | Starfield                                   | ⚠️ Format layer — schema WIP (not yet integrated)  |
+| `Game::Oblivion`                        | The Elder Scrolls IV: Oblivion              | ⚠️ Format layer — schema WIP (not yet integrated)  |
+| `Game::Fallout3`                        | Fallout 3                                   | ⚠️ Format layer — schema WIP (not yet integrated)  |
+| `Game::FalloutNV`                       | Fallout: New Vegas                          | ⚠️ Format layer — schema WIP (not yet integrated)  |
+| `Game::Morrowind`                       | The Elder Scrolls III: Morrowind            | ⚠️ Format layer — schema WIP (not yet integrated)  |
 
 ---
 
@@ -80,7 +79,7 @@ The primary target is Skyrim Special Edition. Support for other games is planned
 | Group hierarchy traversal                          | ✅                                                                                                                                         | ✅ (internal)                                                                   | ✅                                                   | ✅                                                           |
 | Access subrecord by signature                      | ✅                                                                                                                                         | ✅ (internal)                                                                   | ✅                                                   | ⚠️ low-level API only                                      |
 | Typed subrecord accessors (u8/u16/u32/f32/zstring) | ✅ (raw bytes + basic types)                                                                                                               | ❌                                                                              | ✅ (full schema)                                     | ✅ (strongly typed per record type)                          |
-| Schema-defined field names & types                 | ✅ (`SchemaRegistry::sse()`, 126 SSE records)                                                                                            | ❌                                                                              | ✅ (wbDefinitions*.pas per game)                     | ✅ (code-generated per game)                                 |
+| Schema-defined field names & types                 | ✅ (`SchemaRegistry::sse()` 126 SSE types; `SchemaRegistry::fo4()` 137 FO4 types)                                                   | ❌                                                              | ✅ (wbDefinitions*.pas per game)                     | ✅ (code-generated per record type)                        |
 | Enum / flag resolution (`ActorValue` → name)    | ✅ (`FieldValue::Enum` / `FieldValue::Flags`)                                                                                          | ❌                                                                              | ✅                                                   | ✅                                                           |
 | FormLink type-safe cross-record links              | ✅ runtime, schema-driven —`FieldType::FormIdTyped` + `FieldValue::FormIdTyped { raw, allowed }` with `&'static` target-type slices | ❌                                                                              | ⚠️ (`wbFormIDCk` runtime check on write only)    | ✅ (`IFormLink<T>` compile-time typed)                     |
 | FormID → EditorID resolution across masters       | ✅ (`PluginCache` + `find_by_editor_id`)                                                                                               | ❌                                                                              | ✅ (full reference graph)                            | ✅ (LinkCache)                                               |
@@ -101,14 +100,13 @@ The primary target is Skyrim Special Edition. Support for other games is planned
 | Game                              | bethkit    | [sse-plugin-interface](https://github.com/Cutleast/sse-plugin-interface) | [xEdit](https://github.com/TES5Edit/TES5Edit) | [Mutagen](https://github.com/Mutagen-Modding/Mutagen) |
 | --------------------------------- | ---------- | --------------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------- |
 | Skyrim SE / AE                    | ✅ Full    | SSE only                                                              | ✅                                         | ✅                                                 |
-| Skyrim LE / VR                    | 🔲 Planned | ❌                                                                    | ✅                                         | ✅                                                 |
-| Fallout 4 / VR                    | 🔲 Planned | ❌                                                                    | ✅                                         | ✅                                                 |
-| Fallout 76                        | 🔲 Planned | ❌                                                                    | ✅                                         | ❌                                                 |
-| Starfield                         | 🔲 Planned | ❌                                                                    | ✅                                         | ✅                                                 |
-| Oblivion                          | 🔲 Planned | ❌                                                                    | ✅                                         | ✅                                                 |
-| Fallout 3 / New Vegas / Morrowind | 🔲 Planned | ❌                                                                    | ✅                                         | ❌                                                 |
+| Skyrim LE / VR                    | ⚠️ Format layer only | ❌                                                                    | ✅                                         | ✅                                                 |
+| Fallout 4 / VR                    | ✅ Full (parser, schema 137 types, writer, archives) | ❌                                                                    | ✅                                         | ✅                                                 |
+| Starfield                         | ⚠️ Schema WIP | ❌                                                                    | ✅                                         | ✅                                                 |
+| Oblivion                          | ⚠️ Schema WIP | ❌                                                                    | ✅                                         | ✅                                                 |
+| Fallout 3 / New Vegas / Morrowind | ⚠️ Schema WIP | ❌                                                                    | ✅                                         | ❌                                                 |
 
-> **Note (bethkit):** The `GameContext` type encodes game-specific binary differences (header signature, light-flag bit, HEDR version, etc.) for all games above, but record-schema definitions exist only for SSE today. All other games are planned.
+> **Note (bethkit):** The `GameContext` type encodes game-specific binary differences (header signature, light-flag bit, HEDR version, GRUP type set, etc.) for all games above. Record-schema definitions are complete for SSE (126 types) and Fallout 4 (137 types, verified against a 725-plugin / 938 MiB install including all DLC ESMs). Work-in-progress schema data exists in the repository for Fallout 3, Fallout NV, Starfield, Oblivion, and Morrowind, but is not yet integrated.
 >
 > **Note (Mutagen):** Code-generated record schemas exist for Skyrim, Fallout 4, Oblivion, and Starfield. Other games are not supported.
 
@@ -157,7 +155,7 @@ The primary target is Skyrim Special Edition. Support for other games is planned
 - **[sse-plugin-interface](https://github.com/Cutleast/sse-plugin-interface)** is minimal by design — it only does what SSE-Auto-Translator needs (string extraction and injection for one game). It is not a general-purpose library.
 - **[Mutagen](https://github.com/Mutagen-Modding/Mutagen)** is the C# ecosystem's answer to a general-purpose modding library. Its standout feature is a fully code-generated, strongly typed schema for each supported game's records (`Npc.Name`, `Weapon.BasicData.Damage`, etc.), making it ideal for C# patcher authors. The Synthesis framework layers a full patcher pipeline on top. Trade-offs: GPL-3.0 licensing, C#-only integration, no streaming writes, no support for Fallout 3/NV/76/Morrowind.
 - **[xEdit (TES5Edit)](https://github.com/TES5Edit/TES5Edit)** is the authoritative reference implementation. It has schema definitions for every record and field across every game, conflict detection, reference graphs, a scripting engine, and a GUI. It is a complete modding tool, not a library.
-- **bethkit** occupies a different niche: a fast, embeddable, multi-language *library* that gives direct access to the binary structure. A declarative record schema (`SchemaRegistry::sse()`) covers all 126 SSE record types and resolves fields, enums, flags, structs, and arrays through the `RecordView` API — all backed by `&'static` data with zero runtime heap allocation for definitions. The Apache-2.0 license and planned C ABI make it callable from any language and embeddable in any project without license restrictions.
+- **bethkit** occupies a different niche: a fast, embeddable, multi-language *library* that gives direct access to the binary structure. Declarative record schemas cover all 126 SSE record types (`SchemaRegistry::sse()`) and all 137 Fallout 4 record types (`SchemaRegistry::fo4()`). The `RecordView` API resolves fields, enums, flags, structs, and arrays — all backed by `&'static` data with zero runtime heap allocation for definitions. The Apache-2.0 license and C ABI make it callable from any language and embeddable in any project without license restrictions.
 
 ## Development status
 
@@ -169,7 +167,8 @@ The primary target is Skyrim Special Edition. Support for other games is planned
 | Localized-string extraction + translation workflow                   | ✅ Complete |
 | BSA / BA2 archive reader                                             | ✅ Complete |
 | FormID resolver +`PluginCache` (winning override, EditorID lookup) | ✅ Complete |
-| Record schema — 126 SSE record types,`RecordView` API             | ✅ Complete |
+| Record schema — 126 SSE record types, `RecordView` API             | ✅ Complete |
+| Record schema — 137 Fallout 4 record types, `SchemaRegistry::fo4()` | ✅ Complete |
 | C ABI (`bethkit-ffi`)                                              | ✅ Complete |
 | Python bindings (`bethkit.py`, via C ABI)                          | ⚠️ WIP    |
 

@@ -47,6 +47,10 @@ pub enum GroupType {
     CellPersistentChildren = 8,
     /// Temporary children of a cell — label is a cell FormID.
     CellTemporaryChildren = 9,
+    /// Visible-when-distant children of a cell — label is a cell FormID.
+    ///
+    /// Introduced in Fallout 4; not present in Skyrim SE plugins.
+    CellVisibleDistantChildren = 10,
 }
 
 impl GroupType {
@@ -72,6 +76,7 @@ impl GroupType {
             7 => Self::TopicChildren,
             8 => Self::CellPersistentChildren,
             9 => Self::CellTemporaryChildren,
+            10 => Self::CellVisibleDistantChildren,
             v => return Err(CoreError::InvalidGroupType(v)),
         })
     }
@@ -104,7 +109,8 @@ impl GroupLabel {
             | GroupType::CellChildren
             | GroupType::TopicChildren
             | GroupType::CellPersistentChildren
-            | GroupType::CellTemporaryChildren => Self::FormId(FormId(u32::from_le_bytes(raw))),
+            | GroupType::CellTemporaryChildren
+            | GroupType::CellVisibleDistantChildren => Self::FormId(FormId(u32::from_le_bytes(raw))),
             GroupType::ExteriorCellBlock | GroupType::ExteriorCellSubBlock => {
                 // The binary file stores Y in the first two bytes and X in the
                 // last two. GroupLabel::GridCell exposes the conventional (x, y)

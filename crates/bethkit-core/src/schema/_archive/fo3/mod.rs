@@ -120,7 +120,8 @@ fn build() -> SchemaRegistry {
     reg.register(&world::LTEX_SCHEMA);
     reg.register(&world::PWAT_SCHEMA);
     reg.register(&world::LAND_SCHEMA);
-    reg.register(&world::SCEN_SCHEMA);
+    reg.register(&world::ADDN_SCHEMA);
+    reg.register(&world::PLYR_SCHEMA);
 
     // ── Quest / dialogue / audio records ──────────────────────────────────────
     reg.register(&quests::QUST_SCHEMA);

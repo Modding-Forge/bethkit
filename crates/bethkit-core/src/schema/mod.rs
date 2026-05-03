@@ -7,11 +7,11 @@
 //! field names, primitive types, nested structs, arrays, enums, and flags.
 //!
 //! All schema data is `&'static` — no heap allocation is needed for the
-//! definitions themselves. The [`SchemaRegistry::sse`] function returns a
-//! global singleton built on first use.
+//! definitions themselves. [`SchemaRegistry::sse`] and [`SchemaRegistry::fo4`]
+//! return global singletons built on first use.
 //!
-//! Schemas for other games (FO3, FO4, FONV, Oblivion, Morrowind, Starfield)
-//! are archived in `src/schema/_archive/` and not compiled.
+//! Schemas for FO3, FONV, Oblivion, Morrowind, and Starfield are archived in
+//! `src/schema/_archive/` and not yet compiled.
 //!
 //! # Example
 //!
@@ -41,6 +41,7 @@ use ahash::HashMap;
 use crate::types::Signature;
 
 pub mod enums;
+mod fo4;
 pub(crate) mod shared;
 mod sse;
 pub mod view;
@@ -196,8 +197,8 @@ impl FlagsDef {
 
 /// Maps record type signatures to their [`RecordSchema`] definitions.
 ///
-/// Currently only Skyrim SE is supported. Use [`SchemaRegistry::sse`] to
-/// obtain the global SSE schema registry.
+/// Use [`SchemaRegistry::sse`] or [`SchemaRegistry::fo4`] to obtain a
+/// game-specific global singleton.
 pub struct SchemaRegistry {
     map: HashMap<Signature, &'static RecordSchema>,
 }
@@ -244,25 +245,173 @@ impl SchemaRegistry {
     pub fn sse() -> &'static SchemaRegistry {
         sse::registry()
     }
+
+    /// Returns the global Fallout 4 schema registry, building it on first
+    /// call.
+    ///
+    /// The returned reference is valid for the lifetime of the process.
+    pub fn fo4() -> &'static SchemaRegistry {
+        fo4::registry()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Verifies that the SSE registry contains all 133 expected record types.
-    #[test]
-    fn sse_registry_has_expected_record_count(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let reg = SchemaRegistry::sse();
-        // At least 120 SSE record types are defined (TES5Edit lists 120 active
-        // group-order entries plus TES4 and a handful of legacy placeholder
-        // types still present in Skyrim.esm).
-        assert!(
-            reg.len() >= 120,
-            "expected at least 120 SSE schemas, got {}",
-            reg.len()
+    static SSE_EXPECTED_SIGNATURES: &[Signature] = &[
+        Signature(*b"AACT"),
+        Signature(*b"ACTI"),
+        Signature(*b"ADDN"),
+        Signature(*b"ALCH"),
+        Signature(*b"AMMO"),
+        Signature(*b"ANIO"),
+        Signature(*b"APPA"),
+        Signature(*b"ARMA"),
+        Signature(*b"ARMO"),
+        Signature(*b"ARTO"),
+        Signature(*b"ASPC"),
+        Signature(*b"ASTP"),
+        Signature(*b"AVIF"),
+        Signature(*b"BOOK"),
+        Signature(*b"BPTD"),
+        Signature(*b"CAMS"),
+        Signature(*b"CELL"),
+        Signature(*b"CLAS"),
+        Signature(*b"CLFM"),
+        Signature(*b"CLMT"),
+        Signature(*b"COBJ"),
+        Signature(*b"COLL"),
+        Signature(*b"CONT"),
+        Signature(*b"CPTH"),
+        Signature(*b"CSTY"),
+        Signature(*b"DEBR"),
+        Signature(*b"DIAL"),
+        Signature(*b"DLBR"),
+        Signature(*b"DLVW"),
+        Signature(*b"DOBJ"),
+        Signature(*b"DOOR"),
+        Signature(*b"DUAL"),
+        Signature(*b"ECZN"),
+        Signature(*b"EFSH"),
+        Signature(*b"ENCH"),
+        Signature(*b"EQUP"),
+        Signature(*b"EXPL"),
+        Signature(*b"EYES"),
+        Signature(*b"FACT"),
+        Signature(*b"FLOR"),
+        Signature(*b"FLST"),
+        Signature(*b"FSTP"),
+        Signature(*b"FSTS"),
+        Signature(*b"FURN"),
+        Signature(*b"GLOB"),
+        Signature(*b"GMST"),
+        Signature(*b"GRAS"),
+        Signature(*b"HAZD"),
+        Signature(*b"HDPT"),
+        Signature(*b"IDLE"),
+        Signature(*b"IDLM"),
+        Signature(*b"IMAD"),
+        Signature(*b"IMGS"),
+        Signature(*b"INFO"),
+        Signature(*b"INGR"),
+        Signature(*b"IPCT"),
+        Signature(*b"IPDS"),
+        Signature(*b"KEYM"),
+        Signature(*b"KYWD"),
+        Signature(*b"LAND"),
+        Signature(*b"LCRT"),
+        Signature(*b"LCTN"),
+        Signature(*b"LENS"),
+        Signature(*b"LGTM"),
+        Signature(*b"LIGH"),
+        Signature(*b"LSCR"),
+        Signature(*b"LTEX"),
+        Signature(*b"LVLI"),
+        Signature(*b"LVLN"),
+        Signature(*b"LVSP"),
+        Signature(*b"MATO"),
+        Signature(*b"MATT"),
+        Signature(*b"MESG"),
+        Signature(*b"MGEF"),
+        Signature(*b"MISC"),
+        Signature(*b"MOVT"),
+        Signature(*b"MSTT"),
+        Signature(*b"MUSC"),
+        Signature(*b"MUST"),
+        Signature(*b"NAVI"),
+        Signature(*b"NAVM"),
+        Signature(*b"NPC_"),
+        Signature(*b"OTFT"),
+        Signature(*b"PACK"),
+        Signature(*b"PARW"),
+        Signature(*b"PBAR"),
+        Signature(*b"PBEA"),
+        Signature(*b"PCON"),
+        Signature(*b"PERK"),
+        Signature(*b"PFLA"),
+        Signature(*b"PGRE"),
+        Signature(*b"PHZD"),
+        Signature(*b"PLYR"),
+        Signature(*b"PMIS"),
+        Signature(*b"PROJ"),
+        Signature(*b"QUST"),
+        Signature(*b"RACE"),
+        Signature(*b"REGN"),
+        Signature(*b"RELA"),
+        Signature(*b"REVB"),
+        Signature(*b"RFCT"),
+        Signature(*b"SCEN"),
+        Signature(*b"SCRL"),
+        Signature(*b"SHOU"),
+        Signature(*b"SLGM"),
+        Signature(*b"SMBN"),
+        Signature(*b"SMEN"),
+        Signature(*b"SMQN"),
+        Signature(*b"SNCT"),
+        Signature(*b"SNDR"),
+        Signature(*b"SOPM"),
+        Signature(*b"SOUN"),
+        Signature(*b"SPEL"),
+        Signature(*b"SPGD"),
+        Signature(*b"STAT"),
+        Signature(*b"TACT"),
+        Signature(*b"TES4"),
+        Signature(*b"TREE"),
+        Signature(*b"TXST"),
+        Signature(*b"VOLI"),
+        Signature(*b"VTYP"),
+        Signature(*b"WATR"),
+        Signature(*b"WEAP"),
+        Signature(*b"WOOP"),
+        Signature(*b"WRLD"),
+        Signature(*b"WTHR"),
+    ];
+
+    fn assert_registry_signatures(registry: &SchemaRegistry, expected: &[Signature]) {
+        let mut expected_sorted: Vec<Signature> = expected.to_vec();
+        expected_sorted.sort_by_key(|signature: &Signature| signature.0);
+
+        let mut expected_unique: Vec<Signature> = expected_sorted.clone();
+        expected_unique.dedup();
+        assert_eq!(
+            expected_unique.len(),
+            expected_sorted.len(),
+            "expected signature list contains duplicates",
         );
+
+        let mut actual_sorted: Vec<Signature> = registry.map.keys().copied().collect();
+        actual_sorted.sort_by_key(|signature: &Signature| signature.0);
+
+        assert_eq!(actual_sorted, expected_sorted);
+    }
+
+    /// Verifies that the SSE registry contains exactly the expected record types.
+    #[test]
+    fn sse_registry_has_expected_signatures() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let registry: &SchemaRegistry = SchemaRegistry::sse();
+        assert_registry_signatures(registry, SSE_EXPECTED_SIGNATURES);
         Ok(())
     }
 
@@ -307,6 +456,155 @@ mod tests {
         };
         let active: Vec<_> = TEST_FLAGS.active_names(0b101).collect();
         assert_eq!(active, ["FlagA", "FlagC"]);
+        Ok(())
+    }
+
+    static FO4_EXPECTED_SIGNATURES: &[Signature] = &[
+        Signature(*b"AACT"),
+        Signature(*b"ACTI"),
+        Signature(*b"ADDN"),
+        Signature(*b"AECH"),
+        Signature(*b"ALCH"),
+        Signature(*b"AMDL"),
+        Signature(*b"AMMO"),
+        Signature(*b"ANIO"),
+        Signature(*b"AORU"),
+        Signature(*b"ARMA"),
+        Signature(*b"ARMO"),
+        Signature(*b"ARTO"),
+        Signature(*b"ASPC"),
+        Signature(*b"ASTP"),
+        Signature(*b"AVIF"),
+        Signature(*b"BNDS"),
+        Signature(*b"BOOK"),
+        Signature(*b"BPTD"),
+        Signature(*b"CAMS"),
+        Signature(*b"CELL"),
+        Signature(*b"CLAS"),
+        Signature(*b"CLFM"),
+        Signature(*b"CLMT"),
+        Signature(*b"CMPO"),
+        Signature(*b"COBJ"),
+        Signature(*b"COLL"),
+        Signature(*b"CONT"),
+        Signature(*b"CPTH"),
+        Signature(*b"CSTY"),
+        Signature(*b"DEBR"),
+        Signature(*b"DFOB"),
+        Signature(*b"DIAL"),
+        Signature(*b"DLBR"),
+        Signature(*b"DLVW"),
+        Signature(*b"DMGT"),
+        Signature(*b"DOBJ"),
+        Signature(*b"DOOR"),
+        Signature(*b"DUAL"),
+        Signature(*b"ECZN"),
+        Signature(*b"EFSH"),
+        Signature(*b"ENCH"),
+        Signature(*b"EQUP"),
+        Signature(*b"EXPL"),
+        Signature(*b"EYES"),
+        Signature(*b"FACT"),
+        Signature(*b"FLOR"),
+        Signature(*b"FLST"),
+        Signature(*b"FSTP"),
+        Signature(*b"FSTS"),
+        Signature(*b"FURN"),
+        Signature(*b"GDRY"),
+        Signature(*b"GLOB"),
+        Signature(*b"GMST"),
+        Signature(*b"GRAS"),
+        Signature(*b"HAZD"),
+        Signature(*b"HDPT"),
+        Signature(*b"IDLE"),
+        Signature(*b"IDLM"),
+        Signature(*b"IMAD"),
+        Signature(*b"IMGS"),
+        Signature(*b"INFO"),
+        Signature(*b"INGR"),
+        Signature(*b"INNR"),
+        Signature(*b"IPCT"),
+        Signature(*b"IPDS"),
+        Signature(*b"KEYM"),
+        Signature(*b"KSSM"),
+        Signature(*b"KYWD"),
+        Signature(*b"LAND"),
+        Signature(*b"LAYR"),
+        Signature(*b"LCRT"),
+        Signature(*b"LCTN"),
+        Signature(*b"LENS"),
+        Signature(*b"LGTM"),
+        Signature(*b"LIGH"),
+        Signature(*b"LSCR"),
+        Signature(*b"LTEX"),
+        Signature(*b"LVLI"),
+        Signature(*b"LVLN"),
+        Signature(*b"LVSP"),
+        Signature(*b"MATO"),
+        Signature(*b"MATT"),
+        Signature(*b"MESG"),
+        Signature(*b"MGEF"),
+        Signature(*b"MISC"),
+        Signature(*b"MOVT"),
+        Signature(*b"MSTT"),
+        Signature(*b"MSWP"),
+        Signature(*b"MUSC"),
+        Signature(*b"MUST"),
+        Signature(*b"NAVI"),
+        Signature(*b"NAVM"),
+        Signature(*b"NOCM"),
+        Signature(*b"NOTE"),
+        Signature(*b"NPC_"),
+        Signature(*b"OMOD"),
+        Signature(*b"OTFT"),
+        Signature(*b"OVIS"),
+        Signature(*b"PACK"),
+        Signature(*b"PERK"),
+        Signature(*b"PKIN"),
+        Signature(*b"PLYR"),
+        Signature(*b"PROJ"),
+        Signature(*b"QUST"),
+        Signature(*b"RACE"),
+        Signature(*b"REGN"),
+        Signature(*b"RELA"),
+        Signature(*b"REVB"),
+        Signature(*b"RFCT"),
+        Signature(*b"RFGP"),
+        Signature(*b"SCCO"),
+        Signature(*b"SCEN"),
+        Signature(*b"SCOL"),
+        Signature(*b"SCSN"),
+        Signature(*b"SMBN"),
+        Signature(*b"SMEN"),
+        Signature(*b"SMQN"),
+        Signature(*b"SNCT"),
+        Signature(*b"SNDR"),
+        Signature(*b"SOPM"),
+        Signature(*b"SOUN"),
+        Signature(*b"SPEL"),
+        Signature(*b"SPGD"),
+        Signature(*b"STAG"),
+        Signature(*b"STAT"),
+        Signature(*b"TACT"),
+        Signature(*b"TERM"),
+        Signature(*b"TES4"),
+        Signature(*b"TREE"),
+        Signature(*b"TRNS"),
+        Signature(*b"TXST"),
+        Signature(*b"VTYP"),
+        Signature(*b"WATR"),
+        Signature(*b"WEAP"),
+        Signature(*b"WRLD"),
+        Signature(*b"WTHR"),
+        Signature(*b"ZOOM"),
+    ];
+
+    /// Verifies that the FO4 registry contains exactly the expected record types.
+    #[test]
+    fn fo4_registry_has_expected_signatures(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let registry: &SchemaRegistry = SchemaRegistry::fo4();
+        assert_registry_signatures(registry, FO4_EXPECTED_SIGNATURES);
         Ok(())
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fallout New Vegas schema registry.
 //!
-//! FNV is a superset of Fallout 3: it shares all FO3 records and adds ~19
+//! FNV is a superset of Fallout 3: it shares all FO3 records and adds ~17
 //! exclusive records (challenges, reputation, casinos, crafting recipes, item
 //! mods, survival stages, and media systems).
 //!
@@ -119,7 +119,8 @@ fn build() -> SchemaRegistry {
     reg.register(&world::LTEX_SCHEMA);
     reg.register(&world::PWAT_SCHEMA);
     reg.register(&world::LAND_SCHEMA);
-    reg.register(&world::SCEN_SCHEMA);
+    reg.register(&world::ADDN_SCHEMA);
+    reg.register(&world::PLYR_SCHEMA);
 
     // ── FO3 quest / dialogue / audio records ──────────────────────────────────
     reg.register(&quests::QUST_SCHEMA);
@@ -145,8 +146,6 @@ fn build() -> SchemaRegistry {
     reg.register(&exclusive::ALOC_SCHEMA);
     reg.register(&exclusive::AMEF_SCHEMA);
     reg.register(&exclusive::LSCT_SCHEMA);
-    reg.register(&exclusive::ADDN_SCHEMA);
-    reg.register(&exclusive::PLYR_SCHEMA);
 
     reg
 }
