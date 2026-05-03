@@ -40,7 +40,8 @@ a custom error type that uses `#[from]` with `thiserror`.
 | A FormID in a light plugin exceeded the allowed object-ID range (0x000–0xFFF).
 
 | `CoreError::EslRecordLimitExceeded { count }`
-| `Plugin::eslify()` would require more than 2048 records — the practical ESL limit.
+| `Plugin::eslify()` would require more than the game-specific ESL capacity
+  (4 095 records for Skyrim SE; 2 047 for other Light-capable games).
 
 | `CoreError::UnsupportedGame(Game)`
 | An operation is not supported for the given game context.

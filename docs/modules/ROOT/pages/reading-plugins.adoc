@@ -94,6 +94,8 @@ Each group holds records of one type (or nested sub-groups for cell/worldspace d
 
 | `GroupType::ExteriorCellBlock` / `ExteriorCellSubBlock`
 | Exterior cell block/sub-block. Label is a grid coordinate (`i16 x`, `i16 y`).
+  The on-disk byte layout stores Y in bytes 0-1 and X in bytes 2-3; the API
+  exposes conventional `{ x, y }` field order.
 
 | `GroupType::CellChildren`
 | Children of a CELL record. Label is the cell FormID.

@@ -347,6 +347,22 @@ impl GameContext {
         0xFFF
     }
 
+    /// Returns the minimum object ID for a new record in a light plugin.
+    ///
+    /// Object ID `0x000` is always reserved (it encodes `FormId::NULL`), so
+    /// the inclusive lower bound is at least `0x001`. Older Bethesda tools
+    /// historically reserved `0x000..=0x7FF` for hardcoded engine records and
+    /// only allocated from `0x800` upward. Modern Skyrim SE (1.6.1130+) lifted
+    /// that restriction and allows the full `0x001..=0xFFF` range.
+    pub fn light_min_object_id(&self) -> u32 {
+        match self.game {
+            // Modern SSE (1.6.1130+) supports the full 0x001..=0xFFF range.
+            Game::SkyrimSE => 1,
+            // All other Light-capable games: conservative default of 0x800.
+            _ => 0x800,
+        }
+    }
+
     /// Returns the maximum object ID for a new record in a medium plugin.
     pub fn medium_max_object_id(&self) -> u32 {
         0xFFFF

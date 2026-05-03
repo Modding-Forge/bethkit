@@ -82,8 +82,9 @@ writer.eslify()?; // reassigns FormIDs and sets the LIGHT flag
 writer.write_to_file(Path::new("MyMod.esl"))?;
 ----
 
-`eslify()` returns `Err(CoreError::EslRecordLimitExceeded)` if the plugin defines more than
-2048 new records, or `Err(CoreError::UnsupportedGame)` if the target game does not support
+`eslify()` returns `Err(CoreError::EslRecordLimitExceeded)` if the plugin defines more records
+than the game-specific ESL capacity (4 095 for Skyrim SE, 2 047 for other Light-capable games),
+or `Err(CoreError::UnsupportedGame)` if the target game does not support
 light plugins.
 
 == PluginPatcher — streaming replacement

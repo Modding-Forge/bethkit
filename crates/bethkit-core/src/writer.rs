@@ -209,8 +209,9 @@ impl PluginWriter {
     /// # Errors
     ///
     /// Returns [`CoreError::EslRecordLimitExceeded`] if the total count of new
-    /// records exceeds 2048, or [`CoreError::UnsupportedGame`] if the target
-    /// game does not support light plugins.
+    /// records exceeds the game-specific ESL capacity, or
+    /// [`CoreError::UnsupportedGame`] if the target game does not support
+    /// light plugins.
     pub fn eslify(&mut self) -> Result<()> {
         if !self.ctx.supports_light() {
             return Err(CoreError::UnsupportedGame(self.ctx.game));
@@ -221,9 +222,12 @@ impl PluginWriter {
         // Count records that belong to this plugin.
         let new_count: usize = count_new_records(&self.groups, master_count);
 
-        // ESL range: 0x800–0xFFF gives 0x800 (2048) slots.
-        const ESL_MAX: usize = 0x800;
-        if new_count > ESL_MAX {
+        // Game-specific object-ID range for ESL records.
+        let esl_min: u32 = self.ctx.light_min_object_id();
+        let esl_max: u32 = self.ctx.light_max_object_id();
+        // Number of valid slots: esl_min..=esl_max (both inclusive).
+        let esl_capacity: usize = (esl_max - esl_min + 1) as usize;
+        if new_count > esl_capacity {
             return Err(CoreError::EslRecordLimitExceeded { count: new_count });
         }
 
@@ -240,7 +244,7 @@ impl PluginWriter {
 
         let mut remap: HashMap<u32, u32> = HashMap::default();
         for (i, old_fid) in old_fids.iter().enumerate() {
-            remap.insert(*old_fid, file_index_shifted | (0x800u32 + i as u32));
+            remap.insert(*old_fid, file_index_shifted | (esl_min + i as u32));
         }
 
         // Second pass: apply the remapping to record headers and all subrecord
@@ -508,8 +512,9 @@ mod tests {
         }
     }
 
-    /// Verifies that eslify() reassigns owned FormIDs to the ESL range (0x800+)
-    /// and sets the LIGHT flag on the serialised plugin header.
+    /// Verifies that eslify() reassigns owned FormIDs to the ESL range
+    /// (0x001..=0xFFF for Skyrim SE) and sets the LIGHT flag on the serialised
+    /// plugin header.
     #[test]
     fn eslify_compacts_form_ids_to_esl_range() -> std::result::Result<(), Box<dyn std::error::Error>>
     {
@@ -533,9 +538,10 @@ mod tests {
             for record in group.records_recursive() {
                 let obj_id: u32 = record.header.form_id.0 & 0x00_000FFF;
                 assert!(
-                    obj_id >= 0x800,
-                    "FormID {:#010x} not in ESL range",
+                    obj_id >= 0x001 && obj_id <= 0xFFF && obj_id != 0x000,
+                    "FormID {:#010x} has object ID {:#05x} outside ESL range 0x001..=0xFFF",
                     record.header.form_id.0,
+                    obj_id,
                 );
             }
         }
@@ -543,13 +549,13 @@ mod tests {
     }
 
     /// Verifies that eslify() returns an error when the record count exceeds
-    /// the ESL limit (2048 records).
+    /// the ESL capacity for Skyrim SE (4095 records = max, 4096 = over limit).
     #[test]
     fn eslify_rejects_oversized_plugin() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        // given — 2049 records, one over the ESL limit
+        // given — 4096 records, one over the SSE ESL capacity of 4095 (0x001..=0xFFF)
         let ctx = GameContext::sse();
         let mut writer = PluginWriter::new(ctx, 1.7);
-        for i in 1u32..=2049 {
+        for i in 1u32..=4096 {
             writer.add_group(make_group_with_record(i));
         }
 

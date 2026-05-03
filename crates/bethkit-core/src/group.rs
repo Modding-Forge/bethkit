@@ -50,6 +50,11 @@ pub enum GroupType {
 }
 
 impl GroupType {
+    /// Converts this [`GroupType`] to the raw `i32` value stored in the file.
+    pub fn to_raw(self) -> i32 {
+        self as i32
+    }
+
     /// Converts a raw `i32` from the file into a [`GroupType`].
     ///
     /// # Errors
@@ -101,8 +106,11 @@ impl GroupLabel {
             | GroupType::CellPersistentChildren
             | GroupType::CellTemporaryChildren => Self::FormId(FormId(u32::from_le_bytes(raw))),
             GroupType::ExteriorCellBlock | GroupType::ExteriorCellSubBlock => {
-                let x: i16 = i16::from_le_bytes([raw[0], raw[1]]);
-                let y: i16 = i16::from_le_bytes([raw[2], raw[3]]);
+                // The binary file stores Y in the first two bytes and X in the
+                // last two. GroupLabel::GridCell exposes the conventional (x, y)
+                // order so callers never need to know the on-disk byte order.
+                let y: i16 = i16::from_le_bytes([raw[0], raw[1]]);
+                let x: i16 = i16::from_le_bytes([raw[2], raw[3]]);
                 Self::GridCell { x, y }
             }
             GroupType::InteriorCellBlock | GroupType::InteriorCellSubBlock => {
@@ -422,6 +430,44 @@ mod tests {
 
         // then
         assert!(matches!(result, Err(CoreError::InvalidGroupType(99))));
+        Ok(())
+    }
+
+    /// Verifies that GroupLabel::from_raw for ExteriorCellBlock reads Y from
+    /// bytes 0-1 and X from bytes 2-3 (file order is Y/X, not X/Y).
+    #[test]
+    fn exterior_cell_label_yx_byte_order() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given — raw label bytes: Y=10 in bytes 0-1, X=20 in bytes 2-3
+        let raw: [u8; 4] = {
+            let y: i16 = 10;
+            let x: i16 = 20;
+            let yb = y.to_le_bytes();
+            let xb = x.to_le_bytes();
+            [yb[0], yb[1], xb[0], xb[1]]
+        };
+
+        // when
+        let label = GroupLabel::from_raw(raw, GroupType::ExteriorCellBlock);
+
+        // then — x and y must be decoded from the correct byte positions
+        match label {
+            GroupLabel::GridCell { x, y } => {
+                assert_eq!(x, 20, "x should come from bytes 2-3");
+                assert_eq!(y, 10, "y should come from bytes 0-1");
+            }
+            other => panic!("expected GridCell, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// Verifies that GroupType::to_raw returns the correct discriminant value.
+    #[test]
+    fn group_type_to_raw_roundtrips() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // when / then — every variant roundtrips through to_raw → from_raw
+        for raw in 0i32..=9 {
+            let gt = GroupType::from_raw(raw)?;
+            assert_eq!(gt.to_raw(), raw, "to_raw should return the original value");
+        }
         Ok(())
     }
 }

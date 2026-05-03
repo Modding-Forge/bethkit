@@ -240,7 +240,8 @@ impl<'p> PluginPatcher<'p> {
             .map(|r| r.header.form_id.object_id())
             .max()
             .unwrap_or(0x800)
-            .max(0x800);
+            .max(0x800)
+            + 1;
 
         // Build subrecord payload.
         let mut payload: Vec<u8> = Vec::new();
@@ -398,30 +399,20 @@ fn mark_touched(
 /// All other fields (label, group_type, version_control, unknown) are taken
 /// from the parsed [`Group`].
 fn write_group_header(group: &Group, new_group_size: u32, writer: &mut impl Write) -> Result<()> {
-    use crate::group::{GroupLabel, GroupType};
+    use crate::group::GroupLabel;
 
     let label_bytes: [u8; 4] = match group.header.label {
         GroupLabel::Signature(sig) => sig.0,
         GroupLabel::FormId(id) => id.0.to_le_bytes(),
         GroupLabel::GridCell { x, y } => {
-            let xb: [u8; 2] = x.to_le_bytes();
+            // Binary format stores Y in bytes 0-1 and X in bytes 2-3.
             let yb: [u8; 2] = y.to_le_bytes();
-            [xb[0], xb[1], yb[0], yb[1]]
+            let xb: [u8; 2] = x.to_le_bytes();
+            [yb[0], yb[1], xb[0], xb[1]]
         }
         GroupLabel::BlockNumber(n) => n.to_le_bytes(),
     };
-    let group_type_raw: i32 = match group.header.group_type {
-        GroupType::Normal => 0,
-        GroupType::WorldChildren => 1,
-        GroupType::InteriorCellBlock => 2,
-        GroupType::InteriorCellSubBlock => 3,
-        GroupType::ExteriorCellBlock => 4,
-        GroupType::ExteriorCellSubBlock => 5,
-        GroupType::CellChildren => 6,
-        GroupType::TopicChildren => 7,
-        GroupType::CellPersistentChildren => 8,
-        GroupType::CellTemporaryChildren => 9,
-    };
+    let group_type_raw: i32 = group.header.group_type.to_raw();
 
     writer.write_all(b"GRUP").map_err(io_err)?;
     writer
@@ -574,9 +565,38 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         patcher.write_to(&mut out)?;
 
-        // then — max object_id is 0x02, but minimum is 0x800
+        // then — max object_id is 0x02, clamped to 0x800, plus one
         let reparsed = Plugin::from_bytes(&out, GameContext::sse())?;
-        assert_eq!(reparsed.header.next_object_id, FormId(0x800));
+        assert_eq!(reparsed.header.next_object_id, FormId(0x801));
+        Ok(())
+    }
+
+    /// Verifies that next_object_id is the highest self-owned object ID plus one
+    /// when that ID is already above the 0x800 floor.
+    #[test]
+    fn next_object_id_is_one_past_max_when_above_floor(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given — plugin with a record at FormID 0x000900 (file_index 0, own)
+        let hedr_data: Vec<u8> = build_hedr(1.7, 1, 0x901);
+        let tes4_data: Vec<u8> = build_subrecord(b"HEDR", &hedr_data);
+        let tes4: Vec<u8> = build_record(b"TES4", 0, 0, &tes4_data);
+        let child: Vec<u8> = build_record(b"NPC_", 0, 0x000900, &[]);
+        let grup: Vec<u8> = build_grup(b"NPC_", 0, &child);
+        let mut original: Vec<u8> = Vec::new();
+        original.extend_from_slice(&tes4);
+        original.extend_from_slice(&grup);
+        let plugin = Plugin::from_bytes(&original, GameContext::sse())?;
+        let replacement: Vec<u8> = build_record(b"NPC_", 0, 0x000900, b"\xFF");
+
+        // when — replace the record to trigger HEDR rewrite
+        let mut patcher = PluginPatcher::new(&plugin);
+        patcher.replace_record(FormId(0x000900), RecordPatch::RawBytes(replacement));
+        let mut out: Vec<u8> = Vec::new();
+        patcher.write_to(&mut out)?;
+
+        // then — max object_id is 0x900, next_object_id must be 0x901
+        let reparsed = Plugin::from_bytes(&out, GameContext::sse())?;
+        assert_eq!(reparsed.header.next_object_id, FormId(0x901));
         Ok(())
     }
 
