@@ -23,8 +23,9 @@ They can be used independently or combined.
 
 | `bethkit-bsa`
 | ✅ Complete
-| Read-only reader for BSA (TES3/TES4/FO3/SSE) and BA2 (GNRL/DX10) archives.
-  Concurrent extraction via `rayon`.
+| BSA (TES3/TES4/FO3/SSE) and BA2 (GNRL/DX10) archive reader and writer.
+  `Archive::extract` is `&self` and safe to call concurrently; rayon is used internally
+  for parallel compression when *writing* new archives.
 
 | `bethkit-ffi`
 | ✅ Complete

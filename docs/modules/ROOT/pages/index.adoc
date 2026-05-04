@@ -16,7 +16,11 @@ pulling in a heavy dependency or accepting a restrictive licence.
   Records borrow bytes directly from the mapping — no extra allocations.
 
 | Skyrim SE first
-| Primary target is **Skyrim Special Edition / AE** with full record-schema coverage (126 record types).
+| Primary target is **Skyrim Special Edition / AE**.
+  126 SSE record types are registered; schema depth is work-in-progress — many common
+  record types have full field coverage, while others provide a raw byte slice for
+  complex or rarely-edited subrecords. Placement records (REFR, ACHR) are not
+  schema-covered.
   The binary format layer (`GameContext`) is prepared for Skyrim LE/VR, Fallout 3/NV/4/76,
   Starfield, Oblivion, and Morrowind, but record-schema definitions for those games are planned.
 

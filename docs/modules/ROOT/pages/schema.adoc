@@ -43,7 +43,7 @@ The global SSE registry is available as a `&'static` singleton:
 use bethkit_core::SchemaRegistry;
 
 let registry = SchemaRegistry::sse();
-println!("registered schemas: {}", registry.len()); // 126 for SSE
+println!("registered schemas: {}", registry.len()); // 126 for SSE (schema depth varies per type)
 ----
 
 `SchemaRegistry::sse()` builds the registry once on first call using `OnceLock`.
@@ -109,7 +109,7 @@ if let Some(schema) = registry.get(Signature(*b"NPC_")) {
 | `Flags(&FlagsDef)` | 32-bit integer interpreted as named bit flags.
 | `Struct(&[FieldDef])` | Fixed-layout sequence of named fields.
 | `Array { element, count }` | Homogeneous array. `count` is `Fixed(n)`, `Remainder`, or `PrecedingSibling(sig)`.
-| `Union { decider, variants }` | Active variant chosen at runtime by the `decider` function.
+| `Union { decider, variants }` | Active variant chosen at runtime by the `decider` function. Not yet used by any built-in schema; complex multi-variant fields currently fall back to `ByteArray`.
 | `Unused(n)` | `n` padding bytes, ignored during decoding.
 |===
 
@@ -258,26 +258,26 @@ fields in SSE records:
 |===
 | Static name | Covers
 
-| `ACTOR_VALUE_ENUM` | Actor values (Strength, Alteration, …), 163 values
-| `SCHOOL_ENUM` | Magic school (Alteration, Conjuration, …)
+| `ACTOR_VALUE_ENUM` | Actor values (Strength, Alteration, ï¿½), 163 values
+| `SCHOOL_ENUM` | Magic school (Alteration, Conjuration, ï¿½)
 | `WEAPON_ANIM_TYPE_ENUM` | Weapon animation type
 | `STAGGER_ENUM` | Stagger values
 | `ARMOR_TYPE_ENUM` | Light / Heavy / Clothing
 | `BOOK_TYPE_ENUM` | Tome / Note / Journal / Scroll
-| `BOOK_FLAGS` | Book flags (Teaches Skill, Teaches Spell, …)
-| `MAGIC_EFFECT_FLAGS` | MGEF flags (Hostile, Detrimental, …)
-| `DELIVERY_ENUM` | Spell delivery (Self, Touch, Aimed, …)
+| `BOOK_FLAGS` | Book flags (Teaches Skill, Teaches Spell, ï¿½)
+| `MAGIC_EFFECT_FLAGS` | MGEF flags (Hostile, Detrimental, ï¿½)
+| `DELIVERY_ENUM` | Spell delivery (Self, Touch, Aimed, ï¿½)
 | `CASTING_TYPE_ENUM` | Casting type (Constant, FireForget, Concentration, Scroll)
-| `SPELL_TYPE_ENUM` | Spell / Disease / Power / LesserPower / …
-| `NPC_FLAGS` | NPC ACBS flags (Female, Essential, Unique, …)
+| `SPELL_TYPE_ENUM` | Spell / Disease / Power / LesserPower / ï¿½
+| `NPC_FLAGS` | NPC ACBS flags (Female, Essential, Unique, ï¿½)
 | `PACKAGE_TYPE_ENUM` | AI package types
-| `LIGHT_FLAGS` | Light flags (Dynamic, Can Carry, …)
-| `QUEST_TYPE_ENUM` | Quest type (None, MainQuest, BrotherhoodOfSteel, …)
-| `QUEST_FLAGS` | Quest flags (Start Game Enabled, Allow Repeated Stages, …)
-| `CELL_FLAGS` | Cell flags (Interior, Has Water, …)
+| `LIGHT_FLAGS` | Light flags (Dynamic, Can Carry, ï¿½)
+| `QUEST_TYPE_ENUM` | Quest type (None, MainQuest, BrotherhoodOfSteel, ï¿½)
+| `QUEST_FLAGS` | Quest flags (Start Game Enabled, Allow Repeated Stages, ï¿½)
+| `CELL_FLAGS` | Cell flags (Interior, Has Water, ï¿½)
 | `WEATHER_CLASS_ENUM` | Weather class (None, Pleasant, Cloudy, Rainy, Snow)
-| `PROJECTILE_FLAGS` | Projectile flags (Hitscan, Explosive, Alt Trigger, …)
-| `PROJECTILE_TYPE_ENUM` | Projectile type (Missile, Lobber, Beam, Flame, …)
+| `PROJECTILE_FLAGS` | Projectile flags (Hitscan, Explosive, Alt Trigger, ï¿½)
+| `PROJECTILE_TYPE_ENUM` | Projectile type (Missile, Lobber, Beam, Flame, ï¿½)
 | `SOUND_LEVEL_ENUM` | Sound attenuation level
 | `EQUIP_TYPE_ENUM` | Equip slot _(reserved for future use)_
 | `MATERIAL_TYPE_ENUM` | Impact material type _(reserved for future use)_
