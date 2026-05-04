@@ -133,11 +133,18 @@ jobs:
           name: bethkit-linux-x64
           path: dist/linux
 
-      # Zip each platform bundle for the release page.
+      # Zip each platform bundle for the release page with a flat structure.
       - name: Package artifacts
         run: |
-          (cd dist/windows && zip -r ../../bethkit-${{ github.ref_name }}-windows-x64.zip .)
-          (cd dist/linux   && zip -r ../../bethkit-${{ github.ref_name }}-linux-x64.zip .)
+          mkdir -p staging/windows staging/linux
+          cp dist/windows/target/release/bethkit_ffi.dll staging/windows/
+          cp dist/windows/target/release/bethkit_ffi.lib staging/windows/
+          cp dist/windows/crates/bethkit-ffi/bethkit.h   staging/windows/
+          cp dist/linux/target/release/libbethkit_ffi.so staging/linux/
+          cp dist/linux/target/release/libbethkit_ffi.a  staging/linux/
+          cp dist/linux/crates/bethkit-ffi/bethkit.h     staging/linux/
+          (cd staging/windows && zip -r ../../bethkit-${{ github.ref_name }}-windows-x64.zip .)
+          (cd staging/linux   && zip -r ../../bethkit-${{ github.ref_name }}-linux-x64.zip .)
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
