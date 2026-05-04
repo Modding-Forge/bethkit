@@ -116,17 +116,19 @@ pub extern "C" fn bethkit_string_table_len(st: *const BethkitStringTable) -> usi
 /// to the raw string bytes.  The bytes are **borrowed** from the table and
 /// are valid until the table is mutated or freed.
 ///
-/// Returns null if `id` is not present in the table.
+/// When `id` is not present in the table, returns null and writes `0` into
+/// `*out_len` without setting the last error.
 ///
 /// # Arguments
 ///
 /// * `st`      — String table. Borrows.
 /// * `id`      — String table entry ID.
-/// * `out_len` — Written with the number of bytes on success.
+/// * `out_len` — Written with the byte count on success, or `0` if not found.
 ///
 /// # Errors
 ///
-/// Returns null and sets the last error if `st` or `out_len` is null.
+/// Returns null, writes `0` into `*out_len`, and sets the last error if
+/// `st` or `out_len` is null.
 #[no_mangle]
 pub extern "C" fn bethkit_string_table_get(
     st: *const BethkitStringTable,
@@ -140,6 +142,8 @@ pub extern "C" fn bethkit_string_table_get(
         std::ptr::null()
     );
     // SAFETY: st and out_len are non-null.
+    // Zero out_len first so every return path leaves a defined value.
+    unsafe { *out_len = 0 };
     match unsafe { &*st }.0.get(id) {
         None => std::ptr::null(),
         Some(bytes) => {
@@ -348,18 +352,20 @@ pub extern "C" fn bethkit_localization_set_free(ls: *mut BethkitLocalizationSet)
 /// to the raw bytes.  The bytes are borrowed from the set and are valid until
 /// the set is mutated or freed.
 ///
-/// Returns null if `id` is not present.
+/// When `id` is not present, returns null and writes `0` into `*out_len`
+/// without setting the last error.
 ///
 /// # Arguments
 ///
 /// * `ls`      — Localization set. Borrows.
 /// * `kind`    — Which table to look in.
 /// * `id`      — String entry ID.
-/// * `out_len` — Written with the number of bytes on success.
+/// * `out_len` — Written with the byte count on success, or `0` if not found.
 ///
 /// # Errors
 ///
-/// Returns null and sets the last error if `ls` or `out_len` is null.
+/// Returns null, writes `0` into `*out_len`, and sets the last error if
+/// `ls` or `out_len` is null.
 #[no_mangle]
 pub extern "C" fn bethkit_localization_set_get(
     ls: *const BethkitLocalizationSet,
@@ -374,6 +380,8 @@ pub extern "C" fn bethkit_localization_set_get(
         std::ptr::null()
     );
     // SAFETY: ls and out_len are non-null.
+    // Zero out_len first so every return path leaves a defined value.
+    unsafe { *out_len = 0 };
     match unsafe { &*ls }.0.get(string_kind_to_rust(kind), id) {
         None => std::ptr::null(),
         Some(bytes) => {

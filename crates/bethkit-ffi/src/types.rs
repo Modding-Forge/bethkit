@@ -137,8 +137,8 @@ pub struct BethkitTypedFormId {
 /// An enumeration field value with its raw integer and optional resolved name.
 ///
 /// `name` is null when the raw value does not correspond to any known variant
-/// in the schema.  When non-null it points to a static string and must not
-/// be freed.
+/// in the schema.  When non-null it points into the owning view's string
+/// arena and is valid until the view is freed; never free this pointer.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct BethkitEnumVal {
@@ -150,11 +150,12 @@ pub struct BethkitEnumVal {
 
 /// A flags field value with the raw integer and the names of all active bits.
 ///
-/// `active_names` points to an array of `active_count` static C-string
+/// `active_names` points to an array of `active_count` NUL-terminated C-string
 /// pointers.  The *array itself* is heap-allocated and is freed when the
 /// enclosing [`BethkitFieldValue`] is released (via the view or entry free
-/// functions).  The individual string pointers point into static memory and
-/// must not be freed.
+/// functions).  The individual string pointers are interned in the owning
+/// view's string arena and are valid until that view is freed.  Do not free
+/// the individual string pointers.
 #[repr(C)]
 pub struct BethkitFlagsVal {
     /// The raw integer value from the record.

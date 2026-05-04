@@ -11,11 +11,17 @@
 //! # Ownership
 //!
 //! [`BethkitRecordView`] is owned and must be freed with
-//! [`bethkit_record_view_free`].
+//! [`bethkit_record_view_free`].  Freeing the view also frees all nested
+//! [`BethkitFieldEntries`] and [`BethkitFieldValues`] objects reachable from
+//! it.  **Do not call [`bethkit_field_entries_free`] or
+//! [`bethkit_field_values_free`] on objects obtained from a view** - doing so
+//! would cause a double-free.  Those free functions exist only for objects
+//! that are detached from any view.
 //!
-//! [`BethkitFieldEntries`] and [`BethkitFieldValues`] are owned sub-objects
-//! that appear in nested struct / array field values; free them with
-//! [`bethkit_field_entries_free`] / [`bethkit_field_values_free`].
+//! All `name` pointers inside [`BethkitNamedField`] (field names, enum
+//! variant names, flag bit names) are interned in the owning view's string
+//! arena.  They are NUL-terminated and valid until the view is freed; never
+//! free them individually.
 //!
 //! The [`BethkitSchemaRegistry`] returned by [`bethkit_schema_registry_sse`]
 //! points to a `'static` value and must never be freed.
@@ -69,11 +75,15 @@ pub union BethkitFieldValuePayload {
     /// Active when `kind == Flags`.  The flags value owns its active-names
     /// array and is dropped when the enclosing [`BethkitNamedField`] is freed.
     pub flags_val: ManuallyDrop<BethkitFlagsVal>,
-    /// Active when `kind == Struct`.  Owned; free with
-    /// [`bethkit_field_entries_free`].
+    /// Active when `kind == Struct`.  Owned by the enclosing
+    /// [`BethkitRecordView`]; recursively freed by [`bethkit_record_view_free`].
+    /// **Do not pass to [`bethkit_field_entries_free`] if this value was
+    /// obtained from a view** — that causes a double-free.
     pub struct_entries: *mut BethkitFieldEntries,
-    /// Active when `kind == Array`.  Owned; free with
-    /// [`bethkit_field_values_free`].
+    /// Active when `kind == Array`.  Owned by the enclosing
+    /// [`BethkitRecordView`]; recursively freed by [`bethkit_record_view_free`].
+    /// **Do not pass to [`bethkit_field_values_free`] if this value was
+    /// obtained from a view** — that causes a double-free.
     pub array_values: *mut BethkitFieldValues,
     /// Active when `kind == LocalizedId`.
     pub localized_id: u32,
@@ -86,23 +96,34 @@ pub union BethkitFieldValuePayload {
 /// [`BethkitFieldEntries`].
 #[repr(C)]
 pub struct BethkitNamedField {
-    /// Human-readable field name from the schema.  Points to a `'static`
-    /// string; never free this pointer.
+    /// Human-readable field name from the schema.  Points into the owning
+    /// view's string arena; valid until the view is freed.  Never free this
+    /// pointer directly.
     pub name: *const c_char,
     /// The decoded field value.
     pub value: BethkitFieldValue,
 }
 
-/// An owned, heap-allocated list of named fields (from a decoded struct).
+/// A heap-allocated list of named fields decoded from a struct field.
 ///
-/// Free with [`bethkit_field_entries_free`].
+/// Ownership depends on how this was obtained:
+/// - **Detached** (returned directly to the caller): free with
+///   [`bethkit_field_entries_free`].
+/// - **Embedded in a [`BethkitRecordView`]**: freed automatically by
+///   [`bethkit_record_view_free`] — **do not** call [`bethkit_field_entries_free`]
+///   on it or a double-free will occur.
 pub struct BethkitFieldEntries {
     entries: Vec<BethkitNamedField>,
 }
 
-/// An owned, heap-allocated list of field values (from a decoded array).
+/// A heap-allocated list of field values decoded from an array field.
 ///
-/// Free with [`bethkit_field_values_free`].
+/// Ownership depends on how this was obtained:
+/// - **Detached** (returned directly to the caller): free with
+///   [`bethkit_field_values_free`].
+/// - **Embedded in a [`BethkitRecordView`]**: freed automatically by
+///   [`bethkit_record_view_free`] — **do not** call [`bethkit_field_values_free`]
+///   on it or a double-free will occur.
 pub struct BethkitFieldValues {
     values: Vec<BethkitFieldValue>,
 }
@@ -113,8 +134,11 @@ pub struct BethkitFieldValues {
 /// [`bethkit_record_view_free`].
 pub struct BethkitRecordView {
     fields: Vec<BethkitNamedField>,
-    /// Heap-allocated CStrings for inline string values.
-    _owned_strings: Vec<std::ffi::CString>,
+    // NOTE: string_arena is never read explicitly; it exists solely to keep
+    // NOTE: the CStrings alive (RAII). All `name` and `str_val` pointers in
+    // NOTE: `fields` point into this arena.
+    #[allow(dead_code)]
+    string_arena: Vec<std::ffi::CString>,
 }
 
 /// An opaque handle to a schema registry (a map from record signature to
@@ -212,8 +236,7 @@ pub extern "C" fn bethkit_record_view_new(
         .map(|fe| {
             let value = convert_field_value(&fe.value, &mut owned_strings);
             BethkitNamedField {
-                // SAFETY: fe.name is a 'static &str from the schema definition.
-                name: fe.name.as_ptr().cast::<c_char>(),
+                name: intern_str(fe.name, &mut owned_strings),
                 value,
             }
         })
@@ -221,12 +244,14 @@ pub extern "C" fn bethkit_record_view_new(
 
     Box::into_raw(Box::new(BethkitRecordView {
         fields,
-        _owned_strings: owned_strings,
+        string_arena: owned_strings,
     }))
 }
 
-/// Frees a record view and all owned sub-objects (field entries, values,
-/// flags arrays).
+/// Frees a record view and recursively all owned sub-objects — nested
+/// [`BethkitFieldEntries`] (struct fields), [`BethkitFieldValues`] (array
+/// fields), and flags-name arrays.  All `name` and `str_val` pointers
+/// borrowed from the view become invalid after this call.
 ///
 /// Passing a null pointer is a no-op.
 #[no_mangle]
@@ -319,7 +344,12 @@ pub extern "C" fn bethkit_field_entries_get(
     }
 }
 
-/// Frees an owned field entries list returned inside a struct field value.
+/// Frees a **detached** field entries list — one explicitly owned by the
+/// caller and not embedded in a [`BethkitRecordView`].
+///
+/// **Do not call this on values obtained from a [`BethkitRecordView`].**
+/// [`bethkit_record_view_free`] handles recursive cleanup automatically;
+/// calling this on view-owned entries causes a double-free.
 ///
 /// Passing a null pointer is a no-op.
 #[no_mangle]
@@ -371,7 +401,12 @@ pub extern "C" fn bethkit_field_values_get(
     }
 }
 
-/// Frees an owned field values list returned inside an array field value.
+/// Frees a **detached** field values list — one explicitly owned by the
+/// caller and not embedded in a [`BethkitRecordView`].
+///
+/// **Do not call this on values obtained from a [`BethkitRecordView`].**
+/// [`bethkit_record_view_free`] handles recursive cleanup automatically;
+/// calling this on view-owned values causes a double-free.
 ///
 /// Passing a null pointer is a no-op.
 #[no_mangle]
@@ -386,10 +421,25 @@ pub extern "C" fn bethkit_field_values_free(values: *mut BethkitFieldValues) {
     }
 }
 
+/// Interns `s` as a NUL-terminated [`std::ffi::CString`] into `arena` and
+/// returns a stable pointer to its data.
+///
+/// The pointer is valid for as long as `arena` is alive.  Any embedded NUL
+/// bytes in `s` are replaced with `?` to guarantee a valid C string.
+fn intern_str(s: &str, arena: &mut Vec<std::ffi::CString>) -> *const c_char {
+    let sanitized: Vec<u8> = s.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
+    let cs = std::ffi::CString::new(sanitized)
+        .unwrap_or_else(|_| std::ffi::CString::new("?").expect("single char is always valid"));
+    let ptr = cs.as_ptr();
+    arena.push(cs);
+    ptr
+}
+
 /// Recursively converts a [`FieldValue`] into a [`BethkitFieldValue`].
 ///
-/// String values are interned into `owned_strings` so their pointers remain
-/// stable for the lifetime of the view.
+/// String values and schema label strings (field names, enum variant names,
+/// flag bit names) are interned into `owned_strings` so their pointers are
+/// NUL-terminated and stable for the lifetime of the view.
 fn convert_field_value<'a>(
     fv: &FieldValue<'a>,
     owned_strings: &mut Vec<std::ffi::CString>,
@@ -447,17 +497,20 @@ fn convert_field_value<'a>(
                 enum_val: BethkitEnumVal {
                     value: *value,
                     name: match name {
-                        Some(n) => n.as_ptr().cast::<c_char>(),
+                        Some(n) => intern_str(n, owned_strings),
                         None => std::ptr::null(),
                     },
                 },
             },
         },
         FieldValue::Flags { value, active } => {
-            // Build a heap-allocated array of *const c_char pointing to
-            // 'static schema strings.
-            let name_ptrs: Vec<*const c_char> =
-                active.iter().map(|s| s.as_ptr().cast::<c_char>()).collect();
+            // Build a heap-allocated array of *const c_char. Each name pointer
+            // is interned into owned_strings, so it is NUL-terminated and
+            // stable for the lifetime of the enclosing view.
+            let name_ptrs: Vec<*const c_char> = active
+                .iter()
+                .map(|s| intern_str(s, owned_strings))
+                .collect();
             let count = name_ptrs.len();
             let boxed = name_ptrs.into_boxed_slice();
             let ptr = boxed.as_ptr();
@@ -480,7 +533,7 @@ fn convert_field_value<'a>(
                 .map(|fe| {
                     let value = convert_field_value(&fe.value, owned_strings);
                     BethkitNamedField {
-                        name: fe.name.as_ptr().cast::<c_char>(),
+                        name: intern_str(fe.name, owned_strings),
                         value,
                     }
                 })
@@ -558,5 +611,88 @@ fn drop_field_value(v: BethkitFieldValue) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::{CStr, CString};
+
+    use super::*;
+
+    /// Verifies that `intern_str` produces a NUL-terminated pointer into the arena.
+    #[test]
+    fn intern_str_is_nul_terminated() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let mut arena: Vec<CString> = Vec::new();
+
+        // when
+        let ptr = intern_str("TestField", &mut arena);
+
+        // then
+        // SAFETY: ptr points into arena, which is alive for the rest of this function.
+        let cstr = unsafe { CStr::from_ptr(ptr) };
+        assert_eq!(cstr.to_str()?, "TestField");
+        assert_eq!(arena.len(), 1);
+        Ok(())
+    }
+
+    /// Verifies that `drop_field_value` correctly frees the flags active-names
+    /// array without panicking or leaking.
+    #[test]
+    fn drop_field_value_flags_cleans_up() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given: build a Flags field value exactly as convert_field_value does.
+        let mut arena: Vec<CString> = Vec::new();
+        let name_ptrs: Vec<*const c_char> = vec![
+            intern_str("BitA", &mut arena),
+            intern_str("BitB", &mut arena),
+        ];
+        let count = name_ptrs.len();
+        let boxed = name_ptrs.into_boxed_slice();
+        let ptr = boxed.as_ptr();
+        std::mem::forget(boxed);
+
+        let fv = BethkitFieldValue {
+            kind: BethkitFieldValueKind::Flags,
+            payload: BethkitFieldValuePayload {
+                flags_val: ManuallyDrop::new(BethkitFlagsVal {
+                    raw_value: 0b11,
+                    active_names: ptr,
+                    active_count: count,
+                }),
+            },
+        };
+
+        // when / then: must not panic or leak
+        drop_field_value(fv);
+        Ok(())
+    }
+
+    /// Verifies that `drop_field_value` recursively cleans up nested struct
+    /// entries without panicking or leaking.
+    #[test]
+    fn drop_field_value_struct_recursively_drops(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given: a Struct containing one Int entry.
+        let inner = BethkitNamedField {
+            name: std::ptr::null(),
+            value: BethkitFieldValue {
+                kind: BethkitFieldValueKind::Int,
+                payload: BethkitFieldValuePayload { int_val: 99 },
+            },
+        };
+        let entries = Box::new(BethkitFieldEntries {
+            entries: vec![inner],
+        });
+        let fv = BethkitFieldValue {
+            kind: BethkitFieldValueKind::Struct,
+            payload: BethkitFieldValuePayload {
+                struct_entries: Box::into_raw(entries),
+            },
+        };
+
+        // when / then: recursive drop must not panic or leak
+        drop_field_value(fv);
+        Ok(())
     }
 }

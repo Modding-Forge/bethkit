@@ -55,9 +55,12 @@ pub struct CacheEntry {
 pub struct PluginCache {
     entries: Vec<CacheEntry>,
     load_order: LoadOrder,
-    /// Maps each indexed [`GlobalFormId`] to `(entry_index, raw_form_id)`.
+    /// Maps each indexed [`GlobalFormId`] to `(entry_index, raw_form_id, signature)`.
     /// Later entries overwrite earlier ones — winning-override semantics.
-    by_global_id: HashMap<GlobalFormId, (usize, FormId)>,
+    /// The stored signature enables correct removal of stale entries from
+    /// `by_signature` when a later plugin overrides a record with a different
+    /// record type.
+    by_global_id: HashMap<GlobalFormId, (usize, FormId, Signature)>,
     /// Maps each 4-byte record signature to the list of [`GlobalFormId`]s
     /// for that record type in the winning-override set. Built incrementally
     /// in [`Self::add`].
@@ -153,20 +156,18 @@ impl PluginCache {
 
         // Update the winning-override index. Later entries overwrite earlier.
         for (gfid, raw_fid, sig) in triples {
-            // Remove stale signature index entry for the previous winner.
-            if let Some(&(_, prev_fid)) = self.by_global_id.get(&gfid) {
-                if let Some(sig_list) = self.by_signature.get_mut(&sig) {
-                    // NOTE: This is O(k) where k = records of that type.
-                    // For large plugins this may be slow, but it only fires
-                    // when the same GlobalFormId is overridden by a later
-                    // plugin, which is the minority case.
-                    let _ = prev_fid; // suppress unused warning
+            // Remove the stale entry from the OLD signature's list if this
+            // GlobalFormId was already indexed. Using the stored old signature
+            // (not the new sig) ensures we clean the correct bucket even when
+            // the override changes the record type (e.g. NPC_ -> WEAP).
+            if let Some(&(_, _, old_sig)) = self.by_global_id.get(&gfid) {
+                if let Some(sig_list) = self.by_signature.get_mut(&old_sig) {
                     sig_list.retain(|g| g != &gfid);
                 }
             }
 
             self.by_signature.entry(sig).or_default().push(gfid.clone());
-            self.by_global_id.insert(gfid, (entry_index, raw_fid));
+            self.by_global_id.insert(gfid, (entry_index, raw_fid, sig));
         }
 
         // Invalidate the EditorID cache so it is rebuilt on next access.
@@ -181,7 +182,7 @@ impl PluginCache {
     ///
     /// * `gfid` - The game-unique FormID to look up.
     pub fn resolve_record(&self, gfid: &GlobalFormId) -> Option<&Record> {
-        let &(entry_idx, raw_fid) = self.by_global_id.get(gfid)?;
+        let &(entry_idx, raw_fid, _) = self.by_global_id.get(gfid)?;
         self.entries[entry_idx].plugin.find_record(raw_fid)
     }
 
@@ -196,7 +197,7 @@ impl PluginCache {
     ///
     /// * `edid` - The EditorID to find (case-sensitive).
     pub fn find_by_editor_id(&self, edid: &str) -> Option<(&GlobalFormId, &Record)> {
-        let by_global_id: &HashMap<GlobalFormId, (usize, FormId)> = &self.by_global_id;
+        let by_global_id: &HashMap<GlobalFormId, (usize, FormId, Signature)> = &self.by_global_id;
         let entries: &[CacheEntry] = &self.entries;
 
         let index: &HashMap<String, GlobalFormId> = self.by_editor_id.get_or_init(|| {
@@ -206,7 +207,7 @@ impl PluginCache {
             // records that are in the winning set.
             let mut winning_by_entry: HashMap<usize, HashMap<FormId, GlobalFormId>> =
                 HashMap::default();
-            for (gfid, &(entry_idx, raw_fid)) in by_global_id {
+            for (gfid, &(entry_idx, raw_fid, _)) in by_global_id {
                 winning_by_entry
                     .entry(entry_idx)
                     .or_default()
@@ -462,6 +463,32 @@ mod tests {
         // then — both EditorIDs are available after index rebuild
         assert!(cache.find_by_editor_id("FirstNpc").is_some());
         assert!(cache.find_by_editor_id("SecondNpc").is_some());
+        Ok(())
+    }
+
+    /// Verifies that overriding a record with a different signature correctly
+    /// removes the stale entry from the old type's records_of_type list.
+    #[test]
+    fn override_with_different_signature_clears_old_type(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given: mod_a.esp owns an NPC_ record.
+        let plugin_a = plugin_with_one_record("mod_a.esp", 0x00_000001, b"NPC_", None);
+        // mod_b.esp overrides the same GlobalFormId but as a WEAP record.
+        let plugin_b = plugin_with_master_and_record("mod_a.esp", 0x00_000001, b"WEAP");
+
+        // when
+        let mut cache = PluginCache::new();
+        cache.add("mod_a.esp", plugin_a)?;
+        cache.add("mod_b.esp", plugin_b)?;
+
+        // then: the NPC_ bucket must be empty; the WEAP bucket has the winner.
+        let npcs: Vec<_> = cache.records_of_type(Signature(*b"NPC_")).collect();
+        let weapons: Vec<_> = cache.records_of_type(Signature(*b"WEAP")).collect();
+        assert!(
+            npcs.is_empty(),
+            "stale NPC_ entry must be removed on type-change override"
+        );
+        assert_eq!(weapons.len(), 1, "WEAP override must be indexed");
         Ok(())
     }
 }

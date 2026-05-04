@@ -153,17 +153,17 @@ pub extern "C" fn bethkit_plugin_writer_write_to_file(
 /// On success, writes the buffer length into `*out_len` and returns a pointer
 /// to the buffer.  The buffer must be freed with [`bethkit_bytes_free`].
 ///
-/// Returns null on failure.
+/// Returns null on failure and writes `0` into `*out_len`.
 ///
 /// # Arguments
 ///
 /// * `pw`      — Plugin writer. Borrows.
-/// * `out_len` — Written with the buffer size on success.
+/// * `out_len` — Written with the buffer size on success, or `0` on failure.
 ///
 /// # Errors
 ///
-/// Returns null and sets the last error if `pw` or `out_len` is null, or
-/// serialization fails.
+/// Returns null, writes `0` into `*out_len`, and sets the last error if
+/// `pw` or `out_len` is null, or serialization fails.
 #[no_mangle]
 pub extern "C" fn bethkit_plugin_writer_write_to_bytes(
     pw: *const BethkitPluginWriter,
@@ -181,6 +181,8 @@ pub extern "C" fn bethkit_plugin_writer_write_to_bytes(
     );
 
     // SAFETY: pw is non-null.
+    // Zero out_len before the operation so every return path leaves a defined value.
+    unsafe { *out_len = 0 };
     let bytes = ffi_try!(
         unsafe { &*pw }.0.write_to_vec().map_err(FfiError::Core),
         std::ptr::null_mut()

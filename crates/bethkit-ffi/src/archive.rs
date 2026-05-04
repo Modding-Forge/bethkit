@@ -170,25 +170,43 @@ pub extern "C" fn bethkit_archive_entry_get(
     }
 }
 
-/// Returns a pointer to the NUL-terminated virtual path of `entry` (e.g.
-/// `"textures\\actors\\character\\male\\malehead.dds"`).
+/// Returns a newly-allocated NUL-terminated copy of the virtual path of
+/// `entry` (e.g. `"textures\\actors\\character\\male\\malehead.dds"`).
 ///
-/// The returned pointer is borrowed from `entry`'s owning archive and is
-/// valid until that archive is freed.
+/// The caller takes ownership of the returned string and must free it with
+/// [`bethkit_archive_entry_path_free`].
+///
+/// Returns null and sets the last error if `entry` is null or the path
+/// contains a NUL byte (which would make it unrepresentable as a C string).
 ///
 /// # Errors
 ///
-/// Returns null and sets the last error if `entry` is null.
+/// Returns null and sets the last error if `entry` is null or path-to-CString
+/// conversion fails.
 #[no_mangle]
-pub extern "C" fn bethkit_archive_entry_path(entry: *const BethkitArchiveEntry) -> *const c_char {
-    null_check!(entry, "bethkit_archive_entry_path", std::ptr::null());
+pub extern "C" fn bethkit_archive_entry_path(entry: *const BethkitArchiveEntry) -> *mut c_char {
+    null_check!(entry, "bethkit_archive_entry_path", std::ptr::null_mut());
     // SAFETY: entry is non-null and points into the entries Vec of the archive.
-    // The String data inside ArchiveEntry is stable (not moved) because the
-    // archive is behind a Box.
     let path = &unsafe { &*entry }.0.path;
-    // NOTE: ArchiveEntry::path does not contain interior NUL bytes in practice;
-    // if it did the file would not have been extractable by the game either.
-    path.as_ptr().cast::<c_char>()
+    match std::ffi::CString::new(path.as_bytes()) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => {
+            set_last_error("bethkit_archive_entry_path: path contains an interior NUL byte");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Frees a string previously returned by [`bethkit_archive_entry_path`].
+///
+/// Passing a null pointer is a no-op.
+#[no_mangle]
+pub extern "C" fn bethkit_archive_entry_path_free(ptr: *mut c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: ptr was produced by CString::into_raw inside bethkit_archive_entry_path.
+    drop(unsafe { std::ffi::CString::from_raw(ptr) });
 }
 
 /// Returns the uncompressed file size in bytes for `entry`.
@@ -210,18 +228,21 @@ pub extern "C" fn bethkit_archive_entry_uncompressed_size(
 /// pointer to the buffer.  The caller takes ownership of this buffer and must
 /// free it with [`bethkit_bytes_free`] passing the same `out_len` value.
 ///
-/// Returns null on failure.
+/// When the virtual path is not found in the archive, returns null and writes
+/// `0` into `*out_len` without updating the last error (not-found is not an
+/// error; check the return value).
 ///
 /// # Arguments
 ///
 /// * `archive`  — Archive to extract from. Borrows.
 /// * `path`     — NUL-terminated virtual path of the file to extract. Borrows.
-/// * `out_len`  — Written with the number of bytes on success.
+/// * `out_len`  — Written with the byte count on success, or `0` on failure.
 ///
 /// # Errors
 ///
-/// Returns null and sets the last error if `archive`, `path`, or `out_len` is
-/// null, the path is not found, or extraction fails.
+/// Returns null, writes `0` into `*out_len`, and sets the last error if
+/// `archive`, `path`, or `out_len` is null, `path` contains invalid UTF-8,
+/// or extraction (decompression/I/O) fails.
 #[no_mangle]
 pub extern "C" fn bethkit_archive_extract(
     archive: *const BethkitArchive,
@@ -241,15 +262,15 @@ pub extern "C" fn bethkit_archive_extract(
         None => return std::ptr::null_mut(),
     };
 
+    // SAFETY: out_len is non-null (checked above); zero it before any early-return
+    // so the caller always reads a defined value.
+    unsafe { *out_len = 0 };
+
     // SAFETY: archive is non-null.
     let arc = unsafe { &*archive };
     let result = match arc.0.extract(path_str) {
-        None => {
-            set_last_error(format!(
-                "bethkit_archive_extract: path not found: {path_str}"
-            ));
-            return std::ptr::null_mut();
-        }
+        // Not found is not an error — return null without touching last_error.
+        None => return std::ptr::null_mut(),
         Some(r) => r,
     };
 
@@ -605,12 +626,15 @@ pub extern "C" fn bethkit_ba2_dx10_writer_free(w: *mut BethkitBa2Dx10Writer) {
 
 /// Adds a file to a BA2 DX10 writer.
 ///
+/// `path` is the virtual archive path (e.g. `"textures\\mymod\\foo.dds"`).
+/// `data` / `len` are the raw DDS file bytes to pack.
+///
 /// Returns 0 on success or -1 on error.
 ///
 /// # Errors
 ///
-/// Returns -1 and sets the last error if any pointer is null or the writer
-/// has already been consumed.
+/// Returns -1 and sets the last error if any pointer is null, the writer has
+/// already been consumed, or `data` does not contain a valid DX10/DDS image.
 #[no_mangle]
 pub extern "C" fn bethkit_ba2_dx10_writer_add(
     w: *mut BethkitBa2Dx10Writer,
@@ -637,7 +661,7 @@ pub extern "C" fn bethkit_ba2_dx10_writer_add(
         Some(inner) => {
             // SAFETY: data is non-null and valid for len bytes by caller contract.
             let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
-            let _ = inner.add(path_str, bytes);
+            ffi_try!(inner.add(path_str, bytes).map_err(FfiError::Bsa), -1);
             0
         }
     }

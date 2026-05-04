@@ -117,8 +117,12 @@ impl<'a> SliceCursor<'a> {
     /// # Errors
     ///
     /// Returns [`IoError::UnexpectedEof`] if fewer than `N` bytes remain.
+    /// Returns [`IoError::OffsetOverflow`] if `pos + N` overflows `usize`.
     pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
-        let end: usize = self.pos + N;
+        let end: usize = self.pos.checked_add(N).ok_or(IoError::OffsetOverflow {
+            offset: self.pos,
+            len: N,
+        })?;
         if end > self.data.len() {
             return Err(IoError::UnexpectedEof { offset: self.pos });
         }
@@ -134,8 +138,12 @@ impl<'a> SliceCursor<'a> {
     /// # Errors
     ///
     /// Returns [`IoError::UnexpectedEof`] if fewer than `len` bytes remain.
+    /// Returns [`IoError::OffsetOverflow`] if `pos + len` overflows `usize`.
     pub fn read_slice(&mut self, len: usize) -> Result<&'a [u8]> {
-        let end: usize = self.pos + len;
+        let end: usize = self.pos.checked_add(len).ok_or(IoError::OffsetOverflow {
+            offset: self.pos,
+            len,
+        })?;
         if end > self.data.len() {
             return Err(IoError::UnexpectedEof { offset: self.pos });
         }
@@ -146,9 +154,10 @@ impl<'a> SliceCursor<'a> {
 
     /// Peeks at the next `n` bytes without advancing the position.
     ///
-    /// Returns `None` if fewer than `n` bytes remain.
+    /// Returns `None` if fewer than `n` bytes remain or if `pos + n` overflows
+    /// `usize`.
     pub fn peek_bytes(&self, n: usize) -> Option<&[u8]> {
-        let end: usize = self.pos + n;
+        let end: usize = self.pos.checked_add(n)?;
         if end > self.data.len() {
             return None;
         }
@@ -167,8 +176,12 @@ impl<'a> SliceCursor<'a> {
     /// # Errors
     ///
     /// Returns [`IoError::UnexpectedEof`] if `n` exceeds the remaining bytes.
+    /// Returns [`IoError::OffsetOverflow`] if `pos + n` overflows `usize`.
     pub fn skip(&mut self, n: usize) -> Result<()> {
-        let end: usize = self.pos + n;
+        let end: usize = self.pos.checked_add(n).ok_or(IoError::OffsetOverflow {
+            offset: self.pos,
+            len: n,
+        })?;
         if end > self.data.len() {
             return Err(IoError::UnexpectedEof { offset: self.pos });
         }
@@ -310,6 +323,25 @@ mod tests {
 
         // then
         assert_eq!(b, 0x42);
+        Ok(())
+    }
+
+    /// Verifies that read_slice returns OffsetOverflow when pos + len wraps.
+    #[test]
+    fn read_slice_overflow_returns_offset_overflow(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given: position at usize::MAX - 1 via a synthetic cursor.
+        // We fabricate this by constructing a cursor and manually setting its
+        // position through from_offset with a slice sized exactly to that offset.
+        let data: Vec<u8> = vec![0u8; 2];
+        let mut cursor = SliceCursor::from_offset(&data, 1)?;
+        // Advance to 1; now attempt a read of usize::MAX bytes (wraps on add).
+
+        // when
+        let result = cursor.read_slice(usize::MAX);
+
+        // then
+        assert!(matches!(result, Err(IoError::OffsetOverflow { .. })));
         Ok(())
     }
 }

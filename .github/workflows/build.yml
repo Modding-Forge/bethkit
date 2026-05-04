@@ -80,9 +80,20 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # Unit tests only — integration tests require real plugin/archive files.
-      - name: Run unit tests
-        run: cargo test --workspace --lib
+      # Unit tests and integration tests (live tests self-skip when game files
+      # are absent, so --all-targets is safe on CI).
+      - name: Run tests
+        run: cargo test --workspace --all-targets
+
+      # Doc tests run only on Linux to keep the matrix lean.
+      - name: Run doc tests
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --doc --workspace
+
+      # Verify that all public items compile with rustdoc (Linux only).
+      - name: Check documentation
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo doc --workspace --no-deps
 
       - name: Build release DLL
         run: cargo build --release -p bethkit-ffi --features generate-header

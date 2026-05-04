@@ -16,6 +16,13 @@ pub enum IoError {
     /// A decompression operation failed.
     #[error("Decompression failed: {0}")]
     Decompress(String),
+
+    /// Arithmetic overflow computing the end offset of a read operation.
+    ///
+    /// This can only occur when `offset + len` wraps around `usize::MAX`,
+    /// which indicates malformed or adversarial input.
+    #[error("offset overflow at offset {offset} adding {len} bytes")]
+    OffsetOverflow { offset: usize, len: usize },
 }
 
 /// Convenience alias for `Result<T, IoError>`.

@@ -28,7 +28,12 @@ use crate::{cstr_to_str, null_check, set_last_error};
 ///
 /// Created by [`bethkit_plugin_cache_new`].  Must be freed with
 /// [`bethkit_plugin_cache_free`].
-pub struct BethkitPluginCache(PluginCache);
+pub struct BethkitPluginCache {
+    inner: PluginCache,
+    /// Interned NUL-terminated plugin name strings for stable `plugin_name`
+    /// pointers inside [`BethkitGlobalFormId`] values returned by this cache.
+    name_cstrings: Vec<std::ffi::CString>,
+}
 
 /// Creates a new, empty plugin cache.
 ///
@@ -36,7 +41,10 @@ pub struct BethkitPluginCache(PluginCache);
 /// [`bethkit_plugin_cache_free`].
 #[no_mangle]
 pub extern "C" fn bethkit_plugin_cache_new() -> *mut BethkitPluginCache {
-    Box::into_raw(Box::new(BethkitPluginCache(PluginCache::new())))
+    Box::into_raw(Box::new(BethkitPluginCache {
+        inner: PluginCache::new(),
+        name_cstrings: Vec::new(),
+    }))
 }
 
 /// Frees a plugin cache handle.  Passing a null pointer is a no-op.
@@ -90,7 +98,7 @@ pub extern "C" fn bethkit_plugin_cache_add(
     let inner_plugin = boxed_plugin.inner;
 
     // SAFETY: cache is non-null.
-    if let Err(e) = unsafe { &mut *cache }.0.add(name_str, inner_plugin) {
+    if let Err(e) = unsafe { &mut *cache }.inner.add(name_str, inner_plugin) {
         set_last_error(format!("bethkit_plugin_cache_add: {e}"));
         return -1;
     }
@@ -104,7 +112,7 @@ pub extern "C" fn bethkit_plugin_cache_add(
 pub extern "C" fn bethkit_plugin_cache_len(cache: *const BethkitPluginCache) -> usize {
     null_check!(cache, "bethkit_plugin_cache_len", 0);
     // SAFETY: cache is non-null.
-    unsafe { &*cache }.0.len()
+    unsafe { &*cache }.inner.len()
 }
 
 /// Returns the total number of records across all plugins in the cache.
@@ -114,7 +122,7 @@ pub extern "C" fn bethkit_plugin_cache_len(cache: *const BethkitPluginCache) -> 
 pub extern "C" fn bethkit_plugin_cache_record_count(cache: *const BethkitPluginCache) -> usize {
     null_check!(cache, "bethkit_plugin_cache_record_count", 0);
     // SAFETY: cache is non-null.
-    unsafe { &*cache }.0.record_count()
+    unsafe { &*cache }.inner.record_count()
 }
 
 /// Resolves a global FormID (plugin name + object ID) to the winning record.
@@ -156,7 +164,7 @@ pub extern "C" fn bethkit_plugin_cache_resolve(
     };
 
     // SAFETY: cache is non-null.
-    match unsafe { &*cache }.0.resolve_record(&gfid) {
+    match unsafe { &*cache }.inner.resolve_record(&gfid) {
         Some(r) => r as *const _ as *const BethkitRecord,
         None => std::ptr::null(),
     }
@@ -165,24 +173,26 @@ pub extern "C" fn bethkit_plugin_cache_resolve(
 /// Searches all plugins in the cache for a record with the given editor ID.
 ///
 /// On success, writes the global FormID into `*out_gfid` (the `plugin_name`
-/// pointer inside is borrowed from the cache and valid until the cache is
-/// freed) and returns a borrowed pointer to the record.
+/// pointer inside is interned into the cache's name arena and valid until the
+/// cache is freed) and returns a borrowed pointer to the record.
 ///
-/// Returns null if no matching record is found.
+/// Returns null (without setting the last error) if no matching record is
+/// found.  Check the return value to distinguish not-found from an error.
 ///
 /// # Arguments
 ///
-/// * `cache`     — Cache to search. Borrows.
+/// * `cache`     — Cache to search. Borrows mutably (to intern plugin names).
 /// * `edid`      — NUL-terminated editor ID string. Borrows.
 /// * `out_gfid`  — Written with the global FormID on success. May be null
 ///   (in which case the FormID is not written).
 ///
 /// # Errors
 ///
-/// Returns null and sets the last error if `cache` or `edid` is null.
+/// Returns null and sets the last error if `cache` or `edid` is null, or
+/// if `edid` is not valid UTF-8.
 #[no_mangle]
 pub extern "C" fn bethkit_plugin_cache_find_by_editor_id(
-    cache: *const BethkitPluginCache,
+    cache: *mut BethkitPluginCache,
     edid: *const c_char,
     out_gfid: *mut BethkitGlobalFormId,
 ) -> *const BethkitRecord {
@@ -203,24 +213,35 @@ pub extern "C" fn bethkit_plugin_cache_find_by_editor_id(
     };
 
     // SAFETY: cache is non-null.
-    match unsafe { &*cache }.0.find_by_editor_id(edid_str) {
-        None => {
-            set_last_error(format!(
-                "bethkit_plugin_cache_find_by_editor_id: editor ID '{edid_str}' not found"
-            ));
-            std::ptr::null()
-        }
-        Some((gfid, record)) => {
-            if !out_gfid.is_null() {
-                // SAFETY: out_gfid is non-null.
-                unsafe {
-                    *out_gfid = BethkitGlobalFormId {
-                        plugin_name: gfid.plugin_name.as_ptr().cast::<c_char>(),
-                        object_id: gfid.object_id,
-                    };
-                }
-            }
-            record as *const _ as *const BethkitRecord
+    let cache_mut = unsafe { &mut *cache };
+    // Extract plugin_name by value (clone) and object_id so the borrow of
+    // cache_mut.inner ends before we push into cache_mut.name_cstrings.
+    let (plugin_name_owned, object_id, record_ptr) =
+        match cache_mut.inner.find_by_editor_id(edid_str) {
+            // Not found is not an error — return null without touching last_error.
+            None => return std::ptr::null(),
+            Some((gfid, record)) => (
+                gfid.plugin_name.clone(),
+                gfid.object_id,
+                record as *const _ as *const BethkitRecord,
+            ),
+        };
+
+    if !out_gfid.is_null() {
+        // Intern the plugin name as a NUL-terminated CString so the pointer is
+        // stable for the lifetime of the cache.
+        let cs = std::ffi::CString::new(plugin_name_owned.as_bytes()).unwrap_or_else(|_| {
+            std::ffi::CString::new(b"?".as_ref()).expect("single byte is always valid")
+        });
+        let ptr = cs.as_ptr();
+        cache_mut.name_cstrings.push(cs);
+        // SAFETY: out_gfid is non-null.
+        unsafe {
+            *out_gfid = BethkitGlobalFormId {
+                plugin_name: ptr,
+                object_id,
+            };
         }
     }
+    record_ptr
 }
