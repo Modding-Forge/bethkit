@@ -47,9 +47,10 @@ pulling in a heavy dependency or accepting a restrictive licence.
 | `LoadOrder`, `GlobalFormId`, `PluginCache` — multi-plugin record index with
   winning-override semantics and EditorID lookup.
 
-| C ABI (planned)
-| `bethkit-ffi` will expose a stable `extern "C"` surface callable from Python,
+| C ABI (stable, v0.3.1+)
+| `bethkit-ffi` exposes a stable `extern "C"` surface callable from Python,
   C#, C++, and any other language without a Rust toolchain.
+  A pre-generated `bethkit.h` header is included in the repository.
 |===
 
 == Licence

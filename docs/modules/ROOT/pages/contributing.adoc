@@ -29,8 +29,11 @@ cargo build --all
 
 [source,shell]
 ----
-# All unit and integration tests
-cargo test --all
+# All unit, integration, and doc tests
+cargo test --workspace --all-targets
+
+# Doc-comment examples
+cargo test --doc --workspace
 
 # A specific crate only
 cargo test -p bethkit-core
@@ -48,7 +51,7 @@ All pull requests must pass `clippy` with `-D warnings` and `rustfmt` without ch
 
 [source,shell]
 ----
-cargo clippy --all -- -D warnings
+cargo clippy --workspace --tests -- -D warnings
 cargo fmt --all -- --check
 ----
 
@@ -113,8 +116,9 @@ allowed.
 
 == Pull request checklist
 
-* [ ] `cargo test --all` passes
-* [ ] `cargo clippy --all -- -D warnings` passes
+* [ ] `cargo test --workspace --all-targets` passes
+* [ ] `cargo test --doc --workspace` passes
+* [ ] `cargo clippy --workspace --tests -- -D warnings` passes
 * [ ] `cargo fmt --all -- --check` passes
 * [ ] All new public items have `///` doc comments
 * [ ] No `unwrap()` in library code

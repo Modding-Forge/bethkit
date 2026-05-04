@@ -5,7 +5,8 @@ bethkit from any language that can load a shared library and invoke C functions:
 Python, C#, C++, Lua, and others.
 
 A matching `bethkit.h` header is generated automatically by
-https://github.com/mozilla/cbindgen[cbindgen] during the build.
+https://github.com/mozilla/cbindgen[cbindgen] during the build and is tracked
+in version control under `crates/bethkit-ffi/bethkit.h`.
 
 == Building the shared library
 
@@ -33,8 +34,19 @@ The generated header is written to `crates/bethkit-ffi/bethkit.h`.
 Every function that can fail returns `0` on success and `-1` on error.
 Functions that return a pointer signal failure by returning a null pointer.
 
-After any failure, call `bethkit_last_error()` on the **same thread** to
-retrieve a NUL-terminated description of the error:
+The API distinguishes two cases when a function returns null:
+
+Not found::
+  The requested record, file, or string ID does not exist.
+  The function returns null (and writes `0` into `*out_len` where applicable).
+  The last error is **not** set — do not call `bethkit_last_error()`.
+
+Error::
+  A genuine failure occurred (null pointer argument, invalid UTF-8, I/O failure, etc.).
+  The function returns null **and** sets the last error.
+
+After an *error*, call `bethkit_last_error()` on the **same thread** to
+retrieve a NUL-terminated description:
 
 [source,c]
 ----
@@ -332,7 +344,9 @@ Typed field access decodes every subrecord using the built-in SSE schema.
 | Returns the named field at `index` inside a struct value.  Borrowed.
 
 | `void bethkit_field_entries_free(BethkitFieldEntries *entries)`
-| Frees a struct field list.
+| Frees a *detached* struct field list (one not owned by a `BethkitRecordView`).
+  Do **not** call on entries obtained from `bethkit_record_view_field_get` or
+  `bethkit_field_entries_get` — those are freed by `bethkit_record_view_free`.
 
 | `size_t bethkit_field_values_len(const BethkitFieldValues *values)`
 | Returns the number of elements in an array-type field list.
@@ -341,7 +355,9 @@ Typed field access decodes every subrecord using the built-in SSE schema.
 | Returns the field value at `index` inside an array value.  Borrowed.
 
 | `void bethkit_field_values_free(BethkitFieldValues *values)`
-| Frees an array field list.
+| Frees a *detached* array field list (one not owned by a `BethkitRecordView`).
+  Do **not** call on values obtained from `bethkit_record_view_field_get` or
+  `bethkit_field_values_get` — those are freed by `bethkit_record_view_free`.
 |===
 
 ==== BethkitFieldValue — tagged union
@@ -366,9 +382,10 @@ Inspect the `kind` field to determine which arm of the `payload` union is active
 | `BETHKIT_FIELD_VALUE_KIND_MISSING` | — (subrecord was absent)
 |===
 
-`Struct` and `Array` payloads are owned and must be freed with their
-respective `bethkit_field_entries_free` / `bethkit_field_values_free`.
-All other payloads are freed automatically when the `BethkitRecordView` is freed.
+All field values — including `Struct` and `Array` payloads — are owned by the
+`BethkitRecordView` and freed automatically when `bethkit_record_view_free` is called.
+Do **not** call `bethkit_field_entries_free` or `bethkit_field_values_free` on
+any value obtained from a view; doing so causes a double-free.
 
 === Archives — `BethkitArchive`
 
@@ -391,15 +408,21 @@ All other payloads are freed automatically when the `BethkitRecordView` is freed
 | `const BethkitArchiveEntry *bethkit_archive_entry_get(const BethkitArchive *archive, size_t index)`
 | Returns the archive entry at `index`.  Borrowed.
 
-| `const char *bethkit_archive_entry_path(const BethkitArchive *archive, size_t index)`
-| Returns the virtual file path for the entry at `index`.  Borrowed.
+| `char *bethkit_archive_entry_path(const BethkitArchiveEntry *entry)`
+| Returns a newly-allocated NUL-terminated copy of the virtual path of `entry`.
+  Must be freed with `bethkit_archive_entry_path_free`.
 
-| `uint32_t bethkit_archive_entry_uncompressed_size(const BethkitArchive *archive, size_t index)`
-| Returns the uncompressed byte size for the entry at `index`.
+| `void bethkit_archive_entry_path_free(char *ptr)`
+| Frees the string returned by `bethkit_archive_entry_path`.
+
+| `uint32_t bethkit_archive_entry_uncompressed_size(const BethkitArchiveEntry *entry)`
+| Returns the uncompressed byte size for `entry`.
 
 | `uint8_t *bethkit_archive_extract(const BethkitArchive *archive, const char *path, size_t *out_len)`
 | Decompresses the named file into a heap-allocated buffer.
-  Free with `bethkit_bytes_free(ptr, *out_len)`.
+  Free with `bethkit_bytes_free(ptr, *out_len)`. +
+  *Not-found:* returns null and writes `0` into `*out_len` without setting the last error. +
+  *Error:* returns null, writes `0` into `*out_len`, and sets the last error.
 
 | `int32_t bethkit_archive_extract_to_file(const BethkitArchive *archive, const char *path, const char *dest)`
 | Decompresses the named file directly to disk.
@@ -479,8 +502,10 @@ the same pattern.
 | `const BethkitRecord *bethkit_plugin_cache_resolve(const BethkitPluginCache *cache, const char *plugin_name, uint32_t object_id)`
 | Resolves a global FormID to the winning record.  Borrowed.
 
-| `const BethkitRecord *bethkit_plugin_cache_find_by_editor_id(const BethkitPluginCache *cache, const char *edid, BethkitGlobalFormId *out_gfid)`
-| Searches the cache for a record by editor ID.  Borrowed.
+| `const BethkitRecord *bethkit_plugin_cache_find_by_editor_id(BethkitPluginCache *cache, const char *edid, BethkitGlobalFormId *out_gfid)`
+| Searches the cache for a record by editor ID.  Borrowed. +
+  *Not-found:* returns null without setting the last error. +
+  *Error* (null pointer, invalid UTF-8): returns null and sets the last error.
 |===
 
 === String tables — `BethkitStringTable` / `BethkitLocalizationSet`
@@ -505,7 +530,9 @@ the same pattern.
 | Returns the number of entries.
 
 | `const uint8_t *bethkit_string_table_get(const BethkitStringTable *st, uint32_t id, size_t *out_len)`
-| Returns a borrowed pointer to the raw bytes for `id`, or null if absent.
+| Returns a borrowed pointer to the raw bytes for `id`. +
+  *Not-found:* returns null and writes `0` into `*out_len` without setting the last error. +
+  *Error* (null pointer): returns null, writes `0` into `*out_len`, and sets the last error.
 
 | `int32_t bethkit_string_table_insert(BethkitStringTable *st, uint32_t id, const uint8_t *data, size_t len)`
 | Inserts or replaces the entry with `id`.
@@ -529,7 +556,9 @@ the same pattern.
 | Frees the localization set.
 
 | `const uint8_t *bethkit_localization_set_get(const BethkitLocalizationSet *ls, BethkitStringFileKind kind, uint32_t id, size_t *out_len)`
-| Returns borrowed bytes for the string with `id` in the given table.
+| Returns borrowed bytes for the string with `id` in the given table. +
+  *Not-found:* returns null and writes `0` into `*out_len` without setting the last error. +
+  *Error* (null pointer): returns null, writes `0` into `*out_len`, and sets the last error.
 
 | `int32_t bethkit_localization_set_set(BethkitLocalizationSet *ls, BethkitStringFileKind kind, uint32_t id, const uint8_t *data, size_t len)`
 | Inserts or replaces a string.
