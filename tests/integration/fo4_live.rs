@@ -33,14 +33,14 @@ use bethkit_core::{
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_DATA_DIR: &str =
-    r"E:\SteamLibrary\steamapps\common\Fallout 4\Data";
+const DEFAULT_DATA_DIR: &str = r"E:\SteamLibrary\steamapps\common\Fallout 4\Data";
 
 // Record types that are placement / navmesh records and intentionally have no
 // schema entry (REFR, ACHR, etc. are not in the type-level registry).
-const KNOWN_NO_SCHEMA: &[&[u8; 4]] =
-    &[b"NAVM", b"NAVI", b"REFR", b"ACHR", b"PGRE", b"PMIS", b"PARW", b"PBAR",
-      b"PBEA", b"PCON", b"PFLA", b"PHZD", b"ACRE"];
+const KNOWN_NO_SCHEMA: &[&[u8; 4]] = &[
+    b"NAVM", b"NAVI", b"REFR", b"ACHR", b"PGRE", b"PMIS", b"PARW", b"PBAR", b"PBEA", b"PCON",
+    b"PFLA", b"PHZD", b"ACRE",
+];
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -53,7 +53,10 @@ fn find_data_dir() -> Option<PathBuf> {
         if p.exists() {
             return Some(p);
         }
-        eprintln!("FO4_DATA_DIR is set but path does not exist: {}", p.display());
+        eprintln!(
+            "FO4_DATA_DIR is set but path does not exist: {}",
+            p.display()
+        );
         return None;
     }
 
@@ -86,8 +89,7 @@ fn collect_plugins(dir: &Path) -> Vec<PathBuf> {
 
 /// Opens a plugin with FO4 context, returning an error message on failure.
 fn open(path: &Path) -> Result<Plugin, String> {
-    Plugin::open(path, GameContext::fallout4())
-        .map_err(|e| format!("{}: {e}", path.display()))
+    Plugin::open(path, GameContext::fallout4()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Prints a section banner to stderr.
@@ -173,24 +175,39 @@ fn fo4_live_01_dataset_discovery() -> Result<(), Box<dyn std::error::Error>> {
         .map(|m| m.len())
         .sum();
 
-    let esm =
-        paths.iter().filter(|p| p.extension().map(|e| e == "esm").unwrap_or(false)).count();
-    let esp =
-        paths.iter().filter(|p| p.extension().map(|e| e == "esp").unwrap_or(false)).count();
-    let esl =
-        paths.iter().filter(|p| p.extension().map(|e| e == "esl").unwrap_or(false)).count();
+    let esm = paths
+        .iter()
+        .filter(|p| p.extension().map(|e| e == "esm").unwrap_or(false))
+        .count();
+    let esp = paths
+        .iter()
+        .filter(|p| p.extension().map(|e| e == "esp").unwrap_or(false))
+        .count();
+    let esl = paths
+        .iter()
+        .filter(|p| p.extension().map(|e| e == "esl").unwrap_or(false))
+        .count();
 
     eprintln!("  Data dir : {}", dir.display());
     eprintln!("  ESM      : {esm}");
     eprintln!("  ESP      : {esp}");
     eprintln!("  ESL      : {esl}");
-    eprintln!("  Total    : {} files  ({})", paths.len(), fmt_bytes(total_bytes));
+    eprintln!(
+        "  Total    : {} files  ({})",
+        paths.len(),
+        fmt_bytes(total_bytes)
+    );
 
     assert!(
-        paths.iter().any(|p| p.file_name().map(|n| n == "Fallout4.esm").unwrap_or(false)),
+        paths
+            .iter()
+            .any(|p| p.file_name().map(|n| n == "Fallout4.esm").unwrap_or(false)),
         "Fallout4.esm not found in Data directory"
     );
-    assert!(paths.len() >= 5, "too few plugin files — expected at least 5");
+    assert!(
+        paths.len() >= 5,
+        "too few plugin files — expected at least 5"
+    );
 
     Ok(())
 }
@@ -201,7 +218,9 @@ fn fo4_live_01_dataset_discovery() -> Result<(), Box<dyn std::error::Error>> {
 /// without returning an error.
 #[test]
 fn fo4_live_02_all_plugins_open() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("ALL PLUGINS OPEN");
 
     let paths = collect_plugins(&dir);
@@ -236,7 +255,9 @@ fn fo4_live_02_all_plugins_open() -> Result<(), Box<dyn std::error::Error>> {
 /// ASCII alphanumeric bytes or `_`.
 #[test]
 fn fo4_live_03_all_signatures_are_valid_ascii() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("RECORD SIGNATURE VALIDITY");
 
     let paths = collect_plugins(&dir);
@@ -249,7 +270,11 @@ fn fo4_live_03_all_signatures_are_valid_ascii() -> Result<(), Box<dyn std::error
             for record in group.records_recursive() {
                 total_records += 1;
                 let sig = record.header.signature;
-                if !sig.0.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+                if !sig
+                    .0
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                {
                     bad.push(format!(
                         "{}: invalid signature {sig} at FormID {:08X}",
                         path.file_name().unwrap().to_string_lossy(),
@@ -276,7 +301,9 @@ fn fo4_live_03_all_signatures_are_valid_ascii() -> Result<(), Box<dyn std::error
 /// Every plugin must have a recognised PluginKind.
 #[test]
 fn fo4_live_04_plugin_kinds_are_valid() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("PLUGIN KINDS");
 
     let paths = collect_plugins(&dir);
@@ -287,7 +314,7 @@ fn fo4_live_04_plugin_kinds_are_valid() -> Result<(), Box<dyn std::error::Error>
         let label = match plugin.kind() {
             PluginKind::Plugin => "Plugin (.esp)",
             PluginKind::Master => "Master (.esm)",
-            PluginKind::Light  => "Light  (.esl)",
+            PluginKind::Light => "Light  (.esl)",
             PluginKind::Medium => "Medium",
             PluginKind::Update => "Update",
         };
@@ -306,7 +333,9 @@ fn fo4_live_04_plugin_kinds_are_valid() -> Result<(), Box<dyn std::error::Error>
 /// The HEDR version float must be positive and finite for every plugin.
 #[test]
 fn fo4_live_05_hedr_versions_are_valid() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("HEDR VERSION VALIDITY");
 
     let paths = collect_plugins(&dir);
@@ -349,7 +378,9 @@ fn fo4_live_05_hedr_versions_are_valid() -> Result<(), Box<dyn std::error::Error
 /// All MAST subrecords must be non-empty, printable ASCII strings.
 #[test]
 fn fo4_live_06_master_filenames_are_valid() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("MASTER FILENAME VALIDITY");
 
     let paths = collect_plugins(&dir);
@@ -396,7 +427,9 @@ fn fo4_live_06_master_filenames_are_valid() -> Result<(), Box<dyn std::error::Er
 /// must not return an error.
 #[test]
 fn fo4_live_07_all_subrecords_parse() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("SUBRECORD PARSE COVERAGE");
 
     let paths = collect_plugins(&dir);
@@ -442,7 +475,9 @@ fn fo4_live_07_all_subrecords_parse() -> Result<(), Box<dyn std::error::Error>> 
 /// Every EDID (Editor ID) subrecord must decode to a valid UTF-8 string.
 #[test]
 fn fo4_live_08_edid_subrecords_are_valid_utf8() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("EDID UTF-8 VALIDITY");
 
     let paths = collect_plugins(&dir);
@@ -455,7 +490,9 @@ fn fo4_live_08_edid_subrecords_are_valid_utf8() -> Result<(), Box<dyn std::error
         let Ok(plugin) = open(path) else { continue };
         for group in plugin.groups() {
             for record in group.records_recursive() {
-                let Ok(Some(sr)) = record.get(sig_edid) else { continue };
+                let Ok(Some(sr)) = record.get(sig_edid) else {
+                    continue;
+                };
                 edid_count += 1;
                 match sr.as_zstring() {
                     Ok(s) => max_len = max_len.max(s.len()),
@@ -488,7 +525,9 @@ fn fo4_live_08_edid_subrecords_are_valid_utf8() -> Result<(), Box<dyn std::error
 /// non-empty subrecord list.
 #[test]
 fn fo4_live_09_compressed_records_decompress() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("COMPRESSED RECORD DECOMPRESSION");
 
     let paths = collect_plugins(&dir);
@@ -525,15 +564,16 @@ fn fo4_live_09_compressed_records_decompress() -> Result<(), Box<dyn std::error:
     } else {
         0.0
     };
-    eprintln!(
-        "  Compressed : {compressed_count} / {total_records} records  ({pct:.1}%)"
-    );
+    eprintln!("  Compressed : {compressed_count} / {total_records} records  ({pct:.1}%)");
 
     if !failures.is_empty() {
         for f in failures.iter().take(20) {
             eprintln!("  FAIL: {f}");
         }
-        panic!("{} compressed record(s) failed to decompress", failures.len());
+        panic!(
+            "{} compressed record(s) failed to decompress",
+            failures.len()
+        );
     }
 
     Ok(())
@@ -545,7 +585,9 @@ fn fo4_live_09_compressed_records_decompress() -> Result<(), Box<dyn std::error:
 /// only.
 #[test]
 fn fo4_live_10_record_flag_inventory() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("RECORD FLAG INVENTORY");
 
     let paths = collect_plugins(&dir);
@@ -598,7 +640,9 @@ fn fo4_live_10_record_flag_inventory() -> Result<(), Box<dyn std::error::Error>>
 /// tracked as a metric, not an invariant.
 #[test]
 fn fo4_live_11_schema_coverage() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("FO4 SCHEMA COVERAGE");
 
     let paths = collect_plugins(&dir);
@@ -665,7 +709,9 @@ fn fo4_live_11_schema_coverage() -> Result<(), Box<dyn std::error::Error>> {
 /// decode errors.
 #[test]
 fn fo4_live_12_schema_field_decode() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("SCHEMA-GUIDED FIELD DECODE (RecordView)");
 
     let paths = collect_plugins(&dir);
@@ -737,11 +783,17 @@ fn fo4_live_12_schema_field_decode() -> Result<(), Box<dyn std::error::Error>> {
 /// and prints a detailed breakdown.
 #[test]
 fn fo4_live_13_fallout4_esm_deep_analysis() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("FALLOUT4.ESM DEEP ANALYSIS");
 
     let esm_path = dir.join("Fallout4.esm");
-    assert!(esm_path.exists(), "Fallout4.esm not found at {}", esm_path.display());
+    assert!(
+        esm_path.exists(),
+        "Fallout4.esm not found at {}",
+        esm_path.display()
+    );
 
     let file_size = std::fs::metadata(&esm_path)?.len();
     eprintln!("  File size : {}", fmt_bytes(file_size));
@@ -800,7 +852,10 @@ fn fo4_live_13_fallout4_esm_deep_analysis() -> Result<(), Box<dyn std::error::Er
         eprintln!("    {}  {:>8}  ({pct:4.1}%)", Signature(*sig), count);
     }
 
-    assert_eq!(failed_subrecords, 0, "Fallout4.esm had subrecord parse failures");
+    assert_eq!(
+        failed_subrecords, 0,
+        "Fallout4.esm had subrecord parse failures"
+    );
 
     Ok(())
 }
@@ -812,7 +867,9 @@ fn fo4_live_13_fallout4_esm_deep_analysis() -> Result<(), Box<dyn std::error::Er
 /// Does not assert performance numbers — prints a benchmark summary only.
 #[test]
 fn fo4_live_14_throughput_benchmark() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(dir) = find_data_dir() else { return Ok(()); };
+    let Some(dir) = find_data_dir() else {
+        return Ok(());
+    };
     banner("THROUGHPUT BENCHMARK");
 
     let paths = collect_plugins(&dir);

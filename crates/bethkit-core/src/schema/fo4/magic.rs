@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Fallout 4 magic and effect record schemas.
 //!
@@ -9,10 +9,9 @@ use crate::schema::{FieldDef, FieldType, RecordSchema, SubRecordDef};
 use crate::types::Signature;
 
 use super::common::{
-    CTDA_DEF, DESC_DEF, EDID_DEF, EFID_DEF, EFIT_DEF, FULL_DEF, KWDA_DEF, KSIZ_DEF, MODL_DEF,
+    CTDA_DEF, DESC_DEF, EDID_DEF, EFID_DEF, EFIT_DEF, FULL_DEF, KSIZ_DEF, KWDA_DEF, MODL_DEF,
     OBND_DEF, VMAD_DEF,
 };
-
 
 static SPEL_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
@@ -32,9 +31,11 @@ static SPEL_MEMBERS: [SubRecordDef; 8] = [
 ];
 
 /// SPEL — spell.
-pub static SPEL_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"SPEL"), name: "Spell", members: &SPEL_MEMBERS };
-
+pub static SPEL_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"SPEL"),
+    name: "Spell",
+    members: &SPEL_MEMBERS,
+};
 
 static MGEF_MEMBERS: [SubRecordDef; 7] = [
     EDID_DEF,
@@ -53,9 +54,11 @@ static MGEF_MEMBERS: [SubRecordDef; 7] = [
 ];
 
 /// MGEF — magic effect.
-pub static MGEF_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"MGEF"), name: "Magic Effect", members: &MGEF_MEMBERS };
-
+pub static MGEF_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"MGEF"),
+    name: "Magic Effect",
+    members: &MGEF_MEMBERS,
+};
 
 static ENCH_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -72,9 +75,11 @@ static ENCH_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// ENCH — object effect / enchantment.
-pub static ENCH_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ENCH"), name: "Object Effect", members: &ENCH_MEMBERS };
-
+pub static ENCH_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ENCH"),
+    name: "Object Effect",
+    members: &ENCH_MEMBERS,
+};
 
 static RFCT_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -95,9 +100,11 @@ static RFCT_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// RFCT — visual effect.
-pub static RFCT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"RFCT"), name: "Visual Effect", members: &RFCT_MEMBERS };
-
+pub static RFCT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"RFCT"),
+    name: "Visual Effect",
+    members: &RFCT_MEMBERS,
+};
 
 static PROJ_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -113,9 +120,11 @@ static PROJ_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// PROJ — projectile.
-pub static PROJ_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"PROJ"), name: "Projectile", members: &PROJ_MEMBERS };
-
+pub static PROJ_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"PROJ"),
+    name: "Projectile",
+    members: &PROJ_MEMBERS,
+};
 
 static EXPL_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -131,9 +140,11 @@ static EXPL_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// EXPL — explosion.
-pub static EXPL_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"EXPL"), name: "Explosion", members: &EXPL_MEMBERS };
-
+pub static EXPL_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"EXPL"),
+    name: "Explosion",
+    members: &EXPL_MEMBERS,
+};
 
 static HAZD_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -149,9 +160,11 @@ static HAZD_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// HAZD — hazard.
-pub static HAZD_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"HAZD"), name: "Hazard", members: &HAZD_MEMBERS };
-
+pub static HAZD_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"HAZD"),
+    name: "Hazard",
+    members: &HAZD_MEMBERS,
+};
 
 static PERK_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
@@ -183,9 +196,11 @@ static PERK_MEMBERS: [SubRecordDef; 8] = [
 ];
 
 /// PERK — perk.
-pub static PERK_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"PERK"), name: "Perk", members: &PERK_MEMBERS };
-
+pub static PERK_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"PERK"),
+    name: "Perk",
+    members: &PERK_MEMBERS,
+};
 
 static IMGS_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -199,9 +214,11 @@ static IMGS_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// IMGS — image space.
-pub static IMGS_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"IMGS"), name: "Image Space", members: &IMGS_MEMBERS };
-
+pub static IMGS_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"IMGS"),
+    name: "Image Space",
+    members: &IMGS_MEMBERS,
+};
 
 static IMAD_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -220,7 +237,6 @@ pub static IMAD_SCHEMA: RecordSchema = RecordSchema {
     name: "Image Space Adapter",
     members: &IMAD_MEMBERS,
 };
-
 
 static IPCT_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -242,9 +258,11 @@ static IPCT_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// IPCT — impact.
-pub static IPCT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"IPCT"), name: "Impact", members: &IPCT_MEMBERS };
-
+pub static IPCT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"IPCT"),
+    name: "Impact",
+    members: &IPCT_MEMBERS,
+};
 
 static IPDS_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -258,9 +276,11 @@ static IPDS_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// IPDS — impact data set.
-pub static IPDS_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"IPDS"), name: "Impact Data Set", members: &IPDS_MEMBERS };
-
+pub static IPDS_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"IPDS"),
+    name: "Impact Data Set",
+    members: &IPDS_MEMBERS,
+};
 
 static ADDN_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -276,9 +296,11 @@ static ADDN_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// ADDN — addon node.
-pub static ADDN_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ADDN"), name: "Addon Node", members: &ADDN_MEMBERS };
-
+pub static ADDN_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ADDN"),
+    name: "Addon Node",
+    members: &ADDN_MEMBERS,
+};
 
 static SPGD_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -297,7 +319,6 @@ pub static SPGD_SCHEMA: RecordSchema = RecordSchema {
     name: "Shader Particle Geometry Data",
     members: &SPGD_MEMBERS,
 };
-
 
 static EFSH_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -318,8 +339,11 @@ static EFSH_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// EFSH — effect shader.
-pub static EFSH_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"EFSH"), name: "Effect Shader", members: &EFSH_MEMBERS };
+pub static EFSH_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"EFSH"),
+    name: "Effect Shader",
+    members: &EFSH_MEMBERS,
+};
 
 // Suppress lint for imports not directly used in static field position.
 // NOTE: DMGT is intentionally not defined here; it lives in simple.rs to avoid

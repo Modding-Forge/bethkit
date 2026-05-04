@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Fallout 4 world and environment record schemas.
 //!
@@ -9,24 +9,19 @@ use crate::schema::{FieldDef, FieldType, RecordSchema, SubRecordDef};
 use crate::types::Signature;
 
 use super::common::{
-    CTDA_DEF, DESC_DEF, EDID_DEF, FULL_DEF, KWDA_DEF, KSIZ_DEF, MODL_DEF, OBND_DEF, VMAD_DEF,
+    CTDA_DEF, DESC_DEF, EDID_DEF, FULL_DEF, KSIZ_DEF, KWDA_DEF, MODL_DEF, OBND_DEF, VMAD_DEF,
 };
 
-
 static ACTI_MEMBERS: [SubRecordDef; 7] = [
-    EDID_DEF,
-    VMAD_DEF,
-    OBND_DEF,
-    FULL_DEF,
-    MODL_DEF,
-    KSIZ_DEF,
-    KWDA_DEF,
+    EDID_DEF, VMAD_DEF, OBND_DEF, FULL_DEF, MODL_DEF, KSIZ_DEF, KWDA_DEF,
 ];
 
 /// ACTI — activator.
-pub static ACTI_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ACTI"), name: "Activator", members: &ACTI_MEMBERS };
-
+pub static ACTI_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ACTI"),
+    name: "Activator",
+    members: &ACTI_MEMBERS,
+};
 
 static TACT_MEMBERS: [SubRecordDef; 6] = [
     EDID_DEF,
@@ -50,7 +45,6 @@ pub static TACT_SCHEMA: RecordSchema = RecordSchema {
     members: &TACT_MEMBERS,
 };
 
-
 static STAT_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
     OBND_DEF,
@@ -65,9 +59,11 @@ static STAT_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// STAT — static object.
-pub static STAT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"STAT"), name: "Static Object", members: &STAT_MEMBERS };
-
+pub static STAT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"STAT"),
+    name: "Static Object",
+    members: &STAT_MEMBERS,
+};
 
 static GRAS_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -82,9 +78,11 @@ static GRAS_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// GRAS — grass.
-pub static GRAS_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"GRAS"), name: "Grass", members: &GRAS_MEMBERS };
-
+pub static GRAS_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"GRAS"),
+    name: "Grass",
+    members: &GRAS_MEMBERS,
+};
 
 static TREE_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -101,9 +99,11 @@ static TREE_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// TREE — tree.
-pub static TREE_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"TREE"), name: "Tree", members: &TREE_MEMBERS };
-
+pub static TREE_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"TREE"),
+    name: "Tree",
+    members: &TREE_MEMBERS,
+};
 
 static FLOR_MEMBERS: [SubRecordDef; 6] = [
     EDID_DEF,
@@ -121,9 +121,11 @@ static FLOR_MEMBERS: [SubRecordDef; 6] = [
 ];
 
 /// FLOR — flora.
-pub static FLOR_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"FLOR"), name: "Flora", members: &FLOR_MEMBERS };
-
+pub static FLOR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"FLOR"),
+    name: "Flora",
+    members: &FLOR_MEMBERS,
+};
 
 static MSTT_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -140,9 +142,11 @@ static MSTT_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// MSTT — movable static.
-pub static MSTT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"MSTT"), name: "Movable Static", members: &MSTT_MEMBERS };
-
+pub static MSTT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"MSTT"),
+    name: "Movable Static",
+    members: &MSTT_MEMBERS,
+};
 
 static LTEX_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -163,20 +167,49 @@ static LTEX_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// LTEX — land texture.
-pub static LTEX_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"LTEX"), name: "Land Texture", members: &LTEX_MEMBERS };
-
+pub static LTEX_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"LTEX"),
+    name: "Land Texture",
+    members: &LTEX_MEMBERS,
+};
 
 static LIGH_DATA_FIELDS: [FieldDef; 9] = [
-    FieldDef { name: "Time", kind: FieldType::Int32 },
-    FieldDef { name: "Radius", kind: FieldType::UInt32 },
-    FieldDef { name: "Color", kind: FieldType::UInt32 },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Falloff Exponent", kind: FieldType::Float32 },
-    FieldDef { name: "FOV", kind: FieldType::Float32 },
-    FieldDef { name: "Near Clip", kind: FieldType::Float32 },
-    FieldDef { name: "Period", kind: FieldType::Float32 },
-    FieldDef { name: "Intensity Amplitude", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Time",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Radius",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Color",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Falloff Exponent",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "FOV",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Near Clip",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Period",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Intensity Amplitude",
+        kind: FieldType::Float32,
+    },
 ];
 
 static LIGH_MEMBERS: [SubRecordDef; 5] = [
@@ -194,9 +227,11 @@ static LIGH_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// LIGH — light.
-pub static LIGH_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"LIGH"), name: "Light", members: &LIGH_MEMBERS };
-
+pub static LIGH_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"LIGH"),
+    name: "Light",
+    members: &LIGH_MEMBERS,
+};
 
 static WATR_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -218,9 +253,11 @@ static WATR_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// WATR — water type.
-pub static WATR_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"WATR"), name: "Water Type", members: &WATR_MEMBERS };
-
+pub static WATR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"WATR"),
+    name: "Water Type",
+    members: &WATR_MEMBERS,
+};
 
 static WTHR_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -248,9 +285,11 @@ static WTHR_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// WTHR — weather.
-pub static WTHR_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"WTHR"), name: "Weather", members: &WTHR_MEMBERS };
-
+pub static WTHR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"WTHR"),
+    name: "Weather",
+    members: &WTHR_MEMBERS,
+};
 
 static CLMT_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -271,9 +310,11 @@ static CLMT_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// CLMT — climate.
-pub static CLMT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"CLMT"), name: "Climate", members: &CLMT_MEMBERS };
-
+pub static CLMT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"CLMT"),
+    name: "Climate",
+    members: &CLMT_MEMBERS,
+};
 
 static ASPC_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -295,9 +336,11 @@ static ASPC_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// ASPC — acoustic space.
-pub static ASPC_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ASPC"), name: "Acoustic Space", members: &ASPC_MEMBERS };
-
+pub static ASPC_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ASPC"),
+    name: "Acoustic Space",
+    members: &ASPC_MEMBERS,
+};
 
 static ECZN_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -311,9 +354,11 @@ static ECZN_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// ECZN — encounter zone.
-pub static ECZN_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ECZN"), name: "Encounter Zone", members: &ECZN_MEMBERS };
-
+pub static ECZN_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ECZN"),
+    name: "Encounter Zone",
+    members: &ECZN_MEMBERS,
+};
 
 static CELL_MEMBERS: [SubRecordDef; 6] = [
     EDID_DEF,
@@ -349,9 +394,11 @@ static CELL_MEMBERS: [SubRecordDef; 6] = [
 ];
 
 /// CELL — cell.
-pub static CELL_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"CELL"), name: "Cell", members: &CELL_MEMBERS };
-
+pub static CELL_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"CELL"),
+    name: "Cell",
+    members: &CELL_MEMBERS,
+};
 
 static WRLD_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
@@ -401,9 +448,11 @@ static WRLD_MEMBERS: [SubRecordDef; 8] = [
 ];
 
 /// WRLD — worldspace.
-pub static WRLD_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"WRLD"), name: "Worldspace", members: &WRLD_MEMBERS };
-
+pub static WRLD_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"WRLD"),
+    name: "Worldspace",
+    members: &WRLD_MEMBERS,
+};
 
 static LAND_MEMBERS: [SubRecordDef; 3] = [
     SubRecordDef {
@@ -430,9 +479,11 @@ static LAND_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// LAND — landscape / terrain.
-pub static LAND_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"LAND"), name: "Landscape", members: &LAND_MEMBERS };
-
+pub static LAND_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"LAND"),
+    name: "Landscape",
+    members: &LAND_MEMBERS,
+};
 
 static REGN_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -460,9 +511,11 @@ static REGN_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// REGN — region.
-pub static REGN_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"REGN"), name: "Region", members: &REGN_MEMBERS };
-
+pub static REGN_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"REGN"),
+    name: "Region",
+    members: &REGN_MEMBERS,
+};
 
 static NAVM_MEMBERS: [SubRecordDef; 2] = [
     SubRecordDef {
@@ -482,9 +535,11 @@ static NAVM_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// NAVM — navigation mesh.
-pub static NAVM_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"NAVM"), name: "Navigation Mesh", members: &NAVM_MEMBERS };
-
+pub static NAVM_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"NAVM"),
+    name: "Navigation Mesh",
+    members: &NAVM_MEMBERS,
+};
 
 static NAVI_MEMBERS: [SubRecordDef; 2] = [
     SubRecordDef {
@@ -510,7 +565,6 @@ pub static NAVI_SCHEMA: RecordSchema = RecordSchema {
     members: &NAVI_MEMBERS,
 };
 
-
 static LSCR_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
     SubRecordDef {
@@ -525,9 +579,11 @@ static LSCR_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// LSCR — load screen.
-pub static LSCR_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"LSCR"), name: "Load Screen", members: &LSCR_MEMBERS };
-
+pub static LSCR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"LSCR"),
+    name: "Load Screen",
+    members: &LSCR_MEMBERS,
+};
 
 static LENS_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -548,8 +604,11 @@ static LENS_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// LENS — lens flare.
-pub static LENS_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"LENS"), name: "Lens Flare", members: &LENS_MEMBERS };
+pub static LENS_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"LENS"),
+    name: "Lens Flare",
+    members: &LENS_MEMBERS,
+};
 
 // Suppress lint for imported items not used in static positions.
 const _: () = {

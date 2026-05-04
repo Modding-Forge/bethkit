@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Fallout 4 quest and dialogue record schemas.
 //!
@@ -9,7 +9,6 @@ use crate::types::Signature;
 
 use super::common::{CTDA_DEF, EDID_DEF, FULL_DEF, VMAD_DEF};
 use super::enums::FO4_QUEST_TYPE_ENUM;
-
 
 static QUST_MEMBERS: [SubRecordDef; 7] = [
     EDID_DEF,
@@ -40,9 +39,11 @@ static QUST_MEMBERS: [SubRecordDef; 7] = [
 ];
 
 /// QUST — quest.
-pub static QUST_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"QUST"), name: "Quest", members: &QUST_MEMBERS };
-
+pub static QUST_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"QUST"),
+    name: "Quest",
+    members: &QUST_MEMBERS,
+};
 
 static DIAL_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -71,9 +72,11 @@ static DIAL_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// DIAL — dialogue topic.
-pub static DIAL_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"DIAL"), name: "Dialogue Topic", members: &DIAL_MEMBERS };
-
+pub static DIAL_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"DIAL"),
+    name: "Dialogue Topic",
+    members: &DIAL_MEMBERS,
+};
 
 static INFO_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -96,9 +99,11 @@ static INFO_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// INFO — dialogue response record.
-pub static INFO_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"INFO"), name: "Dialogue Response", members: &INFO_MEMBERS };
-
+pub static INFO_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"INFO"),
+    name: "Dialogue Response",
+    members: &INFO_MEMBERS,
+};
 
 static DLBR_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -126,9 +131,11 @@ static DLBR_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// DLBR — dialogue branch.
-pub static DLBR_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"DLBR"), name: "Dialogue Branch", members: &DLBR_MEMBERS };
-
+pub static DLBR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"DLBR"),
+    name: "Dialogue Branch",
+    members: &DLBR_MEMBERS,
+};
 
 static DLVW_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -149,9 +156,11 @@ static DLVW_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// DLVW — dialogue view.
-pub static DLVW_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"DLVW"), name: "Dialogue View", members: &DLVW_MEMBERS };
-
+pub static DLVW_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"DLVW"),
+    name: "Dialogue View",
+    members: &DLVW_MEMBERS,
+};
 
 static SCEN_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -168,9 +177,11 @@ static SCEN_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// SCEN — scene.
-pub static SCEN_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"SCEN"), name: "Scene", members: &SCEN_MEMBERS };
-
+pub static SCEN_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"SCEN"),
+    name: "Scene",
+    members: &SCEN_MEMBERS,
+};
 
 static SMBN_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -190,7 +201,6 @@ pub static SMBN_SCHEMA: RecordSchema = RecordSchema {
     name: "Story Manager Branch Node",
     members: &SMBN_MEMBERS,
 };
-
 
 static SMQN_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -217,7 +227,6 @@ pub static SMQN_SCHEMA: RecordSchema = RecordSchema {
     name: "Story Manager Quest Node",
     members: &SMQN_MEMBERS,
 };
-
 
 static SMEN_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,

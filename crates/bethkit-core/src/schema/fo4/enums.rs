@@ -174,4 +174,6 @@ pub static NOTE_TYPE_ENUM: EnumDef = EnumDef {
 
 // NOTE: FO4_SOUND_LEVEL_ENUM is defined but not yet wired into a SubRecordDef;
 // NOTE: it will be used by SNDR's LNAM field once that subrecord is detailed.
-const _: () = { let _ = &FO4_SOUND_LEVEL_ENUM; };
+const _: () = {
+    let _ = &FO4_SOUND_LEVEL_ENUM;
+};

@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Fallout 4 simple / standalone record schemas.
 //!
@@ -12,11 +12,19 @@ use crate::types::Signature;
 use super::common::{DESC_DEF, EDID_DEF, FULL_DEF, OBND_DEF};
 use super::enums::{FO4_BIPED_OBJECT_ENUM, NOTE_TYPE_ENUM, OMOD_PROPERTY_ENUM};
 
-
 static TES4_HEDR_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Version", kind: FieldType::Float32 },
-    FieldDef { name: "Num Records", kind: FieldType::UInt32 },
-    FieldDef { name: "Next Object ID", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Version",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Num Records",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Next Object ID",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static TES4_MEMBERS: [SubRecordDef; 5] = [
@@ -58,9 +66,11 @@ static TES4_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// TES4 — plugin file header.
-pub static TES4_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"TES4"), name: "Plugin File Header", members: &TES4_MEMBERS };
-
+pub static TES4_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"TES4"),
+    name: "Plugin File Header",
+    members: &TES4_MEMBERS,
+};
 
 static KYWD_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -74,9 +84,11 @@ static KYWD_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// KYWD — keyword.
-pub static KYWD_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"KYWD"), name: "Keyword", members: &KYWD_MEMBERS };
-
+pub static KYWD_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"KYWD"),
+    name: "Keyword",
+    members: &KYWD_MEMBERS,
+};
 
 static AACT_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -90,9 +102,11 @@ static AACT_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// AACT — action.
-pub static AACT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"AACT"), name: "Action", members: &AACT_MEMBERS };
-
+pub static AACT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"AACT"),
+    name: "Action",
+    members: &AACT_MEMBERS,
+};
 
 static TXST_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -114,9 +128,11 @@ static TXST_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// TXST — texture set.
-pub static TXST_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"TXST"), name: "Texture Set", members: &TXST_MEMBERS };
-
+pub static TXST_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"TXST"),
+    name: "Texture Set",
+    members: &TXST_MEMBERS,
+};
 
 static GLOB_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -137,9 +153,11 @@ static GLOB_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// GLOB — global variable.
-pub static GLOB_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"GLOB"), name: "Global Variable", members: &GLOB_MEMBERS };
-
+pub static GLOB_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"GLOB"),
+    name: "Global Variable",
+    members: &GLOB_MEMBERS,
+};
 
 static GMST_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -153,9 +171,11 @@ static GMST_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// GMST — game setting.
-pub static GMST_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"GMST"), name: "Game Setting", members: &GMST_MEMBERS };
-
+pub static GMST_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"GMST"),
+    name: "Game Setting",
+    members: &GMST_MEMBERS,
+};
 
 static AVIF_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -177,7 +197,6 @@ pub static AVIF_SCHEMA: RecordSchema = RecordSchema {
     members: &AVIF_MEMBERS,
 };
 
-
 static LCRT_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -196,7 +215,6 @@ pub static LCRT_SCHEMA: RecordSchema = RecordSchema {
     members: &LCRT_MEMBERS,
 };
 
-
 static VTYP_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -209,9 +227,11 @@ static VTYP_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// VTYP — voice type.
-pub static VTYP_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"VTYP"), name: "Voice Type", members: &VTYP_MEMBERS };
-
+pub static VTYP_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"VTYP"),
+    name: "Voice Type",
+    members: &VTYP_MEMBERS,
+};
 
 static MATT_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -233,9 +253,11 @@ static MATT_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// MATT — material type.
-pub static MATT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"MATT"), name: "Material Type", members: &MATT_MEMBERS };
-
+pub static MATT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"MATT"),
+    name: "Material Type",
+    members: &MATT_MEMBERS,
+};
 
 static COLL_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -257,9 +279,11 @@ static COLL_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// COLL — collision layer.
-pub static COLL_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"COLL"), name: "Collision Layer", members: &COLL_MEMBERS };
-
+pub static COLL_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"COLL"),
+    name: "Collision Layer",
+    members: &COLL_MEMBERS,
+};
 
 static FLST_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -273,9 +297,11 @@ static FLST_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// FLST — FormID list.
-pub static FLST_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"FLST"), name: "FormID List", members: &FLST_MEMBERS };
-
+pub static FLST_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"FLST"),
+    name: "FormID List",
+    members: &FLST_MEMBERS,
+};
 
 static LCTN_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -290,9 +316,11 @@ static LCTN_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// LCTN — location.
-pub static LCTN_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"LCTN"), name: "Location", members: &LCTN_MEMBERS };
-
+pub static LCTN_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"LCTN"),
+    name: "Location",
+    members: &LCTN_MEMBERS,
+};
 
 static MESG_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -308,9 +336,11 @@ static MESG_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// MESG — message.
-pub static MESG_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"MESG"), name: "Message", members: &MESG_MEMBERS };
-
+pub static MESG_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"MESG"),
+    name: "Message",
+    members: &MESG_MEMBERS,
+};
 
 static DOBJ_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -330,7 +360,6 @@ pub static DOBJ_SCHEMA: RecordSchema = RecordSchema {
     members: &DOBJ_MEMBERS,
 };
 
-
 static LGTM_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -343,9 +372,11 @@ static LGTM_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// LGTM — lighting template.
-pub static LGTM_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"LGTM"), name: "Lighting Template", members: &LGTM_MEMBERS };
-
+pub static LGTM_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"LGTM"),
+    name: "Lighting Template",
+    members: &LGTM_MEMBERS,
+};
 
 static IDLM_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -360,9 +391,11 @@ static IDLM_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// IDLM — idle marker.
-pub static IDLM_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"IDLM"), name: "Idle Marker", members: &IDLM_MEMBERS };
-
+pub static IDLM_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"IDLM"),
+    name: "Idle Marker",
+    members: &IDLM_MEMBERS,
+};
 
 static ANIO_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -376,9 +409,11 @@ static ANIO_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// ANIO — animated object.
-pub static ANIO_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ANIO"), name: "Animated Object", members: &ANIO_MEMBERS };
-
+pub static ANIO_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ANIO"),
+    name: "Animated Object",
+    members: &ANIO_MEMBERS,
+};
 
 static HDPT_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -407,9 +442,11 @@ static HDPT_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// HDPT — head part.
-pub static HDPT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"HDPT"), name: "Head Part", members: &HDPT_MEMBERS };
-
+pub static HDPT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"HDPT"),
+    name: "Head Part",
+    members: &HDPT_MEMBERS,
+};
 
 static MOVT_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -424,9 +461,11 @@ static MOVT_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// MOVT — movement type.
-pub static MOVT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"MOVT"), name: "Movement Type", members: &MOVT_MEMBERS };
-
+pub static MOVT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"MOVT"),
+    name: "Movement Type",
+    members: &MOVT_MEMBERS,
+};
 
 static EQUP_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -447,9 +486,11 @@ static EQUP_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// EQUP — equip slot.
-pub static EQUP_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"EQUP"), name: "Equip Slot", members: &EQUP_MEMBERS };
-
+pub static EQUP_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"EQUP"),
+    name: "Equip Slot",
+    members: &EQUP_MEMBERS,
+};
 
 static RELA_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -463,9 +504,11 @@ static RELA_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// RELA — relationship.
-pub static RELA_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"RELA"), name: "Relationship", members: &RELA_MEMBERS };
-
+pub static RELA_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"RELA"),
+    name: "Relationship",
+    members: &RELA_MEMBERS,
+};
 
 static DEBR_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -479,9 +522,11 @@ static DEBR_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// DEBR — debris.
-pub static DEBR_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"DEBR"), name: "Debris", members: &DEBR_MEMBERS };
-
+pub static DEBR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"DEBR"),
+    name: "Debris",
+    members: &DEBR_MEMBERS,
+};
 
 static ASTP_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -509,9 +554,11 @@ static ASTP_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// ASTP — association type.
-pub static ASTP_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ASTP"), name: "Association Type", members: &ASTP_MEMBERS };
-
+pub static ASTP_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ASTP"),
+    name: "Association Type",
+    members: &ASTP_MEMBERS,
+};
 
 static CAMS_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -532,9 +579,11 @@ static CAMS_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// CAMS — camera shot.
-pub static CAMS_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"CAMS"), name: "Camera Shot", members: &CAMS_MEMBERS };
-
+pub static CAMS_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"CAMS"),
+    name: "Camera Shot",
+    members: &CAMS_MEMBERS,
+};
 
 static CPTH_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -548,9 +597,11 @@ static CPTH_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// CPTH — camera path.
-pub static CPTH_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"CPTH"), name: "Camera Path", members: &CPTH_MEMBERS };
-
+pub static CPTH_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"CPTH"),
+    name: "Camera Path",
+    members: &CPTH_MEMBERS,
+};
 
 static LAYR_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -564,9 +615,11 @@ static LAYR_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// LAYR — layer (Fallout 4 specific; organises references into named layers).
-pub static LAYR_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"LAYR"), name: "Layer", members: &LAYR_MEMBERS };
-
+pub static LAYR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"LAYR"),
+    name: "Layer",
+    members: &LAYR_MEMBERS,
+};
 
 static SCCO_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -581,9 +634,11 @@ static SCCO_MEMBERS: [SubRecordDef; 2] = [
 
 /// SCCO — scene collection (Fallout 4 specific; groups scenes into a 2-D
 /// grid associated with a quest).
-pub static SCCO_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"SCCO"), name: "Scene Collection", members: &SCCO_MEMBERS };
-
+pub static SCCO_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"SCCO"),
+    name: "Scene Collection",
+    members: &SCCO_MEMBERS,
+};
 
 static DFOB_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -597,9 +652,11 @@ static DFOB_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// DFOB — default object (Fallout 4 specific).
-pub static DFOB_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"DFOB"), name: "Default Object", members: &DFOB_MEMBERS };
-
+pub static DFOB_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"DFOB"),
+    name: "Default Object",
+    members: &DFOB_MEMBERS,
+};
 
 static KSSM_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -618,7 +675,6 @@ pub static KSSM_SCHEMA: RecordSchema = RecordSchema {
     name: "Sound Keyword Mapping",
     members: &KSSM_MEMBERS,
 };
-
 
 static NOTE_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -641,9 +697,11 @@ static NOTE_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// NOTE — note / holotape (Fallout 4 specific).
-pub static NOTE_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"NOTE"), name: "Note", members: &NOTE_MEMBERS };
-
+pub static NOTE_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"NOTE"),
+    name: "Note",
+    members: &NOTE_MEMBERS,
+};
 
 static OVIS_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -663,7 +721,6 @@ pub static OVIS_SCHEMA: RecordSchema = RecordSchema {
     members: &OVIS_MEMBERS,
 };
 
-
 static RFGP_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -676,9 +733,11 @@ static RFGP_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// RFGP — reference group (Fallout 4 specific).
-pub static RFGP_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"RFGP"), name: "Reference Group", members: &RFGP_MEMBERS };
-
+pub static RFGP_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"RFGP"),
+    name: "Reference Group",
+    members: &RFGP_MEMBERS,
+};
 
 static STAG_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -698,7 +757,6 @@ pub static STAG_SCHEMA: RecordSchema = RecordSchema {
     members: &STAG_MEMBERS,
 };
 
-
 static BNDS_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
     OBND_DEF,
@@ -712,9 +770,11 @@ static BNDS_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// BNDS — bendable spline (Fallout 4 specific).
-pub static BNDS_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"BNDS"), name: "Bendable Spline", members: &BNDS_MEMBERS };
-
+pub static BNDS_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"BNDS"),
+    name: "Bendable Spline",
+    members: &BNDS_MEMBERS,
+};
 
 static GDRY_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -728,9 +788,11 @@ static GDRY_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// GDRY — god rays (Fallout 4 specific).
-pub static GDRY_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"GDRY"), name: "God Rays", members: &GDRY_MEMBERS };
-
+pub static GDRY_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"GDRY"),
+    name: "God Rays",
+    members: &GDRY_MEMBERS,
+};
 
 static NOCM_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -750,7 +812,6 @@ pub static NOCM_SCHEMA: RecordSchema = RecordSchema {
     members: &NOCM_MEMBERS,
 };
 
-
 static PKIN_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
     FULL_DEF,
@@ -764,9 +825,11 @@ static PKIN_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// PKIN — pack-in prefab structure (Fallout 4 specific).
-pub static PKIN_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"PKIN"), name: "Pack-In", members: &PKIN_MEMBERS };
-
+pub static PKIN_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"PKIN"),
+    name: "Pack-In",
+    members: &PKIN_MEMBERS,
+};
 
 static SCOL_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -781,9 +844,11 @@ static SCOL_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// SCOL — static collection (Fallout 4 specific).
-pub static SCOL_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"SCOL"), name: "Static Collection", members: &SCOL_MEMBERS };
-
+pub static SCOL_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"SCOL"),
+    name: "Static Collection",
+    members: &SCOL_MEMBERS,
+};
 
 static SCSN_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -802,7 +867,6 @@ pub static SCSN_SCHEMA: RecordSchema = RecordSchema {
     name: "Audio Category Snapshot",
     members: &SCSN_MEMBERS,
 };
-
 
 static INNR_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -824,7 +888,6 @@ pub static INNR_SCHEMA: RecordSchema = RecordSchema {
     members: &INNR_MEMBERS,
 };
 
-
 static AMDL_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
     SubRecordDef {
@@ -837,9 +900,11 @@ static AMDL_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// AMDL — aim model (Fallout 4 specific; defines weapon sighting behaviour).
-pub static AMDL_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"AMDL"), name: "Aim Model", members: &AMDL_MEMBERS };
-
+pub static AMDL_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"AMDL"),
+    name: "Aim Model",
+    members: &AMDL_MEMBERS,
+};
 
 static AORU_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -853,14 +918,18 @@ static AORU_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// AORU — attraction rule (Fallout 4 specific).
-pub static AORU_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"AORU"), name: "Attraction Rule", members: &AORU_MEMBERS };
-
+pub static AORU_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"AORU"),
+    name: "Attraction Rule",
+    members: &AORU_MEMBERS,
+};
 
 /// PLYR — player reference (singleton; behaves like a special NPC_).
-pub static PLYR_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"PLYR"), name: "Player Reference", members: &[] };
-
+pub static PLYR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"PLYR"),
+    name: "Player Reference",
+    members: &[],
+};
 
 static DMGT_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -875,9 +944,11 @@ static DMGT_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// DMGT — damage type (Fallout 4 specific).
-pub static DMGT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"DMGT"), name: "Damage Type", members: &DMGT_MEMBERS };
-
+pub static DMGT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"DMGT"),
+    name: "Damage Type",
+    members: &DMGT_MEMBERS,
+};
 
 static TRNS_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -891,9 +962,11 @@ static TRNS_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// TRNS — transform.
-pub static TRNS_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"TRNS"), name: "Transform", members: &TRNS_MEMBERS };
-
+pub static TRNS_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"TRNS"),
+    name: "Transform",
+    members: &TRNS_MEMBERS,
+};
 
 static ZOOM_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -907,9 +980,11 @@ static ZOOM_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// ZOOM — zoom data (Fallout 4 specific; defines scope zoom properties).
-pub static ZOOM_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ZOOM"), name: "Zoom Data", members: &ZOOM_MEMBERS };
-
+pub static ZOOM_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ZOOM"),
+    name: "Zoom Data",
+    members: &ZOOM_MEMBERS,
+};
 
 static CLFM_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -932,9 +1007,11 @@ static CLFM_MEMBERS: [SubRecordDef; 4] = [
 
 /// CLFM — color form (Fallout 4 specific; named colour with optional remapping
 /// index used by the material system).
-pub static CLFM_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"CLFM"), name: "Color", members: &CLFM_MEMBERS };
-
+pub static CLFM_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"CLFM"),
+    name: "Color",
+    members: &CLFM_MEMBERS,
+};
 
 static REVB_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -961,14 +1038,31 @@ pub static REVB_SCHEMA: RecordSchema = RecordSchema {
     members: &REVB_MEMBERS,
 };
 
-
 static DUAL_DATA_FIELDS: [FieldDef; 6] = [
-    FieldDef { name: "Projectile", kind: FieldType::FormId },
-    FieldDef { name: "Explosion", kind: FieldType::FormId },
-    FieldDef { name: "Effect Shader", kind: FieldType::FormId },
-    FieldDef { name: "Hit Effect Art", kind: FieldType::FormId },
-    FieldDef { name: "Impact Data Set", kind: FieldType::FormId },
-    FieldDef { name: "Inherit Scale", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Projectile",
+        kind: FieldType::FormId,
+    },
+    FieldDef {
+        name: "Explosion",
+        kind: FieldType::FormId,
+    },
+    FieldDef {
+        name: "Effect Shader",
+        kind: FieldType::FormId,
+    },
+    FieldDef {
+        name: "Hit Effect Art",
+        kind: FieldType::FormId,
+    },
+    FieldDef {
+        name: "Impact Data Set",
+        kind: FieldType::FormId,
+    },
+    FieldDef {
+        name: "Inherit Scale",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static DUAL_MEMBERS: [SubRecordDef; 3] = [
@@ -986,8 +1080,11 @@ static DUAL_MEMBERS: [SubRecordDef; 3] = [
 /// DUAL — dual cast data (Fallout 4 specific; defines the overrides used when
 /// a spell is dual-cast; notably requires an object bounds unlike the SSE
 /// variant).
-pub static DUAL_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"DUAL"), name: "Dual Cast Data", members: &DUAL_MEMBERS };
+pub static DUAL_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"DUAL"),
+    name: "Dual Cast Data",
+    members: &DUAL_MEMBERS,
+};
 
 // Suppress dead_code lint for enum not yet referenced by other schema items.
 const _: () = {

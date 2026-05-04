@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Reusable static [`SubRecordDef`] helpers shared across many Fallout 4
 //! record definitions.
@@ -11,7 +11,6 @@ use crate::schema::{ArrayCount, FieldDef, FieldType, SubRecordDef};
 use crate::types::Signature;
 
 pub use crate::schema::shared::{EDID_DEF, MODL_DEF};
-
 
 /// FULL — full display name (localised string or inline in FO4).
 pub static FULL_DEF: SubRecordDef = SubRecordDef {
@@ -31,14 +30,31 @@ pub static DESC_DEF: SubRecordDef = SubRecordDef {
     field: FieldType::LString,
 };
 
-
 static OBND_FIELDS: [FieldDef; 6] = [
-    FieldDef { name: "X1", kind: FieldType::Int16 },
-    FieldDef { name: "Y1", kind: FieldType::Int16 },
-    FieldDef { name: "Z1", kind: FieldType::Int16 },
-    FieldDef { name: "X2", kind: FieldType::Int16 },
-    FieldDef { name: "Y2", kind: FieldType::Int16 },
-    FieldDef { name: "Z2", kind: FieldType::Int16 },
+    FieldDef {
+        name: "X1",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Y1",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Z1",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "X2",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Y2",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Z2",
+        kind: FieldType::Int16,
+    },
 ];
 
 /// OBND — object bounding box.
@@ -49,7 +65,6 @@ pub static OBND_DEF: SubRecordDef = SubRecordDef {
     repeating: false,
     field: FieldType::Struct(&OBND_FIELDS),
 };
-
 
 /// KSIZ — keyword count (u32).
 pub static KSIZ_DEF: SubRecordDef = SubRecordDef {
@@ -74,7 +89,6 @@ pub static KWDA_DEF: SubRecordDef = SubRecordDef {
     },
 };
 
-
 /// VMAD — Papyrus virtual machine adapter (raw byte array).
 pub static VMAD_DEF: SubRecordDef = SubRecordDef {
     sig: Signature(*b"VMAD"),
@@ -83,7 +97,6 @@ pub static VMAD_DEF: SubRecordDef = SubRecordDef {
     repeating: false,
     field: FieldType::ByteArray,
 };
-
 
 /// YNAM — pickup sound FormID.
 pub static YNAM_DEF: SubRecordDef = SubRecordDef {
@@ -103,7 +116,6 @@ pub static ZNAM_DEF: SubRecordDef = SubRecordDef {
     field: FieldType::FormId,
 };
 
-
 /// CTDA — condition (raw byte array; complex sub-structure).
 pub static CTDA_DEF: SubRecordDef = SubRecordDef {
     sig: Signature(*b"CTDA"),
@@ -112,7 +124,6 @@ pub static CTDA_DEF: SubRecordDef = SubRecordDef {
     repeating: true,
     field: FieldType::ByteArray,
 };
-
 
 /// EFID — base effect FormID (references MGEF).
 pub static EFID_DEF: SubRecordDef = SubRecordDef {
@@ -124,9 +135,18 @@ pub static EFID_DEF: SubRecordDef = SubRecordDef {
 };
 
 static EFIT_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Magnitude", kind: FieldType::Float32 },
-    FieldDef { name: "Area of Effect", kind: FieldType::UInt32 },
-    FieldDef { name: "Duration", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Magnitude",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Area of Effect",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Duration",
+        kind: FieldType::UInt32,
+    },
 ];
 
 /// EFIT — effect data (magnitude, area, duration).
@@ -138,7 +158,6 @@ pub static EFIT_DEF: SubRecordDef = SubRecordDef {
     field: FieldType::Struct(&EFIT_FIELDS),
 };
 
-
 /// EITM — enchantment / object effect FormID.
 pub static EITM_DEF: SubRecordDef = SubRecordDef {
     sig: Signature(*b"EITM"),
@@ -147,7 +166,6 @@ pub static EITM_DEF: SubRecordDef = SubRecordDef {
     repeating: false,
     field: FieldType::FormId,
 };
-
 
 /// RNAM — race FormID.
 pub static RNAM_DEF: SubRecordDef = SubRecordDef {
@@ -190,7 +208,6 @@ pub static ETYP_DEF: SubRecordDef = SubRecordDef {
     field: FieldType::FormId,
 };
 
-
 /// MOD2 — 1st person model path.
 pub static MOD2_DEF: SubRecordDef = SubRecordDef {
     sig: Signature(*b"MOD2"),
@@ -199,7 +216,6 @@ pub static MOD2_DEF: SubRecordDef = SubRecordDef {
     repeating: false,
     field: FieldType::ZString,
 };
-
 
 /// DEST — destruction data (raw byte array).
 pub static DEST_DEF: SubRecordDef = SubRecordDef {

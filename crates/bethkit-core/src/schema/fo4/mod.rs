@@ -8,10 +8,10 @@ use std::sync::OnceLock;
 
 use crate::schema::SchemaRegistry;
 
-mod common;
-pub mod enums;
 mod actors;
 mod audio;
+mod common;
+pub mod enums;
 mod items;
 mod magic;
 mod quests;
@@ -207,7 +207,9 @@ mod tests {
     fn fo4_npc_schema_is_registered() -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::types::Signature;
         let reg = registry();
-        let schema = reg.get(Signature(*b"NPC_")).ok_or("NPC_ not registered in FO4")?;
+        let schema = reg
+            .get(Signature(*b"NPC_"))
+            .ok_or("NPC_ not registered in FO4")?;
         assert!(!schema.members.is_empty());
         Ok(())
     }
@@ -217,7 +219,8 @@ mod tests {
     fn fo4_omod_schema_is_registered() -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::types::Signature;
         let reg = registry();
-        reg.get(Signature(*b"OMOD")).ok_or("OMOD not registered in FO4")?;
+        reg.get(Signature(*b"OMOD"))
+            .ok_or("OMOD not registered in FO4")?;
         Ok(())
     }
 
@@ -228,7 +231,9 @@ mod tests {
         let reg = registry();
         // get() returns at most one entry; duplicate registration would silently
         // overwrite, so we just check it resolves to the expected name.
-        let schema = reg.get(Signature(*b"DMGT")).ok_or("DMGT not registered in FO4")?;
+        let schema = reg
+            .get(Signature(*b"DMGT"))
+            .ok_or("DMGT not registered in FO4")?;
         assert_eq!(schema.name, "Damage Type");
         Ok(())
     }

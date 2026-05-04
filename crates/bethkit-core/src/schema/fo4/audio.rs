@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Fallout 4 audio record schemas.
 //!
@@ -9,7 +9,6 @@ use crate::schema::{FieldType, RecordSchema, SubRecordDef};
 use crate::types::Signature;
 
 use super::common::EDID_DEF;
-
 
 static SOUN_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -23,9 +22,11 @@ static SOUN_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// SOUN — sound marker.
-pub static SOUN_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"SOUN"), name: "Sound Marker", members: &SOUN_MEMBERS };
-
+pub static SOUN_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"SOUN"),
+    name: "Sound Marker",
+    members: &SOUN_MEMBERS,
+};
 
 static SNDR_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -53,9 +54,11 @@ static SNDR_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// SNDR — sound descriptor.
-pub static SNDR_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"SNDR"), name: "Sound Descriptor", members: &SNDR_MEMBERS };
-
+pub static SNDR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"SNDR"),
+    name: "Sound Descriptor",
+    members: &SNDR_MEMBERS,
+};
 
 static MUSC_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -76,9 +79,11 @@ static MUSC_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// MUSC — music type.
-pub static MUSC_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"MUSC"), name: "Music Type", members: &MUSC_MEMBERS };
-
+pub static MUSC_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"MUSC"),
+    name: "Music Type",
+    members: &MUSC_MEMBERS,
+};
 
 static MUST_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -99,9 +104,11 @@ static MUST_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// MUST — music track.
-pub static MUST_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"MUST"), name: "Music Track", members: &MUST_MEMBERS };
-
+pub static MUST_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"MUST"),
+    name: "Music Track",
+    members: &MUST_MEMBERS,
+};
 
 static SNCT_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -129,9 +136,11 @@ static SNCT_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// SNCT — sound category.
-pub static SNCT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"SNCT"), name: "Sound Category", members: &SNCT_MEMBERS };
-
+pub static SNCT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"SNCT"),
+    name: "Sound Category",
+    members: &SNCT_MEMBERS,
+};
 
 static SOPM_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -145,9 +154,11 @@ static SOPM_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// SOPM — sound output model.
-pub static SOPM_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"SOPM"), name: "Sound Output Model", members: &SOPM_MEMBERS };
-
+pub static SOPM_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"SOPM"),
+    name: "Sound Output Model",
+    members: &SOPM_MEMBERS,
+};
 
 static FSTP_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -168,9 +179,11 @@ static FSTP_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// FSTP — footstep.
-pub static FSTP_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"FSTP"), name: "Footstep", members: &FSTP_MEMBERS };
-
+pub static FSTP_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"FSTP"),
+    name: "Footstep",
+    members: &FSTP_MEMBERS,
+};
 
 static FSTS_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -184,9 +197,11 @@ static FSTS_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// FSTS — footstep set.
-pub static FSTS_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"FSTS"), name: "Footstep Set", members: &FSTS_MEMBERS };
-
+pub static FSTS_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"FSTS"),
+    name: "Footstep Set",
+    members: &FSTS_MEMBERS,
+};
 
 static ARTO_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -207,9 +222,11 @@ static ARTO_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// ARTO — art object.
-pub static ARTO_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ARTO"), name: "Art Object", members: &ARTO_MEMBERS };
-
+pub static ARTO_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ARTO"),
+    name: "Art Object",
+    members: &ARTO_MEMBERS,
+};
 
 static MATO_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -230,9 +247,11 @@ static MATO_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// MATO — material object.
-pub static MATO_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"MATO"), name: "Material Object", members: &MATO_MEMBERS };
-
+pub static MATO_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"MATO"),
+    name: "Material Object",
+    members: &MATO_MEMBERS,
+};
 
 static AECH_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,

@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Fallout 4 item and crafting record schemas.
 //!
@@ -10,16 +10,27 @@ use crate::types::Signature;
 
 use super::common::{
     CTDA_DEF, DESC_DEF, DEST_DEF, EDID_DEF, EFID_DEF, EFIT_DEF, EITM_DEF, ETYP_DEF, FULL_DEF,
-    KWDA_DEF, KSIZ_DEF, MODL_DEF, MOD2_DEF, OBND_DEF, VMAD_DEF, YNAM_DEF, ZNAM_DEF,
+    KSIZ_DEF, KWDA_DEF, MOD2_DEF, MODL_DEF, OBND_DEF, VMAD_DEF, YNAM_DEF, ZNAM_DEF,
 };
 use super::enums::{FO4_WEAPON_ANIM_TYPE_ENUM, FO4_WEAPON_FLAGS, OMOD_PROPERTY_ENUM};
 
-
 static WEAP_DATA_FIELDS: [FieldDef; 4] = [
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
-    FieldDef { name: "Base Damage", kind: FieldType::UInt16 },
-    FieldDef { name: "Ammo Capacity", kind: FieldType::UInt16 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Base Damage",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Ammo Capacity",
+        kind: FieldType::UInt16,
+    },
 ];
 
 static WEAP_MEMBERS: [SubRecordDef; 16] = [
@@ -66,14 +77,25 @@ static WEAP_MEMBERS: [SubRecordDef; 16] = [
 ];
 
 /// WEAP — weapon.
-pub static WEAP_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"WEAP"), name: "Weapon", members: &WEAP_MEMBERS };
-
+pub static WEAP_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"WEAP"),
+    name: "Weapon",
+    members: &WEAP_MEMBERS,
+};
 
 static ARMO_DATA_FIELDS: [FieldDef; 3] = [
-    FieldDef { name: "Value", kind: FieldType::Int32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
-    FieldDef { name: "Health", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Health",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static ARMO_MEMBERS: [SubRecordDef; 13] = [
@@ -99,9 +121,11 @@ static ARMO_MEMBERS: [SubRecordDef; 13] = [
 ];
 
 /// ARMO — armor / clothing.
-pub static ARMO_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ARMO"), name: "Armor", members: &ARMO_MEMBERS };
-
+pub static ARMO_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ARMO"),
+    name: "Armor",
+    members: &ARMO_MEMBERS,
+};
 
 static ARMA_MEMBERS: [SubRecordDef; 7] = [
     EDID_DEF,
@@ -138,15 +162,29 @@ static ARMA_MEMBERS: [SubRecordDef; 7] = [
 ];
 
 /// ARMA — armor addon / body part.
-pub static ARMA_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ARMA"), name: "Armor Addon", members: &ARMA_MEMBERS };
-
+pub static ARMA_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ARMA"),
+    name: "Armor Addon",
+    members: &ARMA_MEMBERS,
+};
 
 static AMMO_DATA_FIELDS: [FieldDef; 4] = [
-    FieldDef { name: "Projectile", kind: FieldType::FormId },
-    FieldDef { name: "Flags", kind: FieldType::UInt32 },
-    FieldDef { name: "Damage", kind: FieldType::Float32 },
-    FieldDef { name: "Value", kind: FieldType::UInt32 },
+    FieldDef {
+        name: "Projectile",
+        kind: FieldType::FormId,
+    },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::UInt32,
+    },
+    FieldDef {
+        name: "Damage",
+        kind: FieldType::Float32,
+    },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::UInt32,
+    },
 ];
 
 static AMMO_MEMBERS: [SubRecordDef; 9] = [
@@ -168,9 +206,11 @@ static AMMO_MEMBERS: [SubRecordDef; 9] = [
 ];
 
 /// AMMO — ammunition.
-pub static AMMO_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"AMMO"), name: "Ammunition", members: &AMMO_MEMBERS };
-
+pub static AMMO_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"AMMO"),
+    name: "Ammunition",
+    members: &AMMO_MEMBERS,
+};
 
 static BOOK_MEMBERS: [SubRecordDef; 9] = [
     EDID_DEF,
@@ -191,9 +231,11 @@ static BOOK_MEMBERS: [SubRecordDef; 9] = [
 ];
 
 /// BOOK — book / note / holotape.
-pub static BOOK_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"BOOK"), name: "Book", members: &BOOK_MEMBERS };
-
+pub static BOOK_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"BOOK"),
+    name: "Book",
+    members: &BOOK_MEMBERS,
+};
 
 static ALCH_MEMBERS: [SubRecordDef; 11] = [
     EDID_DEF,
@@ -216,29 +258,32 @@ static ALCH_MEMBERS: [SubRecordDef; 11] = [
 ];
 
 /// ALCH — ingestible (food, drink, chems).
-pub static ALCH_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"ALCH"), name: "Ingestible", members: &ALCH_MEMBERS };
-
+pub static ALCH_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"ALCH"),
+    name: "Ingestible",
+    members: &ALCH_MEMBERS,
+};
 
 static INGR_MEMBERS: [SubRecordDef; 8] = [
-    EDID_DEF,
-    OBND_DEF,
-    FULL_DEF,
-    MODL_DEF,
-    YNAM_DEF,
-    ZNAM_DEF,
-    EFID_DEF,
-    EFIT_DEF,
+    EDID_DEF, OBND_DEF, FULL_DEF, MODL_DEF, YNAM_DEF, ZNAM_DEF, EFID_DEF, EFIT_DEF,
 ];
 
 /// INGR — ingredient.
-pub static INGR_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"INGR"), name: "Ingredient", members: &INGR_MEMBERS };
-
+pub static INGR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"INGR"),
+    name: "Ingredient",
+    members: &INGR_MEMBERS,
+};
 
 static MISC_DATA_FIELDS: [FieldDef; 2] = [
-    FieldDef { name: "Value", kind: FieldType::Int32 },
-    FieldDef { name: "Weight", kind: FieldType::Float32 },
+    FieldDef {
+        name: "Value",
+        kind: FieldType::Int32,
+    },
+    FieldDef {
+        name: "Weight",
+        kind: FieldType::Float32,
+    },
 ];
 
 static MISC_MEMBERS: [SubRecordDef; 7] = [
@@ -258,9 +303,11 @@ static MISC_MEMBERS: [SubRecordDef; 7] = [
 ];
 
 /// MISC — miscellaneous item.
-pub static MISC_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"MISC"), name: "Miscellaneous Item", members: &MISC_MEMBERS };
-
+pub static MISC_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"MISC"),
+    name: "Miscellaneous Item",
+    members: &MISC_MEMBERS,
+};
 
 static KEYM_MEMBERS: [SubRecordDef; 7] = [
     EDID_DEF,
@@ -279,9 +326,11 @@ static KEYM_MEMBERS: [SubRecordDef; 7] = [
 ];
 
 /// KEYM — key.
-pub static KEYM_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"KEYM"), name: "Key", members: &KEYM_MEMBERS };
-
+pub static KEYM_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"KEYM"),
+    name: "Key",
+    members: &KEYM_MEMBERS,
+};
 
 static COBJ_MEMBERS: [SubRecordDef; 7] = [
     EDID_DEF,
@@ -336,7 +385,6 @@ pub static COBJ_SCHEMA: RecordSchema = RecordSchema {
     members: &COBJ_MEMBERS,
 };
 
-
 static CONT_MEMBERS: [SubRecordDef; 7] = [
     EDID_DEF,
     VMAD_DEF,
@@ -354,9 +402,11 @@ static CONT_MEMBERS: [SubRecordDef; 7] = [
 ];
 
 /// CONT — container.
-pub static CONT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"CONT"), name: "Container", members: &CONT_MEMBERS };
-
+pub static CONT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"CONT"),
+    name: "Container",
+    members: &CONT_MEMBERS,
+};
 
 static DOOR_MEMBERS: [SubRecordDef; 7] = [
     EDID_DEF,
@@ -375,9 +425,11 @@ static DOOR_MEMBERS: [SubRecordDef; 7] = [
 ];
 
 /// DOOR — door.
-pub static DOOR_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"DOOR"), name: "Door", members: &DOOR_MEMBERS };
-
+pub static DOOR_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"DOOR"),
+    name: "Door",
+    members: &DOOR_MEMBERS,
+};
 
 static FURN_MEMBERS: [SubRecordDef; 6] = [
     EDID_DEF,
@@ -395,9 +447,11 @@ static FURN_MEMBERS: [SubRecordDef; 6] = [
 ];
 
 /// FURN — furniture.
-pub static FURN_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"FURN"), name: "Furniture", members: &FURN_MEMBERS };
-
+pub static FURN_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"FURN"),
+    name: "Furniture",
+    members: &FURN_MEMBERS,
+};
 
 static OMOD_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
@@ -424,7 +478,6 @@ pub static OMOD_SCHEMA: RecordSchema = RecordSchema {
     members: &OMOD_MEMBERS,
 };
 
-
 static CMPO_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
     FULL_DEF,
@@ -446,9 +499,11 @@ static CMPO_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// CMPO — component (Fallout 4 specific; base unit for crafting and scrapping).
-pub static CMPO_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"CMPO"), name: "Component", members: &CMPO_MEMBERS };
-
+pub static CMPO_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"CMPO"),
+    name: "Component",
+    members: &CMPO_MEMBERS,
+};
 
 static MSWP_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -470,9 +525,11 @@ static MSWP_MEMBERS: [SubRecordDef; 3] = [
 
 /// MSWP — material swap (Fallout 4 specific; defines material substitutions
 /// applied to a model's texture sets).
-pub static MSWP_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"MSWP"), name: "Material Swap", members: &MSWP_MEMBERS };
-
+pub static MSWP_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"MSWP"),
+    name: "Material Swap",
+    members: &MSWP_MEMBERS,
+};
 
 static TERM_MEMBERS: [SubRecordDef; 8] = [
     EDID_DEF,
@@ -492,8 +549,11 @@ static TERM_MEMBERS: [SubRecordDef; 8] = [
 ];
 
 /// TERM — terminal (hacking terminal; Fallout 4 specific).
-pub static TERM_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"TERM"), name: "Terminal", members: &TERM_MEMBERS };
+pub static TERM_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"TERM"),
+    name: "Terminal",
+    members: &TERM_MEMBERS,
+};
 
 // Suppress lint for enum used via type annotation only.
 const _: () = {

@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //!
 //! Fallout 4 actor record schemas.
 //!
@@ -9,22 +9,48 @@ use crate::schema::{FieldDef, FieldType, RecordSchema, SubRecordDef};
 use crate::types::Signature;
 
 use super::common::{
-    CTDA_DEF, EDID_DEF, EFID_DEF, EFIT_DEF, FULL_DEF, KWDA_DEF, KSIZ_DEF, OBND_DEF, RNAM_DEF,
+    CTDA_DEF, EDID_DEF, EFID_DEF, EFIT_DEF, FULL_DEF, KSIZ_DEF, KWDA_DEF, OBND_DEF, RNAM_DEF,
     SPCT_DEF, SPLO_DEF, VMAD_DEF,
 };
 use super::enums::FO4_NPC_FLAGS;
 
-
 static NPC_ACBS_FIELDS: [FieldDef; 9] = [
-    FieldDef { name: "Flags", kind: FieldType::Flags(&FO4_NPC_FLAGS) },
-    FieldDef { name: "XP Value Offset", kind: FieldType::Int16 },
-    FieldDef { name: "Level", kind: FieldType::Int16 },
-    FieldDef { name: "Calc Min Level", kind: FieldType::UInt8 },
-    FieldDef { name: "Calc Max Level", kind: FieldType::UInt8 },
-    FieldDef { name: "Disposition Base", kind: FieldType::Int16 },
-    FieldDef { name: "Template Data Flags", kind: FieldType::UInt16 },
-    FieldDef { name: "Bleedout Override", kind: FieldType::UInt16 },
-    FieldDef { name: "Geared Up Weapons", kind: FieldType::UInt8 },
+    FieldDef {
+        name: "Flags",
+        kind: FieldType::Flags(&FO4_NPC_FLAGS),
+    },
+    FieldDef {
+        name: "XP Value Offset",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Level",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Calc Min Level",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Calc Max Level",
+        kind: FieldType::UInt8,
+    },
+    FieldDef {
+        name: "Disposition Base",
+        kind: FieldType::Int16,
+    },
+    FieldDef {
+        name: "Template Data Flags",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Bleedout Override",
+        kind: FieldType::UInt16,
+    },
+    FieldDef {
+        name: "Geared Up Weapons",
+        kind: FieldType::UInt8,
+    },
 ];
 
 static NPC_MEMBERS: [SubRecordDef; 16] = [
@@ -95,7 +121,6 @@ pub static NPC_SCHEMA: RecordSchema = RecordSchema {
     members: &NPC_MEMBERS,
 };
 
-
 static RACE_MEMBERS: [SubRecordDef; 6] = [
     EDID_DEF,
     FULL_DEF,
@@ -118,9 +143,11 @@ static RACE_MEMBERS: [SubRecordDef; 6] = [
 ];
 
 /// RACE — race definition.
-pub static RACE_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"RACE"), name: "Race", members: &RACE_MEMBERS };
-
+pub static RACE_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"RACE"),
+    name: "Race",
+    members: &RACE_MEMBERS,
+};
 
 static PACK_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -136,9 +163,11 @@ static PACK_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// PACK — AI package.
-pub static PACK_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"PACK"), name: "Package", members: &PACK_MEMBERS };
-
+pub static PACK_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"PACK"),
+    name: "Package",
+    members: &PACK_MEMBERS,
+};
 
 static FACT_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -160,9 +189,11 @@ static FACT_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// FACT — faction.
-pub static FACT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"FACT"), name: "Faction", members: &FACT_MEMBERS };
-
+pub static FACT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"FACT"),
+    name: "Faction",
+    members: &FACT_MEMBERS,
+};
 
 static CSTY_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -176,9 +207,11 @@ static CSTY_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// CSTY — combat style.
-pub static CSTY_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"CSTY"), name: "Combat Style", members: &CSTY_MEMBERS };
-
+pub static CSTY_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"CSTY"),
+    name: "Combat Style",
+    members: &CSTY_MEMBERS,
+};
 
 static IDLE_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -207,9 +240,11 @@ static IDLE_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// IDLE — idle animation.
-pub static IDLE_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"IDLE"), name: "Idle Animation", members: &IDLE_MEMBERS };
-
+pub static IDLE_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"IDLE"),
+    name: "Idle Animation",
+    members: &IDLE_MEMBERS,
+};
 
 static LVLN_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -238,9 +273,11 @@ static LVLN_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// LVLN — leveled NPC list.
-pub static LVLN_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"LVLN"), name: "Leveled NPC", members: &LVLN_MEMBERS };
-
+pub static LVLN_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"LVLN"),
+    name: "Leveled NPC",
+    members: &LVLN_MEMBERS,
+};
 
 static LVLI_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -269,9 +306,11 @@ static LVLI_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// LVLI — leveled item list.
-pub static LVLI_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"LVLI"), name: "Leveled Item", members: &LVLI_MEMBERS };
-
+pub static LVLI_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"LVLI"),
+    name: "Leveled Item",
+    members: &LVLI_MEMBERS,
+};
 
 static LVSP_MEMBERS: [SubRecordDef; 5] = [
     EDID_DEF,
@@ -300,9 +339,11 @@ static LVSP_MEMBERS: [SubRecordDef; 5] = [
 ];
 
 /// LVSP — leveled spell list.
-pub static LVSP_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"LVSP"), name: "Leveled Spell", members: &LVSP_MEMBERS };
-
+pub static LVSP_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"LVSP"),
+    name: "Leveled Spell",
+    members: &LVSP_MEMBERS,
+};
 
 static BPTD_MEMBERS: [SubRecordDef; 3] = [
     EDID_DEF,
@@ -323,9 +364,11 @@ static BPTD_MEMBERS: [SubRecordDef; 3] = [
 ];
 
 /// BPTD — body part data.
-pub static BPTD_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"BPTD"), name: "Body Part Data", members: &BPTD_MEMBERS };
-
+pub static BPTD_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"BPTD"),
+    name: "Body Part Data",
+    members: &BPTD_MEMBERS,
+};
 
 static OTFT_MEMBERS: [SubRecordDef; 2] = [
     EDID_DEF,
@@ -339,9 +382,11 @@ static OTFT_MEMBERS: [SubRecordDef; 2] = [
 ];
 
 /// OTFT — outfit.
-pub static OTFT_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"OTFT"), name: "Outfit", members: &OTFT_MEMBERS };
-
+pub static OTFT_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"OTFT"),
+    name: "Outfit",
+    members: &OTFT_MEMBERS,
+};
 
 static EYES_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -363,9 +408,11 @@ static EYES_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// EYES — eyes.
-pub static EYES_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"EYES"), name: "Eyes", members: &EYES_MEMBERS };
-
+pub static EYES_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"EYES"),
+    name: "Eyes",
+    members: &EYES_MEMBERS,
+};
 
 static CLAS_MEMBERS: [SubRecordDef; 4] = [
     EDID_DEF,
@@ -387,8 +434,11 @@ static CLAS_MEMBERS: [SubRecordDef; 4] = [
 ];
 
 /// CLAS — class definition.
-pub static CLAS_SCHEMA: RecordSchema =
-    RecordSchema { sig: Signature(*b"CLAS"), name: "Class", members: &CLAS_MEMBERS };
+pub static CLAS_SCHEMA: RecordSchema = RecordSchema {
+    sig: Signature(*b"CLAS"),
+    name: "Class",
+    members: &CLAS_MEMBERS,
+};
 
 // Suppress lint for effect defs included via use but not directly referenced
 // in this file's static items.

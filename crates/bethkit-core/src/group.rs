@@ -110,7 +110,9 @@ impl GroupLabel {
             | GroupType::TopicChildren
             | GroupType::CellPersistentChildren
             | GroupType::CellTemporaryChildren
-            | GroupType::CellVisibleDistantChildren => Self::FormId(FormId(u32::from_le_bytes(raw))),
+            | GroupType::CellVisibleDistantChildren => {
+                Self::FormId(FormId(u32::from_le_bytes(raw)))
+            }
             GroupType::ExteriorCellBlock | GroupType::ExteriorCellSubBlock => {
                 // The binary file stores Y in the first two bytes and X in the
                 // last two. GroupLabel::GridCell exposes the conventional (x, y)

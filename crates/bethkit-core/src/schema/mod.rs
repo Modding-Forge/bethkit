@@ -601,8 +601,8 @@ mod tests {
 
     /// Verifies that the FO4 registry contains exactly the expected record types.
     #[test]
-    fn fo4_registry_has_expected_signatures(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn fo4_registry_has_expected_signatures() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         let registry: &SchemaRegistry = SchemaRegistry::fo4();
         assert_registry_signatures(registry, FO4_EXPECTED_SIGNATURES);
         Ok(())
