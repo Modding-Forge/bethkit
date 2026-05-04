@@ -67,7 +67,7 @@ bethkit's niche is a fast, embeddable, language-agnostic library for direct bina
 | Record schema — SSE (126 types registered, deep coverage WIP) | ⚠️ WIP     |
 | Record schema — FO4 (137 types registered, deep coverage WIP) | ⚠️ WIP     |
 | C ABI (`bethkit-ffi`)                               | ✅          |
-| Python bindings (`bethkit.py`)                      | ⚠️ WIP     |
+| Python bindings — [bethkit.py](https://github.com/Modding-Forge/bethkit.py) | ✅          |
 | Record schema — other games                         | 🗓️ Planned |
 
 ## License
