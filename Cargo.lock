@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "bethkit-bsa"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ahash",
  "bethkit-io",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "bethkit-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ahash",
  "bethkit-bsa",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "bethkit-ffi"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bethkit-bsa",
  "bethkit-core",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "bethkit-io"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "flate2",
  "lz4_flex",
