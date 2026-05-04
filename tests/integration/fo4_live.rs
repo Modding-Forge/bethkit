@@ -688,7 +688,7 @@ fn fo4_live_11_schema_coverage() -> Result<(), Box<dyn std::error::Error>> {
          ({coverage_pct:.1}%)"
     );
 
-    uncovered.sort_by(|a, b| b.1.cmp(&a.1));
+    uncovered.sort_by_key(|b| std::cmp::Reverse(b.1));
     if !uncovered.is_empty() {
         eprintln!("  Uncovered types (sorted by frequency, known placement records marked *):");
         for (sig, count) in uncovered.iter().take(40) {
@@ -845,7 +845,7 @@ fn fo4_live_13_fallout4_esm_deep_analysis() -> Result<(), Box<dyn std::error::Er
     eprintln!("  Subrecord failures : {failed_subrecords}");
 
     let mut sorted: Vec<([u8; 4], u64)> = sig_counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
     eprintln!("  Top 30 record types:");
     for (sig, count) in sorted.iter().take(30) {
         let pct = *count as f64 / total_records as f64 * 100.0;
