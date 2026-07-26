@@ -18,6 +18,8 @@ param(
     [ValidateSet('Win32', 'Win64')]
     [string] $Platform = 'Win32',
 
+    [switch] $PrepareOnly,
+
     [switch] $UseExistingIdeBuild
 )
 
@@ -127,32 +129,63 @@ if ($exporterSources.Count -eq 0) {
     throw "No xEdit exporter sources found in $exporterSourceDirectory"
 }
 
-$patchInputs = @($patches) + @($exporterSources)
-$patchDescriptor = (
-    $patchInputs | ForEach-Object {
+$patchFilesDescriptor = (
+    $patches | ForEach-Object {
         $hash = (
             Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
         ).Hash.ToLowerInvariant()
         "$($_.FullName.Substring($root.Path.Length + 1))=$hash"
     }
 ) -join "`n"
+$exporterSourcesDescriptor = (
+    $exporterSources | ForEach-Object {
+        $hash = (
+            Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        "$($_.FullName.Substring($root.Path.Length + 1))=$hash"
+    }
+) -join "`n"
+$patchDescriptor = $patchFilesDescriptor + "`n" + $exporterSourcesDescriptor
 $patchSha256 = Get-TextSha256 -Text ($patchDescriptor + "`n")
+$patchFilesSha256 = Get-TextSha256 -Text ($patchFilesDescriptor + "`n")
 $patchMarkerPath = Join-Path $WorktreeDirectory.FullName '.bethkit-patchset'
-$appliedPatchSha256 = if (Test-Path -LiteralPath $patchMarkerPath) {
-    (Get-Content -LiteralPath $patchMarkerPath -Raw).Trim()
+$appliedPatchesMarkerPath = Join-Path (
+    $WorktreeDirectory.FullName
+) '.bethkit-applied-patches'
+
+# Older prepared worktrees only stored the combined patch/source hash. Migrate
+# them once; source-only exporter updates do not require patch reapplication.
+if (
+    -not (Test-Path -LiteralPath $appliedPatchesMarkerPath) -and
+    (Test-Path -LiteralPath $patchMarkerPath)
+) {
+    [System.IO.File]::WriteAllText(
+        $appliedPatchesMarkerPath,
+        "$patchFilesSha256`n",
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+
+$appliedPatchesSha256 = if (
+    Test-Path -LiteralPath $appliedPatchesMarkerPath
+) {
+    (Get-Content -LiteralPath $appliedPatchesMarkerPath -Raw).Trim()
 }
 else {
     ''
 }
 
-if ($appliedPatchSha256 -ne $patchSha256) {
-    if ($appliedPatchSha256 -ne '') {
-        throw (
-            'The xEdit patch set changed after it was applied. Remove and ' +
-            'recreate the isolated target\xedit-source worktree.'
-        )
-    }
+if (
+    $appliedPatchesSha256 -ne '' -and
+    $appliedPatchesSha256 -ne $patchFilesSha256
+) {
+    throw (
+        'The xEdit patch files changed after they were applied. Recreate ' +
+        'the isolated target\xedit-source worktree.'
+    )
+}
 
+if ($appliedPatchesSha256 -eq '') {
     foreach ($patch in $patches) {
         $check = Invoke-Git -Repository $WorktreeDirectory.FullName `
             -AllowFailure -Arguments @('apply', '--check', $patch.FullName)
@@ -172,13 +205,17 @@ if ($appliedPatchSha256 -ne $patchSha256) {
                 $patch.FullName
             )
         if ($reverseCheck.ExitCode -ne 0) {
-            throw "Patch is neither applicable nor already applied: $($patch.Name)"
+            throw (
+                "Patch is neither applicable nor already applied: " +
+                "$($patch.Name). Recreate the isolated " +
+                'target\xedit-source worktree.'
+            )
         }
     }
 
     [System.IO.File]::WriteAllText(
-        $patchMarkerPath,
-        "$patchSha256`n",
+        $appliedPatchesMarkerPath,
+        "$patchFilesSha256`n",
         [System.Text.UTF8Encoding]::new($false)
     )
 }
@@ -188,6 +225,12 @@ foreach ($exporterSource in $exporterSources) {
         Join-Path $WorktreeDirectory.FullName "xDump\$($exporterSource.Name)"
     ) -Force
 }
+
+[System.IO.File]::WriteAllText(
+    $patchMarkerPath,
+    "$patchSha256`n",
+    [System.Text.UTF8Encoding]::new($false)
+)
 
 $dccName = if ($Platform -eq 'Win64') { 'dcc64.exe' } else { 'dcc32.exe' }
 $dccPath = Join-Path $BdsDirectory.FullName "bin\$dccName"
@@ -236,6 +279,18 @@ $buildInfo = @"
 
 $projectPath = Join-Path $WorktreeDirectory.FullName 'xDump.dproj'
 $expectedExecutable = Join-Path $WorktreeDirectory.FullName 'Build\xDump.exe'
+if ($PrepareOnly) {
+    [pscustomobject] @{
+        prepared = $true
+        project = $projectPath
+        expected_executable = $expectedExecutable
+        exporter_patch_sha256 = $patchSha256
+        exporter_build_sha256 = $buildSha256
+        source_commit = $actualCommit
+    }
+    return
+}
+
 $previousWriteTime = if (Test-Path -LiteralPath $expectedExecutable) {
     (Get-Item -LiteralPath $expectedExecutable).LastWriteTimeUtc
 }

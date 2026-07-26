@@ -544,10 +544,10 @@ var
   lIndex: Integer;
 begin
   FWriter.Write('[');
-  for lIndex := 1 to 4 do begin
-    if lIndex > 1 then
+  for lIndex := 0 to 3 do begin
+    if lIndex > 0 then
       FWriter.Write(',');
-    if lIndex <= Length(aSignature) then
+    if lIndex < Length(aSignature) then
       FWriter.Write(Ord(aSignature[lIndex]))
     else
       FWriter.Write(0);

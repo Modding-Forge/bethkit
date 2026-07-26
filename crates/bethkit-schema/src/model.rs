@@ -38,14 +38,18 @@ pub enum SchemaGame {
     /// Skyrim VR.
     SkyrimVr,
     /// Fallout 3.
+    #[serde(rename = "fallout_3", alias = "fallout3")]
     Fallout3,
     /// Fallout: New Vegas.
     FalloutNv,
     /// Fallout 4.
+    #[serde(rename = "fallout_4", alias = "fallout4")]
     Fallout4,
     /// Fallout 4 VR.
+    #[serde(rename = "fallout_4_vr", alias = "fallout4_vr")]
     Fallout4Vr,
     /// Fallout 76.
+    #[serde(rename = "fallout_76", alias = "fallout76")]
     Fallout76,
     /// Oblivion.
     Oblivion,
@@ -311,6 +315,7 @@ pub struct SchemaNode {
     /// Optional inclusion condition.
     pub condition: Option<Expression>,
     /// Node behavior.
+    #[serde(flatten)]
     pub kind: SchemaNodeKind,
 }
 

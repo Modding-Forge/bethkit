@@ -251,6 +251,43 @@ fn collect_decoder(
 mod tests {
     use super::*;
 
+    /// Verifies the flat node representation emitted by the Delphi exporter.
+    #[test]
+    fn exported_nodes_deserialize_from_flat_json(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let json = r#"{
+            "id": 0,
+            "path": "TEST",
+            "name": "Test",
+            "required": true,
+            "condition": null,
+            "kind": "sequence",
+            "children": []
+        }"#;
+
+        // when
+        let node: SchemaNode = serde_json::from_str(json)?;
+
+        // then
+        assert!(matches!(
+            node.kind,
+            SchemaNodeKind::Sequence { ref children } if children.is_empty()
+        ));
+        assert_eq!(serde_json::to_value(&node)?["kind"], "sequence");
+        Ok(())
+    }
+
+    /// Verifies that serialized game names match the exporter/package slugs.
+    #[test]
+    fn schema_games_use_stable_slugs() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for game in SchemaGame::all() {
+            let json = serde_json::to_string(&game)?;
+            assert_eq!(json, format!("\"{}\"", game.slug()));
+        }
+        Ok(())
+    }
+
     /// Verifies that unknown callbacks block conversion.
     #[test]
     fn conversion_rejects_unknown_callbacks() {

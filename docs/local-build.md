@@ -69,8 +69,14 @@ Build and provenance-check the exporter with:
 .\scripts\Build-XEditExporter.ps1
 ```
 
-With Community Edition, the command above first prepares and stamps the
-worktree, then stops at the license check. Open
+With Community Edition, prepare and stamp the worktree without invoking the
+disabled command-line compiler:
+
+```powershell
+.\scripts\Build-XEditExporter.ps1 -PrepareOnly
+```
+
+Open
 `target\xedit-source\xDump.dproj` in Delphi, select **Release** and **Win32**,
 build the project, and finish artifact verification with:
 
