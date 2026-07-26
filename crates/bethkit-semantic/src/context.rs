@@ -196,6 +196,56 @@ impl SemanticContext {
         Ok(formatted)
     }
 
+    /// Returns whether xEdit allows the value at an exact schema path to be removed.
+    ///
+    /// Values without a removability callback are removable by default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when a bound callback rejects the
+    /// value or returns a non-boolean result.
+    pub fn is_removable(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+    ) -> Result<bool> {
+        let handler_value = value.to_handler_value();
+        let mut removable = true;
+        for binding in self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| binding.path == path && binding.callback_id == "def.is_removeable")
+        {
+            if !matches!(
+                binding.implementation,
+                CallbackImplementation::BuiltIn { .. }
+                    | CallbackImplementation::CustomHandler { .. }
+            ) {
+                continue;
+            }
+            removable = match self.handlers.invoke(
+                binding,
+                record.header.signature,
+                record.header.form_id,
+                record.header.form_version,
+                self.registry.package().manifest().game,
+                Some(&handler_value),
+            )? {
+                HandlerOutput::Boolean(value) => value,
+                _ => {
+                    return Err(SemanticError::Handler {
+                        handler: binding.callback_id.clone(),
+                        message: "removability callback returned a non-boolean result".to_owned(),
+                    });
+                }
+            };
+        }
+        Ok(removable)
+    }
+
     pub(crate) fn apply_normalizers<'a>(
         &self,
         path: &str,

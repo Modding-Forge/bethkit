@@ -83,6 +83,16 @@ impl<'context, 'record> RecordView<'context, 'record> {
         self.context.format_value(self.record, path, value)
     }
 
+    /// Returns whether xEdit allows a decoded value to be removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the bound removability callback
+    /// rejects the value or returns an invalid result.
+    pub fn is_removable(&self, path: &str, value: &FieldValue<'_>) -> Result<bool> {
+        self.context.is_removable(self.record, path, value)
+    }
+
     /// Decodes top-level subrecords in their source order.
     ///
     /// Unknown and out-of-order known subrecords are preserved as borrowed

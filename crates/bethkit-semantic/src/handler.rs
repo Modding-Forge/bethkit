@@ -122,6 +122,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(NormalizeRadians));
         registry.register(Arc::new(ModelInfoConflictPriority));
         registry.register(Arc::new(FormatRgb));
+        registry.register(Arc::new(RemovableWhenZero));
         registry
     }
 
@@ -269,6 +270,38 @@ impl SemanticHandler for FormatRgb {
             message: "RGB formatter requires a value".to_owned(),
         })?;
         Ok(HandlerOutput::Text(format_rgb(value, include_alpha)?))
+    }
+}
+
+struct RemovableWhenZero;
+
+impl SemanticHandler for RemovableWhenZero {
+    fn id(&self) -> &'static str {
+        "edit.removable_when_zero"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "removability check requires a value".to_owned(),
+        })?;
+        Ok(HandlerOutput::Boolean(removable_when_zero(value)?))
+    }
+}
+
+fn removable_when_zero(value: &FieldValue<'_>) -> Result<bool> {
+    match value {
+        FieldValue::Int(value) => Ok(*value == 0),
+        FieldValue::UInt(value) => Ok(*value == 0),
+        FieldValue::Enumeration { value, .. } => Ok(*value == 0),
+        _ => Err(SemanticError::Handler {
+            handler: "edit.removable_when_zero".to_owned(),
+            message: "removability check requires an integer value".to_owned(),
+        }),
     }
 }
 
@@ -431,6 +464,14 @@ mod tests {
 
         assert_eq!(format_rgb(&rgb, false)?, "RGB(12, 34, 56)");
         assert_eq!(format_rgb(&rgba, true)?, "RGBA(12, 34, 56, 78)");
+        Ok(())
+    }
+
+    /// Matches xEdit's model-info header removal predicate.
+    #[test]
+    fn zero_header_is_removable() -> Result<()> {
+        assert!(removable_when_zero(&FieldValue::UInt(0))?);
+        assert!(!removable_when_zero(&FieldValue::UInt(1))?);
         Ok(())
     }
 }
