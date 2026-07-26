@@ -12,8 +12,13 @@ mod validation;
 mod value;
 mod view;
 
-pub use analysis::{Conflict, ConflictClass, ConflictReport, ReferenceEdge, ReferenceGraph};
-pub use cleaning::{CleaningAction, CleaningActionKind, CleaningPlan};
+pub use analysis::{
+    analyze_conflicts, build_reference_graph, Conflict, ConflictClass, ConflictReport, PluginInput,
+    ReferenceEdge, ReferenceGraph,
+};
+pub use cleaning::{
+    plan_cleaning, CleaningAction, CleaningActionKind, CleaningPlan, CleaningPolicy,
+};
 pub use context::SemanticContext;
 pub use decoder::{CustomDecoder, DecoderRegistry};
 pub use editor::RecordEditor;
