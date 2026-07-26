@@ -71,6 +71,18 @@ impl<'context, 'record> RecordView<'context, 'record> {
         self.schema
     }
 
+    /// Formats a decoded value with the xEdit callback bound to its exact path.
+    ///
+    /// The typed value remains unchanged. `None` means that no executable
+    /// formatter is bound to the path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the formatter rejects the value.
+    pub fn format_value(&self, path: &str, value: &FieldValue<'_>) -> Result<Option<String>> {
+        self.context.format_value(self.record, path, value)
+    }
+
     /// Decodes top-level subrecords in their source order.
     ///
     /// Unknown and out-of-order known subrecords are preserved as borrowed

@@ -143,6 +143,59 @@ impl SemanticContext {
         Ok(priority)
     }
 
+    /// Formats a typed value with the xEdit presentation callback bound to its path.
+    ///
+    /// The original value is never replaced. `None` means that the path has no
+    /// executable value formatter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the formatter rejects the value
+    /// or returns a non-text result.
+    pub fn format_value(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+    ) -> Result<Option<String>> {
+        let handler_value = value.to_handler_value();
+        let mut formatted = None;
+        for binding in self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| binding.path == path && binding.callback_id == "def.value_transform")
+        {
+            if !matches!(
+                binding.implementation,
+                CallbackImplementation::BuiltIn { .. }
+                    | CallbackImplementation::CustomHandler { .. }
+            ) {
+                continue;
+            }
+            formatted = Some(
+                match self.handlers.invoke(
+                    binding,
+                    record.header.signature,
+                    record.header.form_id,
+                    record.header.form_version,
+                    self.registry.package().manifest().game,
+                    Some(&handler_value),
+                )? {
+                    HandlerOutput::Text(value) => value,
+                    _ => {
+                        return Err(SemanticError::Handler {
+                            handler: binding.callback_id.clone(),
+                            message: "value formatter returned a non-text result".to_owned(),
+                        });
+                    }
+                },
+            );
+        }
+        Ok(formatted)
+    }
+
     pub(crate) fn apply_normalizers<'a>(
         &self,
         path: &str,

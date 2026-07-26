@@ -121,6 +121,7 @@ impl SemanticHandlerRegistry {
         let mut registry = Self::new();
         registry.register(Arc::new(NormalizeRadians));
         registry.register(Arc::new(ModelInfoConflictPriority));
+        registry.register(Arc::new(FormatRgb));
         registry
     }
 
@@ -242,6 +243,35 @@ impl SemanticHandler for ModelInfoConflictPriority {
     }
 }
 
+struct FormatRgb;
+
+impl SemanticHandler for FormatRgb {
+    fn id(&self) -> &'static str {
+        "format.rgb"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let include_alpha = invocation
+            .context
+            .configuration
+            .get("include_alpha")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "RGB formatter requires a boolean include_alpha setting".to_owned(),
+            })?;
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "RGB formatter requires a value".to_owned(),
+        })?;
+        Ok(HandlerOutput::Text(format_rgb(value, include_alpha)?))
+    }
+}
+
 const fn model_info_conflict_priority(game: SchemaGame, form_version: u16) -> ConflictPriority {
     let uses_modern_model_info = matches!(
         game,
@@ -257,6 +287,46 @@ const fn model_info_conflict_priority(game: SchemaGame, form_version: u16) -> Co
         ConflictPriority::Ignore
     } else {
         ConflictPriority::Normal
+    }
+}
+
+fn format_rgb(value: &FieldValue<'_>, include_alpha: bool) -> Result<String> {
+    let FieldValue::Struct(components) = value else {
+        return Err(SemanticError::Handler {
+            handler: "format.rgb".to_owned(),
+            message: "RGB formatter requires a struct value".to_owned(),
+        });
+    };
+    let required_components = if include_alpha { 4 } else { 3 };
+    if components.len() < required_components {
+        return Err(SemanticError::Handler {
+            handler: "format.rgb".to_owned(),
+            message: format!(
+                "RGB formatter requires {required_components} components, got {}",
+                components.len()
+            ),
+        });
+    }
+    let formatted: Vec<String> = components[..required_components]
+        .iter()
+        .map(|component| format_color_component(&component.value))
+        .collect::<Result<_>>()?;
+    Ok(format!(
+        "{}({})",
+        if include_alpha { "RGBA" } else { "RGB" },
+        formatted.join(", ")
+    ))
+}
+
+fn format_color_component(value: &FieldValue<'_>) -> Result<String> {
+    match value {
+        FieldValue::Int(value) => Ok(value.to_string()),
+        FieldValue::UInt(value) => Ok(value.to_string()),
+        FieldValue::Float(value) if value.is_finite() => Ok(value.to_string()),
+        _ => Err(SemanticError::Handler {
+            handler: "format.rgb".to_owned(),
+            message: "RGB components must be finite numeric values".to_owned(),
+        }),
     }
 }
 
@@ -331,5 +401,36 @@ mod tests {
             model_info_conflict_priority(SchemaGame::Fallout3, 15),
             ConflictPriority::Normal
         );
+    }
+
+    /// Matches xEdit's `wbRGBAToStr` output without replacing typed values.
+    #[test]
+    fn rgb_formatter_preserves_rgb_and_rgba_shape() -> Result<()> {
+        let component = |name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: format!("TEST/{name}"),
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 1 },
+            value,
+        };
+        let rgb = FieldValue::Struct(vec![
+            component("Red", FieldValue::UInt(12)),
+            component("Green", FieldValue::UInt(34)),
+            component("Blue", FieldValue::UInt(56)),
+            component(
+                "Unused",
+                FieldValue::Bytes(std::borrow::Cow::Borrowed(&[0])),
+            ),
+        ]);
+        let rgba = FieldValue::Struct(vec![
+            component("Red", FieldValue::Float(12.0)),
+            component("Green", FieldValue::Float(34.0)),
+            component("Blue", FieldValue::Float(56.0)),
+            component("Alpha", FieldValue::Float(78.0)),
+        ]);
+
+        assert_eq!(format_rgb(&rgb, false)?, "RGB(12, 34, 56)");
+        assert_eq!(format_rgb(&rgba, true)?, "RGBA(12, 34, 56, 78)");
+        Ok(())
     }
 }
