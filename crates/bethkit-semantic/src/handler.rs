@@ -137,6 +137,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatRgb));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
+        registry.register(Arc::new(ModelInfoCounts));
         registry
     }
 
@@ -409,6 +410,100 @@ fn resource_hash(value: &FieldValue<'_>) -> Result<u64> {
     }
 }
 
+struct ModelInfoCounts;
+
+impl SemanticHandler for ModelInfoCounts {
+    fn id(&self) -> &'static str {
+        "edit.model_info_counts"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "model-info counter update requires a struct value".to_owned(),
+        })?;
+        Ok(HandlerOutput::Value(update_model_info_counts(value)?))
+    }
+}
+
+fn update_model_info_counts(value: &FieldValue<'_>) -> Result<FieldValue<'static>> {
+    let mut updated = value.to_handler_value();
+    let FieldValue::Struct(fields) = &mut updated else {
+        return Err(model_info_error("model-info value is not a struct"));
+    };
+    if fields.len() < 4 {
+        return Err(model_info_error(format!(
+            "model-info struct requires four fields, got {}",
+            fields.len()
+        )));
+    }
+    let textures = array_length(&fields[1].value, "Textures")?;
+    let addons = array_length(&fields[2].value, "Addons")?;
+    let materials = array_length(&fields[3].value, "Materials")?;
+    let minimum_headers = if materials > 0 {
+        4
+    } else if addons > 0 {
+        2
+    } else if textures > 0 {
+        1
+    } else {
+        0
+    };
+    let FieldValue::Array(headers) = &mut fields[0].value else {
+        return Err(model_info_error("Headers is not an array"));
+    };
+    while headers.len() < minimum_headers {
+        headers.push(FieldValue::UInt(0));
+    }
+    set_model_info_count(headers, 0, textures)?;
+    set_model_info_count(headers, 1, addons)?;
+    set_model_info_count(headers, 3, materials)?;
+    Ok(updated)
+}
+
+fn array_length(value: &FieldValue<'_>, name: &str) -> Result<usize> {
+    let FieldValue::Array(values) = value else {
+        return Err(model_info_error(format!("{name} is not an array")));
+    };
+    Ok(values.len())
+}
+
+fn set_model_info_count(
+    headers: &mut [FieldValue<'static>],
+    index: usize,
+    count: usize,
+) -> Result<()> {
+    let Some(header) = headers.get_mut(index) else {
+        return Ok(());
+    };
+    let count = u64::try_from(count)
+        .map_err(|_| model_info_error("model-info element count exceeds u64"))?;
+    match header {
+        FieldValue::Int(value) => {
+            *value = i64::try_from(count)
+                .map_err(|_| model_info_error("model-info element count exceeds i64"))?;
+        }
+        FieldValue::UInt(value) | FieldValue::Flags { value, .. } => *value = count,
+        FieldValue::Enumeration { value, .. } => {
+            *value = i64::try_from(count)
+                .map_err(|_| model_info_error("model-info element count exceeds i64"))?;
+        }
+        _ => return Err(model_info_error("model-info header is not an integer")),
+    }
+    Ok(())
+}
+
+fn model_info_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "edit.model_info_counts".to_owned(),
+        message: message.into(),
+    }
+}
+
 fn removable_when_zero(value: &FieldValue<'_>) -> Result<bool> {
     match value {
         FieldValue::Int(value) => Ok(*value == 0),
@@ -652,6 +747,81 @@ mod tests {
             format_resource_hash(Some(resolver), "file", FieldValue::UInt(0x5678))?,
             "{0000000000005678}"
         );
+        Ok(())
+    }
+
+    /// Mirrors xEdit's model-info header expansion and dependent count updates.
+    #[test]
+    fn model_info_after_set_updates_only_defined_header_counts() -> Result<()> {
+        let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: format!("TEST/{name}"),
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let model_info = FieldValue::Struct(vec![
+            field(
+                "Headers",
+                FieldValue::Array(vec![FieldValue::UInt(99), FieldValue::UInt(98)]),
+            ),
+            field(
+                "Textures",
+                FieldValue::Array(vec![FieldValue::UInt(1), FieldValue::UInt(2)]),
+            ),
+            field("Addons", FieldValue::Array(vec![FieldValue::UInt(3)])),
+            field("Materials", FieldValue::Array(vec![FieldValue::UInt(4)])),
+        ]);
+
+        let updated = update_model_info_counts(&model_info)?;
+
+        let FieldValue::Struct(fields) = updated else {
+            return Err(model_info_error(
+                "model-info handler did not return a struct",
+            ));
+        };
+        let FieldValue::Array(headers) = &fields[0].value else {
+            return Err(model_info_error(
+                "model-info handler did not preserve headers",
+            ));
+        };
+        assert!(matches!(
+            headers.as_slice(),
+            [
+                FieldValue::UInt(2),
+                FieldValue::UInt(1),
+                FieldValue::UInt(0),
+                FieldValue::UInt(1)
+            ]
+        ));
+        Ok(())
+    }
+
+    /// Leaves absent model-info headers absent when all dependent arrays are empty.
+    #[test]
+    fn model_info_after_set_preserves_empty_header_array() -> Result<()> {
+        let field = |name: &str| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: format!("TEST/{name}"),
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value: FieldValue::Array(Vec::new()),
+        };
+        let model_info = FieldValue::Struct(vec![
+            field("Headers"),
+            field("Textures"),
+            field("Addons"),
+            field("Materials"),
+        ]);
+
+        let updated = update_model_info_counts(&model_info)?;
+
+        let FieldValue::Struct(fields) = updated else {
+            return Err(model_info_error(
+                "model-info handler did not return a struct",
+            ));
+        };
+        assert!(matches!(&fields[0].value, FieldValue::Array(values) if values.is_empty()));
         Ok(())
     }
 

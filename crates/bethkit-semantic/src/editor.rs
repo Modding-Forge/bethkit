@@ -4,8 +4,8 @@
 
 use bethkit_core::{Record, Signature, WritableRecord, WritableSubRecord};
 use bethkit_schema::{
-    ArrayCount, ByteOrder, CallbackImplementation, IntegerType, PrimitiveType, SchemaNode,
-    SchemaNodeKind,
+    ArrayCount, ByteOrder, CallbackImplementation, EvalContext, EvalValue, IntegerType,
+    PrimitiveType, SchemaNode, SchemaNodeKind,
 };
 
 use crate::value::float_to_raw;
@@ -85,10 +85,11 @@ impl RecordEditor {
                 occurrence,
             })?;
         let normalized = self.normalize_value(&payload.path, value)?;
+        let (normalized, mutations) = self.apply_after_set_tree(payload, &normalized)?;
         let encoded: Vec<u8> = self.encode_node(payload, &normalized)?;
         let mut candidate = clone_record(&self.record);
         candidate.subrecords[index].data = encoded;
-        self.apply_after_set(&payload.path, &normalized, &mut candidate)?;
+        self.apply_mutations(&mut candidate, mutations)?;
         self.record = candidate;
         Ok(())
     }
@@ -127,6 +128,7 @@ impl RecordEditor {
             })
             .unwrap_or(self.record.subrecords.len());
         let normalized = self.normalize_value(&payload.path, value)?;
+        let (normalized, mutations) = self.apply_after_set_tree(payload, &normalized)?;
         let encoded: Vec<u8> = self.encode_node(payload, &normalized)?;
         let mut candidate = clone_record(&self.record);
         candidate.subrecords.insert(
@@ -136,7 +138,7 @@ impl RecordEditor {
                 data: encoded,
             },
         );
-        self.apply_after_set(&payload.path, &normalized, &mut candidate)?;
+        self.apply_mutations(&mut candidate, mutations)?;
         self.record = candidate;
         Ok(())
     }
@@ -241,18 +243,36 @@ impl RecordEditor {
                             .map_err(|_| encode_error(&node.path, "array count exceeds u64"))?;
                         output.extend(encode_integer(*integer, count, &node.path)?);
                     }
-                    ArrayCount::Expression { .. } => {
-                        return Err(encode_error(
-                            &node.path,
-                            "expression-counted array requires a specialized encoder",
-                        ));
-                    }
-                    ArrayCount::Fixed { .. } | ArrayCount::Remainder => {}
+                    ArrayCount::Fixed { .. }
+                    | ArrayCount::Expression { .. }
+                    | ArrayCount::Remainder => {}
                 }
                 for value in values {
                     output.extend(self.encode_node(element, value)?);
                 }
                 Ok(output)
+            }
+            SchemaNodeKind::Union { selector, variants } => {
+                for (index, variant) in variants.iter().enumerate() {
+                    let Ok(encoded) = self.encode_node(variant, value) else {
+                        continue;
+                    };
+                    let context = EvalContext {
+                        payload: &encoded,
+                        form_version: self.record.form_version,
+                        record_signature: self.record.signature.into(),
+                    };
+                    if matches!(
+                        selector.evaluate(&context, 1024),
+                        Ok(EvalValue::Int(selected)) if selected == index as i64
+                    ) {
+                        return Ok(encoded);
+                    }
+                }
+                Err(encode_error(
+                    &node.path,
+                    "value does not match the selected union variant",
+                ))
             }
             SchemaNodeKind::Custom { decoder, .. } => self
                 .decoders
@@ -291,7 +311,7 @@ impl RecordEditor {
             ) {
                 continue;
             }
-            let handler_value = owned_to_handler_value(&normalized);
+            let handler_value = self.owned_to_handler_value(node, &normalized)?;
             if matches!(&handler_value, FieldValue::Float(value) if !value.is_finite()) {
                 continue;
             }
@@ -315,18 +335,59 @@ impl RecordEditor {
         Ok(normalized)
     }
 
-    fn apply_after_set(
+    fn apply_after_set_tree(
         &self,
-        path: &str,
+        node: &SchemaNode,
         value: &OwnedFieldValue,
-        record: &mut WritableRecord,
-    ) -> Result<()> {
+    ) -> Result<(OwnedFieldValue, Vec<HandlerMutation>)> {
+        let (mut updated, mut mutations) = match (&node.kind, value) {
+            (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
+                if fields.len() != values.len() {
+                    return Err(encode_error(
+                        &node.path,
+                        format!(
+                            "struct expects {} fields, got {}",
+                            fields.len(),
+                            values.len()
+                        ),
+                    ));
+                }
+                let mut updated = Vec::with_capacity(values.len());
+                let mut mutations = Vec::new();
+                for (field, value) in fields.iter().zip(values) {
+                    let (value, child_mutations) = self.apply_after_set_tree(field, value)?;
+                    updated.push(value);
+                    mutations.extend(child_mutations);
+                }
+                (OwnedFieldValue::Struct(updated), mutations)
+            }
+            (SchemaNodeKind::Array { element, .. }, OwnedFieldValue::Array(values)) => {
+                let mut updated = Vec::with_capacity(values.len());
+                let mut mutations = Vec::new();
+                for value in values {
+                    let (value, child_mutations) = self.apply_after_set_tree(element, value)?;
+                    updated.push(value);
+                    mutations.extend(child_mutations);
+                }
+                (OwnedFieldValue::Array(updated), mutations)
+            }
+            (SchemaNodeKind::Union { selector, variants }, _) => {
+                let variant = self.select_union_variant(node, selector, variants, value)?;
+                self.apply_after_set_tree(variant, value)?
+            }
+            (
+                SchemaNodeKind::Subrecord { payload, .. }
+                | SchemaNodeKind::Compressed { child: payload, .. },
+                _,
+            ) => self.apply_after_set_tree(payload, value)?,
+            _ => (value.clone(), Vec::new()),
+        };
         for binding in self
             .registry
             .package()
             .callback_bindings()
             .iter()
-            .filter(|binding| binding.path == path && binding.callback_id == "def.after_set")
+            .filter(|binding| binding.path == node.path && binding.callback_id == "def.after_set")
         {
             if !matches!(
                 binding.implementation,
@@ -335,19 +396,20 @@ impl RecordEditor {
             ) {
                 continue;
             }
-            let handler_value = owned_to_handler_value(value);
+            let handler_value = self.owned_to_handler_value(node, &updated)?;
             match self.handlers.invoke(
                 binding,
-                record.signature,
-                record.form_id,
-                record.form_version,
+                self.record.signature,
+                self.record.form_id,
+                self.record.form_version,
                 self.registry.package().manifest().game,
                 Some(&handler_value),
             )? {
                 HandlerOutput::None => {}
-                HandlerOutput::Mutations(mutations) => {
-                    self.apply_mutations(record, mutations)?;
+                HandlerOutput::Value(value) => {
+                    updated = handler_to_owned_value(value, &node.path)?;
                 }
+                HandlerOutput::Mutations(handler_mutations) => mutations.extend(handler_mutations),
                 _ => {
                     return Err(SemanticError::Handler {
                         handler: binding.callback_id.clone(),
@@ -356,7 +418,86 @@ impl RecordEditor {
                 }
             }
         }
-        Ok(())
+        Ok((updated, mutations))
+    }
+
+    fn select_union_variant<'a>(
+        &self,
+        node: &SchemaNode,
+        selector: &bethkit_schema::Expression,
+        variants: &'a [SchemaNode],
+        value: &OwnedFieldValue,
+    ) -> Result<&'a SchemaNode> {
+        for (index, variant) in variants.iter().enumerate() {
+            let Ok(encoded) = self.encode_node(variant, value) else {
+                continue;
+            };
+            let context = EvalContext {
+                payload: &encoded,
+                form_version: self.record.form_version,
+                record_signature: self.record.signature.into(),
+            };
+            if matches!(
+                selector.evaluate(&context, 1024),
+                Ok(EvalValue::Int(selected)) if selected == index as i64
+            ) {
+                return Ok(variant);
+            }
+        }
+        Err(encode_error(
+            &node.path,
+            "value does not match the selected union variant",
+        ))
+    }
+
+    fn owned_to_handler_value(
+        &self,
+        node: &SchemaNode,
+        value: &OwnedFieldValue,
+    ) -> Result<FieldValue<'static>> {
+        match (&node.kind, value) {
+            (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
+                if fields.len() != values.len() {
+                    return Err(encode_error(
+                        &node.path,
+                        format!(
+                            "struct expects {} fields, got {}",
+                            fields.len(),
+                            values.len()
+                        ),
+                    ));
+                }
+                fields
+                    .iter()
+                    .zip(values)
+                    .map(|(field, value)| {
+                        Ok(crate::NamedValue {
+                            node_id: field.id,
+                            path: field.path.clone(),
+                            name: field.name.clone(),
+                            span: crate::ByteSpan { start: 0, end: 0 },
+                            value: self.owned_to_handler_value(field, value)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map(FieldValue::Struct)
+            }
+            (SchemaNodeKind::Array { element, .. }, OwnedFieldValue::Array(values)) => values
+                .iter()
+                .map(|value| self.owned_to_handler_value(element, value))
+                .collect::<Result<Vec<_>>>()
+                .map(FieldValue::Array),
+            (SchemaNodeKind::Union { selector, variants }, _) => {
+                let variant = self.select_union_variant(node, selector, variants, value)?;
+                self.owned_to_handler_value(variant, value)
+            }
+            (
+                SchemaNodeKind::Subrecord { payload, .. }
+                | SchemaNodeKind::Compressed { child: payload, .. },
+                _,
+            ) => self.owned_to_handler_value(payload, value),
+            _ => Ok(owned_leaf_to_handler_value(value)),
+        }
     }
 
     fn apply_mutations(
@@ -443,7 +584,7 @@ fn clone_record(record: &WritableRecord) -> WritableRecord {
     }
 }
 
-fn owned_to_handler_value(value: &OwnedFieldValue) -> FieldValue<'static> {
+fn owned_leaf_to_handler_value(value: &OwnedFieldValue) -> FieldValue<'static> {
     match value {
         OwnedFieldValue::Int(value) => FieldValue::Int(*value),
         OwnedFieldValue::UInt(value) => FieldValue::UInt(*value),
@@ -457,10 +598,10 @@ fn owned_to_handler_value(value: &OwnedFieldValue) -> FieldValue<'static> {
         },
         OwnedFieldValue::Bytes(value) => FieldValue::Bytes(std::borrow::Cow::Owned(value.clone())),
         OwnedFieldValue::Struct(values) => {
-            FieldValue::Array(values.iter().map(owned_to_handler_value).collect())
+            FieldValue::Array(values.iter().map(owned_leaf_to_handler_value).collect())
         }
         OwnedFieldValue::Array(values) => {
-            FieldValue::Array(values.iter().map(owned_to_handler_value).collect())
+            FieldValue::Array(values.iter().map(owned_leaf_to_handler_value).collect())
         }
     }
 }
@@ -478,6 +619,11 @@ fn handler_to_owned_value(value: FieldValue<'static>, path: &str) -> Result<Owne
             .map(|value| handler_to_owned_value(value, path))
             .collect::<Result<Vec<_>>>()
             .map(OwnedFieldValue::Array),
+        FieldValue::Struct(values) => values
+            .into_iter()
+            .map(|value| handler_to_owned_value(value.value, path))
+            .collect::<Result<Vec<_>>>()
+            .map(OwnedFieldValue::Struct),
         _ => Err(SemanticError::Handler {
             handler: path.to_owned(),
             message: "handler returned a value unsupported by the editor".to_owned(),
