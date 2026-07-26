@@ -366,9 +366,18 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         message: "array element size must not be zero".to_owned(),
                     });
                 }
-                let element_count: usize = match count {
-                    ArrayCount::Fixed { count } => *count as usize,
-                    ArrayCount::Remainder => current.len() / element_size,
+                let (prefix_size, element_count): (usize, usize) = match count {
+                    ArrayCount::Fixed { count } => (0, *count as usize),
+                    ArrayCount::Prefixed { integer } => {
+                        let count: u64 = decode_unsigned_integer(*integer, current, &node.path)?;
+                        let count: usize =
+                            usize::try_from(count).map_err(|_| SemanticError::Decode {
+                                path: node.path.clone(),
+                                message: "array count exceeds platform size".to_owned(),
+                            })?;
+                        (integer.width as usize, count)
+                    }
+                    ArrayCount::Remainder => (0, current.len() / element_size),
                     ArrayCount::Expression { expression } => {
                         let context = EvalContext {
                             payload,
@@ -385,18 +394,21 @@ impl<'context, 'record> RecordView<'context, 'record> {
                                 });
                             }
                         };
-                        usize::try_from(value).map_err(|_| SemanticError::Decode {
-                            path: node.path.clone(),
-                            message: "array count exceeds platform size".to_owned(),
-                        })?
+                        let count: usize =
+                            usize::try_from(value).map_err(|_| SemanticError::Decode {
+                                path: node.path.clone(),
+                                message: "array count exceeds platform size".to_owned(),
+                            })?;
+                        (0, count)
                     }
                 };
-                let expected: usize = element_count.checked_mul(element_size).ok_or_else(|| {
-                    SemanticError::Decode {
+                let expected: usize = element_count
+                    .checked_mul(element_size)
+                    .and_then(|size| size.checked_add(prefix_size))
+                    .ok_or_else(|| SemanticError::Decode {
                         path: node.path.clone(),
                         message: "array byte length overflowed".to_owned(),
-                    }
-                })?;
+                    })?;
                 if expected != current.len() {
                     return Err(SemanticError::Decode {
                         path: node.path.clone(),
@@ -408,7 +420,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 }
                 let mut values: Vec<FieldValue<'a>> = Vec::with_capacity(element_count);
                 for index in 0..element_count {
-                    let start: usize = index * element_size;
+                    let start: usize = prefix_size + index * element_size;
                     let end: usize = start + element_size;
                     values.push(self.decode_node(
                         element,
@@ -631,6 +643,20 @@ fn decode_integer<'a>(integer: IntegerType, data: &'a [u8], path: &str) -> Resul
     } else {
         integer_as_u64(integer, data, path).map(FieldValue::UInt)
     }
+}
+
+fn decode_unsigned_integer(integer: IntegerType, data: &[u8], path: &str) -> Result<u64> {
+    if integer.signed {
+        return Err(SemanticError::Decode {
+            path: path.to_owned(),
+            message: "array count prefix must be unsigned".to_owned(),
+        });
+    }
+    let width: usize = integer.width as usize;
+    let prefix: &[u8] = data
+        .get(..width)
+        .ok_or_else(|| decode_length_error(path, width, data.len()))?;
+    integer_as_u64(integer, prefix, path)
 }
 
 fn integer_as_u64(integer: IntegerType, data: &[u8], path: &str) -> Result<u64> {
@@ -880,6 +906,29 @@ fn read_string_length(width: u8, data: &[u8], path: &str) -> Result<usize> {
 }
 
 fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usize> {
+    if let SchemaNodeKind::Array {
+        element,
+        count: ArrayCount::Prefixed { integer },
+    } = &node.kind
+    {
+        let element_size: usize =
+            fixed_node_size(element).ok_or_else(|| SemanticError::Decode {
+                path: node.path.clone(),
+                message: "prefixed array element must have a fixed size".to_owned(),
+            })?;
+        let count: usize = usize::try_from(decode_unsigned_integer(*integer, data, &node.path)?)
+            .map_err(|_| SemanticError::Decode {
+                path: node.path.clone(),
+                message: "array count exceeds platform size".to_owned(),
+            })?;
+        return count
+            .checked_mul(element_size)
+            .and_then(|size| size.checked_add(integer.width as usize))
+            .ok_or_else(|| SemanticError::Decode {
+                path: node.path.clone(),
+                message: "array byte length overflowed".to_owned(),
+            });
+    }
     if let SchemaNodeKind::Primitive {
         primitive: PrimitiveType::String { string },
     } = &node.kind
@@ -947,7 +996,9 @@ fn fixed_node_size(node: &SchemaNode) -> Option<usize> {
             let size: usize = fixed_node_size(element)?;
             match count {
                 ArrayCount::Fixed { count } => size.checked_mul(*count as usize),
-                ArrayCount::Expression { .. } | ArrayCount::Remainder => None,
+                ArrayCount::Prefixed { .. }
+                | ArrayCount::Expression { .. }
+                | ArrayCount::Remainder => None,
             }
         }
         _ => None,
@@ -964,6 +1015,48 @@ fn decode_length_error(path: &str, expected: usize, actual: usize) -> SemanticEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Counts a prefixed array without consuming bytes from the following struct field.
+    #[test]
+    fn prefixed_array_size_includes_counter_and_elements(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let integer = IntegerType {
+            width: 2,
+            signed: false,
+            byte_order: ByteOrder::LittleEndian,
+        };
+        let node = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(1),
+            path: "TEST/items".to_owned(),
+            name: "Items".to_owned(),
+            required: false,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Array {
+                element: Box::new(SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(2),
+                    path: "TEST/items/element".to_owned(),
+                    name: "Item".to_owned(),
+                    required: false,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Integer { integer },
+                    },
+                }),
+                count: ArrayCount::Prefixed {
+                    integer: IntegerType {
+                        width: 1,
+                        signed: false,
+                        byte_order: ByteOrder::LittleEndian,
+                    },
+                },
+            },
+        };
+
+        assert_eq!(node_data_size(&node, b"\x02\x01\0\x02\0tail", false)?, 5);
+        Ok(())
+    }
 
     #[test]
     fn windows_1252_strings_decode_without_losing_non_ascii_bytes() {

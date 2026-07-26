@@ -606,6 +606,24 @@ fn validate_node(
             }
         }
     }
+    if let SchemaNodeKind::Array {
+        count: crate::ArrayCount::Prefixed { integer },
+        ..
+    } = &node.kind
+    {
+        if integer.signed {
+            return Err(SchemaError::InvalidGraph(format!(
+                "array count prefix must be unsigned at {}",
+                node.path
+            )));
+        }
+        if !matches!(integer.width, 1 | 2 | 4 | 8) {
+            return Err(SchemaError::InvalidGraph(format!(
+                "array count prefix width must be 1, 2, 4, or 8 at {}",
+                node.path
+            )));
+        }
+    }
 
     let children: Vec<&SchemaNode> = match &node.kind {
         SchemaNodeKind::Sequence { children } => children.iter().collect(),

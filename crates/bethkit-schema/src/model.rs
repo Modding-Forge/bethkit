@@ -415,6 +415,11 @@ pub enum ArrayCount {
         /// Number of elements.
         count: u32,
     },
+    /// Element count is stored immediately before the array elements.
+    Prefixed {
+        /// Integer layout used by the count prefix.
+        integer: IntegerType,
+    },
     /// Count is read from an expression.
     Expression {
         /// Expression producing a non-negative count.

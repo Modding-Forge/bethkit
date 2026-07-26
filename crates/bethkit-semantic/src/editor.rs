@@ -4,7 +4,8 @@
 
 use bethkit_core::{Record, Signature, WritableRecord, WritableSubRecord};
 use bethkit_schema::{
-    ByteOrder, CallbackImplementation, IntegerType, PrimitiveType, SchemaNode, SchemaNodeKind,
+    ArrayCount, ByteOrder, CallbackImplementation, IntegerType, PrimitiveType, SchemaNode,
+    SchemaNodeKind,
 };
 
 use crate::value::float_to_raw;
@@ -196,6 +197,62 @@ impl RecordEditor {
         match &node.kind {
             SchemaNodeKind::Primitive { primitive } => {
                 encode_primitive(primitive, value, self.localized, &node.path)
+            }
+            SchemaNodeKind::Struct { fields } => {
+                let OwnedFieldValue::Struct(values) = value else {
+                    return Err(encode_error(&node.path, "expected a struct value"));
+                };
+                if fields.len() != values.len() {
+                    return Err(encode_error(
+                        &node.path,
+                        format!(
+                            "struct expects {} fields, got {}",
+                            fields.len(),
+                            values.len()
+                        ),
+                    ));
+                }
+                let mut output: Vec<u8> = Vec::new();
+                for (field, value) in fields.iter().zip(values) {
+                    output.extend(self.encode_node(field, value)?);
+                }
+                Ok(output)
+            }
+            SchemaNodeKind::Array { element, count } => {
+                let OwnedFieldValue::Array(values) = value else {
+                    return Err(encode_error(&node.path, "expected an array value"));
+                };
+                let mut output: Vec<u8> = Vec::new();
+                match count {
+                    ArrayCount::Fixed { count } if values.len() != *count as usize => {
+                        return Err(encode_error(
+                            &node.path,
+                            format!("array expects {count} elements, got {}", values.len()),
+                        ));
+                    }
+                    ArrayCount::Prefixed { integer } => {
+                        if integer.signed {
+                            return Err(encode_error(
+                                &node.path,
+                                "array count prefix must be unsigned",
+                            ));
+                        }
+                        let count: u64 = u64::try_from(values.len())
+                            .map_err(|_| encode_error(&node.path, "array count exceeds u64"))?;
+                        output.extend(encode_integer(*integer, count, &node.path)?);
+                    }
+                    ArrayCount::Expression { .. } => {
+                        return Err(encode_error(
+                            &node.path,
+                            "expression-counted array requires a specialized encoder",
+                        ));
+                    }
+                    ArrayCount::Fixed { .. } | ArrayCount::Remainder => {}
+                }
+                for value in values {
+                    output.extend(self.encode_node(element, value)?);
+                }
+                Ok(output)
             }
             SchemaNodeKind::Custom { decoder, .. } => self
                 .decoders
