@@ -78,6 +78,17 @@ build the project, and finish artifact verification with:
 .\scripts\Build-XEditExporter.ps1 -UseExistingIdeBuild
 ```
 
+The verification command prints the executable, patch-set, and build hashes.
+Use those values to export every game twice and create a callback inventory:
+
+```powershell
+.\scripts\Export-XEditDefinitions.ps1 `
+  -Exporter .\target\xedit-exporter\bethkit-xedit-exporter.exe `
+  -ExpectedExporterSha256 <exporter hash> `
+  -ExpectedPatchSha256 <patch-set hash> `
+  -ExpectedBuildSha256 <build hash>
+```
+
 The provenance and definition-graph operations are implemented. Exported
 dynamic callbacks intentionally fail conversion until matching audited rules
 and custom decoders are present, so release-quality schema regeneration remains
