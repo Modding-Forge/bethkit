@@ -141,6 +141,7 @@ version = "0.4.0"
 dependencies = [
  "bethkit-core",
  "bethkit-schema",
+ "serde_json",
  "thiserror",
 ]
 

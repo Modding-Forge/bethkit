@@ -21,12 +21,25 @@ pub enum SemanticError {
     #[error("required custom decoder is unavailable: {0}")]
     MissingDecoder(String),
 
+    /// A package requires a semantic handler that is not registered.
+    #[error("required semantic handler is unavailable: {0}")]
+    MissingHandler(String),
+
     /// A custom decoder rejected its payload.
     #[error("custom decoder {decoder} failed: {message}")]
     Decoder {
         /// Stable decoder identifier.
         decoder: String,
         /// Decoder-provided error context.
+        message: String,
+    },
+
+    /// A semantic callback handler rejected an invocation.
+    #[error("semantic handler {handler} failed: {message}")]
+    Handler {
+        /// Stable handler identifier.
+        handler: String,
+        /// Handler-provided error context.
         message: String,
     },
 

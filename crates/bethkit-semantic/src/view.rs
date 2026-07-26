@@ -2,6 +2,8 @@
 //!
 //! Ordered schema-guided views over parsed records.
 
+use std::borrow::Cow;
+
 use bethkit_core::{FormId, Record, Signature, SubRecord};
 use bethkit_schema::{
     ArrayCount, ByteOrder, EvalContext, EvalValue, IntegerType, PrimitiveType, SchemaNode,
@@ -9,8 +11,8 @@ use bethkit_schema::{
 };
 
 use crate::{
-    ByteSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, FieldOrigin, FieldValue, NamedValue,
-    Result, SemanticContext, SemanticError, ValidationReport,
+    grammar::interpret, ByteSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, FieldOrigin,
+    FieldValue, NamedValue, Result, SemanticContext, SemanticError, ValidationReport,
 };
 
 /// One decoded top-level record field.
@@ -70,8 +72,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
 
     /// Decodes top-level subrecords in their source order.
     ///
-    /// Unknown subrecords are returned as borrowed bytes with
-    /// [`FieldOrigin::UnknownSubrecord`].
+    /// Unknown and out-of-order known subrecords are preserved as borrowed
+    /// bytes with distinct [`FieldOrigin`] values.
     ///
     /// # Errors
     ///
@@ -79,23 +81,22 @@ impl<'context, 'record> RecordView<'context, 'record> {
     /// decoding, or a custom decoder fails.
     pub fn fields(&self) -> Result<Vec<Field<'record>>> {
         let subrecords: &'record [SubRecord] = self.record.subrecords()?;
-        let definitions: Vec<&SchemaNode> = top_level_subrecords(&self.schema.root);
+        let grammar = interpret(
+            &self.schema.root,
+            self.record.header.signature,
+            self.record.header.form_version,
+            subrecords,
+        )?;
         let mut occurrences: std::collections::BTreeMap<Signature, usize> =
             std::collections::BTreeMap::new();
         let mut fields: Vec<Field<'record>> = Vec::with_capacity(subrecords.len());
 
-        for subrecord in subrecords {
+        for (index, subrecord) in subrecords.iter().enumerate() {
             let occurrence: usize = *occurrences
                 .entry(subrecord.signature)
                 .and_modify(|value| *value += 1)
                 .or_insert(0);
-            let definition: Option<&SchemaNode> = definitions.iter().copied().find(|node| {
-                matches!(
-                    &node.kind,
-                    SchemaNodeKind::Subrecord { signature, .. }
-                        if Signature::from(*signature) == subrecord.signature
-                )
-            });
+            let definition = grammar.assignments[index];
             match definition {
                 Some(node) => {
                     let SchemaNodeKind::Subrecord { payload, .. } = &node.kind else {
@@ -122,18 +123,32 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 }
                 None => {
                     let data: &'record [u8] = subrecord.as_bytes();
+                    let declared = grammar.declared_signatures.contains(&subrecord.signature);
                     fields.push(Field {
                         node_id: bethkit_schema::SchemaNodeId(u32::MAX),
-                        path: format!("unknown.{}.{}", subrecord.signature, occurrence),
-                        name: "Unknown subrecord".to_owned(),
+                        path: format!(
+                            "{}.{}.{}",
+                            if declared { "unmatched" } else { "unknown" },
+                            subrecord.signature,
+                            occurrence
+                        ),
+                        name: if declared {
+                            "Out-of-order known subrecord".to_owned()
+                        } else {
+                            "Unknown subrecord".to_owned()
+                        },
                         subrecord_signature: subrecord.signature,
                         occurrence,
                         span: ByteSpan {
                             start: 0,
                             end: data.len(),
                         },
-                        origin: FieldOrigin::UnknownSubrecord,
-                        value: FieldValue::Bytes(data),
+                        origin: if declared {
+                            FieldOrigin::UnmatchedKnownSubrecord
+                        } else {
+                            FieldOrigin::UnknownSubrecord
+                        },
+                        value: FieldValue::Bytes(Cow::Borrowed(data)),
                     });
                 }
             }
@@ -160,15 +175,31 @@ impl<'context, 'record> RecordView<'context, 'record> {
             }
         };
 
+        let grammar = match interpret(
+            &self.schema.root,
+            self.record.header.signature,
+            self.record.header.form_version,
+            subrecords,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                report.push(self.diagnostic(
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::InvalidPayload,
+                    error.to_string(),
+                    None,
+                    None,
+                ));
+                return report;
+            }
+        };
         for definition in &definitions {
-            let SchemaNodeKind::Subrecord { signature, .. } = &definition.kind else {
-                continue;
-            };
-            let count: usize = subrecords
+            let matched = grammar
+                .assignments
                 .iter()
-                .filter(|subrecord| subrecord.signature == Signature::from(*signature))
-                .count();
-            if definition.required && count == 0 {
+                .flatten()
+                .any(|assigned| assigned.id == definition.id);
+            if definition.required && !matched {
                 report.push(self.diagnostic(
                     DiagnosticSeverity::Error,
                     DiagnosticCode::MissingRequired,
@@ -188,6 +219,17 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             DiagnosticCode::UnknownSubrecord,
                             format!(
                                 "subrecord {} is not declared by the package",
+                                field.subrecord_signature
+                            ),
+                            None,
+                            Some(field.span),
+                        ));
+                    } else if field.origin == FieldOrigin::UnmatchedKnownSubrecord {
+                        report.push(self.diagnostic(
+                            DiagnosticSeverity::Error,
+                            DiagnosticCode::InvalidOrder,
+                            format!(
+                                "subrecord {} appears outside its schema position",
                                 field.subrecord_signature
                             ),
                             None,
@@ -227,7 +269,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
             }
         }
 
-        match &node.kind {
+        let decoded = match &node.kind {
             SchemaNodeKind::Primitive { primitive } => {
                 decode_primitive(primitive, current, self.localized, &node.path)
             }
@@ -384,7 +426,9 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 path: node.path.clone(),
                 message: "container node cannot decode a payload directly".to_owned(),
             }),
-        }
+        }?;
+        self.context
+            .apply_value_callbacks(&node.path, self.record, decoded)
     }
 
     fn diagnostic(
@@ -448,7 +492,7 @@ fn decode_primitive<'a>(
                     return Err(decode_length_error(path, *expected as usize, data.len()));
                 }
             }
-            Ok(FieldValue::Bytes(data))
+            Ok(FieldValue::Bytes(Cow::Borrowed(data)))
         }
         PrimitiveType::FormId { targets } => {
             if data.len() != 4 {
@@ -481,7 +525,7 @@ fn decode_primitive<'a>(
             if data.len() != *length as usize {
                 return Err(decode_length_error(path, *length as usize, data.len()));
             }
-            Ok(FieldValue::Bytes(data))
+            Ok(FieldValue::Bytes(Cow::Borrowed(data)))
         }
     }
 }
@@ -645,7 +689,7 @@ fn decode_string<'a>(
         path: path.to_owned(),
         message: error.to_string(),
     })?;
-    Ok(FieldValue::String(value))
+    Ok(FieldValue::String(Cow::Borrowed(value)))
 }
 
 fn fixed_node_size(node: &SchemaNode) -> Option<usize> {

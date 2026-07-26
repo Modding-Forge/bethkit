@@ -2,6 +2,8 @@
 //!
 //! Decoded semantic values and byte provenance.
 
+use std::borrow::Cow;
+
 use bethkit_core::{FormId, Signature};
 use bethkit_schema::SchemaNodeId;
 
@@ -44,6 +46,8 @@ pub enum FieldOrigin {
     Schema,
     /// Field is an unknown subrecord preserved by the lossless core.
     UnknownSubrecord,
+    /// Field has a declared signature but appears outside its grammar position.
+    UnmatchedKnownSubrecord,
     /// Field was decoded by a registered custom decoder.
     CustomDecoder,
 }
@@ -72,8 +76,8 @@ pub enum FieldValue<'a> {
     UInt(u64),
     /// Floating-point value.
     Float(f64),
-    /// Borrowed UTF-8 string.
-    String(&'a str),
+    /// Borrowed or handler-owned UTF-8 string.
+    String(Cow<'a, str>),
     /// Raw file-local FormID and allowed target signatures.
     FormId {
         /// File-local FormID.
@@ -95,14 +99,88 @@ pub enum FieldValue<'a> {
         /// Names of set bits.
         active: Vec<String>,
     },
-    /// Borrowed bytes.
-    Bytes(&'a [u8]),
+    /// Borrowed or handler-owned bytes.
+    Bytes(Cow<'a, [u8]>),
     /// Packed struct fields.
     Struct(Vec<NamedValue<'a>>),
     /// Homogeneous array values.
     Array(Vec<FieldValue<'a>>),
     /// Node was excluded by its condition.
     Absent,
+}
+
+impl FieldValue<'_> {
+    pub(crate) fn to_handler_value(&self) -> FieldValue<'static> {
+        match self {
+            Self::Int(value) => FieldValue::Int(*value),
+            Self::UInt(value) => FieldValue::UInt(*value),
+            Self::Float(value) => FieldValue::Float(*value),
+            Self::String(value) => FieldValue::String(Cow::Owned(value.to_string())),
+            Self::FormId { value, targets } => FieldValue::FormId {
+                value: *value,
+                targets: targets.clone(),
+            },
+            Self::Enumeration { value, name } => FieldValue::Enumeration {
+                value: *value,
+                name: name.clone(),
+            },
+            Self::Flags { value, active } => FieldValue::Flags {
+                value: *value,
+                active: active.clone(),
+            },
+            Self::Bytes(value) => FieldValue::Bytes(Cow::Owned(value.to_vec())),
+            Self::Struct(values) => FieldValue::Struct(
+                values
+                    .iter()
+                    .map(|value| NamedValue {
+                        node_id: value.node_id,
+                        path: value.path.clone(),
+                        name: value.name.clone(),
+                        span: value.span,
+                        value: value.value.to_handler_value(),
+                    })
+                    .collect(),
+            ),
+            Self::Array(values) => {
+                FieldValue::Array(values.iter().map(FieldValue::to_handler_value).collect())
+            }
+            Self::Absent => FieldValue::Absent,
+        }
+    }
+}
+
+impl FieldValue<'static> {
+    pub(crate) fn into_record_value<'a>(self) -> FieldValue<'a> {
+        match self {
+            Self::Int(value) => FieldValue::Int(value),
+            Self::UInt(value) => FieldValue::UInt(value),
+            Self::Float(value) => FieldValue::Float(value),
+            Self::String(value) => FieldValue::String(Cow::Owned(value.into_owned())),
+            Self::FormId { value, targets } => FieldValue::FormId { value, targets },
+            Self::Enumeration { value, name } => FieldValue::Enumeration { value, name },
+            Self::Flags { value, active } => FieldValue::Flags { value, active },
+            Self::Bytes(value) => FieldValue::Bytes(Cow::Owned(value.into_owned())),
+            Self::Struct(values) => FieldValue::Struct(
+                values
+                    .into_iter()
+                    .map(|value| NamedValue {
+                        node_id: value.node_id,
+                        path: value.path,
+                        name: value.name,
+                        span: value.span,
+                        value: value.value.into_record_value(),
+                    })
+                    .collect(),
+            ),
+            Self::Array(values) => FieldValue::Array(
+                values
+                    .into_iter()
+                    .map(FieldValue::into_record_value)
+                    .collect(),
+            ),
+            Self::Absent => FieldValue::Absent,
+        }
+    }
 }
 
 /// Owned value accepted by [`crate::RecordEditor`].

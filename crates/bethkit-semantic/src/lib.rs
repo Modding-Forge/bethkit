@@ -8,6 +8,8 @@ mod context;
 mod decoder;
 mod editor;
 mod error;
+mod grammar;
+mod handler;
 mod validation;
 mod value;
 mod view;
@@ -23,6 +25,10 @@ pub use context::SemanticContext;
 pub use decoder::{CustomDecoder, DecoderRegistry};
 pub use editor::RecordEditor;
 pub use error::{Result, SemanticError};
+pub use handler::{
+    HandlerContext, HandlerInvocation, HandlerMutation, HandlerOutput, SemanticHandler,
+    SemanticHandlerRegistry,
+};
 pub use validation::{Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationReport};
 pub use value::{ByteSpan, FieldOrigin, FieldValue, NamedValue, OwnedFieldValue};
 pub use view::{Field, RecordView};

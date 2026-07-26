@@ -1,0 +1,275 @@
+// SPDX-License-Identifier: Apache-2.0
+//!
+//! Versioned semantic callback handlers and built-in xEdit operations.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use bethkit_core::{FormId, Signature};
+use bethkit_schema::{CallbackBinding, CallbackImplementation};
+
+use crate::{FieldValue, OwnedFieldValue, Result, SemanticError};
+
+/// Context supplied to one semantic callback invocation.
+pub struct HandlerContext<'a> {
+    /// Exact callback binding selected by the schema package.
+    pub binding: &'a CallbackBinding,
+    /// Main-record signature.
+    pub record_signature: Signature,
+    /// File-local main-record FormID.
+    pub form_id: FormId,
+    /// Main-record form version.
+    pub form_version: u16,
+    /// Deterministic operation configuration from the schema package.
+    pub configuration: &'a serde_json::Value,
+}
+
+/// One transactional edit requested by a semantic handler.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HandlerMutation {
+    /// Replace an existing field occurrence.
+    Set {
+        /// Stable schema path.
+        path: String,
+        /// Zero-based occurrence.
+        occurrence: usize,
+        /// Replacement value.
+        value: OwnedFieldValue,
+    },
+    /// Insert a new field.
+    Insert {
+        /// Stable schema path.
+        path: String,
+        /// Inserted value.
+        value: OwnedFieldValue,
+    },
+    /// Remove an existing field occurrence.
+    Remove {
+        /// Stable schema path.
+        path: String,
+        /// Zero-based occurrence.
+        occurrence: usize,
+    },
+}
+
+/// Typed result returned by a semantic callback handler.
+#[derive(Debug)]
+pub enum HandlerOutput {
+    /// The callback has no externally visible return value.
+    None,
+    /// Transformed semantic value.
+    Value(FieldValue<'static>),
+    /// Boolean decision such as visibility, sorting, or inclusion.
+    Boolean(bool),
+    /// Integer result such as conflict priority or union selection.
+    Integer(i64),
+    /// Text result such as an editor identifier.
+    Text(String),
+    /// File-local FormID result.
+    FormId(FormId),
+    /// Record index keys.
+    IndexKeys(Vec<String>),
+    /// Transactional record edits.
+    Mutations(Vec<HandlerMutation>),
+}
+
+/// Input supplied to a semantic callback handler.
+pub struct HandlerInvocation<'a> {
+    /// Record and binding metadata.
+    pub context: HandlerContext<'a>,
+    /// Optional decoded value for value-oriented callback roles.
+    pub value: Option<&'a FieldValue<'static>>,
+}
+
+/// Versioned implementation of one stable semantic handler.
+pub trait SemanticHandler: Send + Sync {
+    /// Stable identifier referenced by schema packages.
+    fn id(&self) -> &'static str;
+
+    /// Handler implementation version.
+    fn version(&self) -> u32;
+
+    /// Executes the callback without mutating the source record.
+    ///
+    /// Stateful handlers return [`HandlerOutput::Mutations`], which the
+    /// editor applies transactionally after the invocation succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the input or operation is invalid.
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput>;
+}
+
+/// Versioned semantic-handler registry.
+#[derive(Clone, Default)]
+pub struct SemanticHandlerRegistry {
+    handlers: BTreeMap<String, Arc<dyn SemanticHandler>>,
+}
+
+impl SemanticHandlerRegistry {
+    /// Creates an empty handler registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a registry containing differential-tested built-in handlers.
+    pub fn builtin() -> Self {
+        let mut registry = Self::new();
+        registry.register(Arc::new(NormalizeRadians));
+        registry
+    }
+
+    /// Registers or replaces a semantic handler.
+    pub fn register(&mut self, handler: Arc<dyn SemanticHandler>) {
+        self.handlers.insert(handler.id().to_owned(), handler);
+    }
+
+    /// Resolves a handler satisfying a minimum implementation version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::MissingHandler`] when the handler is absent
+    /// or older than the required version.
+    pub fn require(&self, id: &str, minimum_version: u32) -> Result<&dyn SemanticHandler> {
+        let handler = self
+            .handlers
+            .get(id)
+            .ok_or_else(|| SemanticError::MissingHandler(id.to_owned()))?;
+        if handler.version() < minimum_version {
+            return Err(SemanticError::MissingHandler(format!(
+                "{id} version {minimum_version} or newer"
+            )));
+        }
+        Ok(handler.as_ref())
+    }
+
+    /// Executes one built-in or custom-handler binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the binding is not executable through
+    /// this registry or its registered handler rejects the invocation.
+    pub fn invoke(
+        &self,
+        binding: &CallbackBinding,
+        record_signature: Signature,
+        form_id: FormId,
+        form_version: u16,
+        value: Option<&FieldValue<'static>>,
+    ) -> Result<HandlerOutput> {
+        let empty_configuration = serde_json::Value::Null;
+        let (id, minimum_version, configuration) = match &binding.implementation {
+            CallbackImplementation::BuiltIn { operation } => (
+                operation.id.as_str(),
+                operation.minimum_version,
+                &operation.configuration,
+            ),
+            CallbackImplementation::CustomHandler {
+                handler,
+                minimum_handler_version,
+            } => (
+                handler.as_str(),
+                *minimum_handler_version,
+                &empty_configuration,
+            ),
+            _ => {
+                return Err(SemanticError::Handler {
+                    handler: binding.callback_id.clone(),
+                    message: "binding is not a semantic handler".to_owned(),
+                });
+            }
+        };
+        self.require(id, minimum_version)?
+            .invoke(HandlerInvocation {
+                context: HandlerContext {
+                    binding,
+                    record_signature,
+                    form_id,
+                    form_version,
+                    configuration,
+                },
+                value,
+            })
+    }
+}
+
+struct NormalizeRadians;
+
+impl SemanticHandler for NormalizeRadians {
+    fn id(&self) -> &'static str {
+        "normalize.radians"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let Some(FieldValue::Float(value)) = invocation.value else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "radians normalizer requires a floating-point value".to_owned(),
+            });
+        };
+        Ok(HandlerOutput::Value(FieldValue::Float(
+            normalize_xedit_radians(*value),
+        )))
+    }
+}
+
+fn normalize_xedit_radians(value: f64) -> f64 {
+    let two_pi = std::f64::consts::TAU;
+    let mut result = value;
+    if (result / two_pi).abs() > 100.0 {
+        result -= result.signum() * two_pi * ((result / two_pi).abs() - 100.0).trunc();
+        if (result / two_pi).abs() > 101.0 {
+            return f64::NAN;
+        }
+    }
+    while result < 0.0 {
+        result += two_pi;
+    }
+    while result > two_pi {
+        result -= two_pi;
+    }
+    if single_same_value(result, 0.0)
+        || result < 0.0
+        || single_same_value(result, two_pi)
+        || result > two_pi
+    {
+        0.0
+    } else {
+        result
+    }
+}
+
+fn single_same_value(left: f64, right: f64) -> bool {
+    const SINGLE_RESOLUTION: f32 = 0.000_000_5;
+    let left = left as f32;
+    let right = right as f32;
+    (left - right).abs() <= (left.abs().min(right.abs()) * SINGLE_RESOLUTION).max(SINGLE_RESOLUTION)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Matches xEdit's angle normalization boundaries and large-value guard.
+    #[test]
+    fn radians_normalizer_matches_xedit_boundaries(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let tau = std::f64::consts::TAU;
+
+        // when
+        let negative = normalize_xedit_radians(-0.5);
+        let full_turn = normalize_xedit_radians(tau);
+        let guarded = normalize_xedit_radians(tau * 202.0);
+
+        // then
+        assert!((negative - (tau - 0.5)).abs() < f64::EPSILON);
+        assert_eq!(full_turn, 0.0);
+        assert_eq!(guarded, 0.0);
+        Ok(())
+    }
+}
