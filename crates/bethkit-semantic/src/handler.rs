@@ -104,6 +104,18 @@ pub trait SemanticHandler: Send + Sync {
     fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput>;
 }
 
+/// Resolves xEdit archive resource hashes to their canonical path text.
+///
+/// Implementations may consult loaded BA2/BSA indexes or another immutable cache.
+/// Calls can occur concurrently from multiple semantic contexts.
+pub trait ResourceHashResolver: Send + Sync {
+    /// Resolves a file hash.
+    fn resolve_file_hash(&self, hash: u64) -> Option<String>;
+
+    /// Resolves a folder hash.
+    fn resolve_folder_hash(&self, hash: u64) -> Option<String>;
+}
+
 /// Versioned semantic-handler registry.
 #[derive(Clone, Default)]
 pub struct SemanticHandlerRegistry {
@@ -124,12 +136,22 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(IgnoreEmptyConflictPriority));
         registry.register(Arc::new(FormatRgb));
         registry.register(Arc::new(RemovableWhenZero));
+        registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry
     }
 
     /// Registers or replaces a semantic handler.
     pub fn register(&mut self, handler: Arc<dyn SemanticHandler>) {
         self.handlers.insert(handler.id().to_owned(), handler);
+    }
+
+    /// Installs the archive-backed resolver used by xEdit resource-hash formatters.
+    ///
+    /// This replaces the built-in formatter while preserving its stable handler ID.
+    pub fn set_resource_hash_resolver(&mut self, resolver: Arc<dyn ResourceHashResolver>) {
+        self.register(Arc::new(ResourceHashFormatter {
+            resolver: Some(resolver),
+        }));
     }
 
     /// Resolves a handler satisfying a minimum implementation version.
@@ -328,6 +350,65 @@ impl SemanticHandler for RemovableWhenZero {
     }
 }
 
+struct ResourceHashFormatter {
+    resolver: Option<Arc<dyn ResourceHashResolver>>,
+}
+
+impl SemanticHandler for ResourceHashFormatter {
+    fn id(&self) -> &'static str {
+        "format.resource_hash"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let kind = invocation
+            .context
+            .configuration
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "resource-hash formatter requires a kind setting".to_owned(),
+            })?;
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "resource-hash formatter requires an integer value".to_owned(),
+        })?;
+        let hash = resource_hash(value)?;
+        let resolved = match (kind, &self.resolver) {
+            ("file", Some(resolver)) => resolver.resolve_file_hash(hash),
+            ("folder", Some(resolver)) => resolver.resolve_folder_hash(hash),
+            ("file" | "folder", None) => None,
+            _ => {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("unsupported resource-hash kind {kind:?}"),
+                });
+            }
+        };
+        let text = resolved
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("{{{hash:016X}}}"));
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+fn resource_hash(value: &FieldValue<'_>) -> Result<u64> {
+    match value {
+        FieldValue::Int(value) => Ok(*value as u64),
+        FieldValue::UInt(value) => Ok(*value),
+        FieldValue::Enumeration { value, .. } => Ok(*value as u64),
+        FieldValue::Flags { value, .. } => Ok(*value),
+        _ => Err(SemanticError::Handler {
+            handler: "format.resource_hash".to_owned(),
+            message: "resource-hash formatter requires an integer value".to_owned(),
+        }),
+    }
+}
+
 fn removable_when_zero(value: &FieldValue<'_>) -> Result<bool> {
     match value {
         FieldValue::Int(value) => Ok(*value == 0),
@@ -435,6 +516,18 @@ fn single_same_value(left: f64, right: f64) -> bool {
 mod tests {
     use super::*;
 
+    struct TestResourceHashResolver;
+
+    impl ResourceHashResolver for TestResourceHashResolver {
+        fn resolve_file_hash(&self, hash: u64) -> Option<String> {
+            (hash == 0x1234).then(|| "textures/example.dds".to_owned())
+        }
+
+        fn resolve_folder_hash(&self, hash: u64) -> Option<String> {
+            (hash == 0x5678).then(|| "textures/example".to_owned())
+        }
+    }
+
     /// Matches xEdit's angle normalization boundaries and large-value guard.
     #[test]
     fn radians_normalizer_matches_xedit_boundaries(
@@ -519,5 +612,87 @@ mod tests {
         assert!(removable_when_zero(&FieldValue::UInt(0))?);
         assert!(!removable_when_zero(&FieldValue::UInt(1))?);
         Ok(())
+    }
+
+    /// Matches xEdit's 16-digit uppercase fallback for unresolved resource hashes.
+    #[test]
+    fn resource_hash_fallback_matches_xedit_to_string() -> Result<()> {
+        assert_eq!(
+            format_resource_hash(None, "file", FieldValue::UInt(0x1234))?,
+            "{0000000000001234}"
+        );
+        assert_eq!(
+            format_resource_hash(None, "folder", FieldValue::Int(-1))?,
+            "{FFFFFFFFFFFFFFFF}"
+        );
+        Ok(())
+    }
+
+    /// Routes file and folder hashes to the corresponding archive resolver method.
+    #[test]
+    fn resource_hash_resolver_preserves_file_and_folder_modes() -> Result<()> {
+        let resolver: Arc<dyn ResourceHashResolver> = Arc::new(TestResourceHashResolver);
+        assert_eq!(
+            format_resource_hash(
+                Some(Arc::clone(&resolver)),
+                "file",
+                FieldValue::UInt(0x1234)
+            )?,
+            "textures/example.dds"
+        );
+        assert_eq!(
+            format_resource_hash(
+                Some(Arc::clone(&resolver)),
+                "folder",
+                FieldValue::UInt(0x5678)
+            )?,
+            "textures/example"
+        );
+        assert_eq!(
+            format_resource_hash(Some(resolver), "file", FieldValue::UInt(0x5678))?,
+            "{0000000000005678}"
+        );
+        Ok(())
+    }
+
+    fn format_resource_hash(
+        resolver: Option<Arc<dyn ResourceHashResolver>>,
+        kind: &str,
+        value: FieldValue<'static>,
+    ) -> Result<String> {
+        let binding = CallbackBinding {
+            path: "TEST/Hash".to_owned(),
+            callback_id: "integer.formatter".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-resource-hash".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "format.resource_hash".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({ "kind": kind }),
+                },
+            },
+        };
+        let output = ResourceHashFormatter { resolver }.invoke(HandlerInvocation {
+            context: HandlerContext {
+                binding: &binding,
+                record_signature: Signature(*b"TEST"),
+                form_id: FormId::NULL,
+                form_version: 0,
+                game: SchemaGame::SkyrimSe,
+                configuration: match &binding.implementation {
+                    CallbackImplementation::BuiltIn { operation } => &operation.configuration,
+                    _ => unreachable!("test binding is built-in"),
+                },
+            },
+            value: Some(&value),
+        })?;
+        match output {
+            HandlerOutput::Text(value) => Ok(value),
+            _ => Err(SemanticError::Handler {
+                handler: "format.resource_hash".to_owned(),
+                message: "test formatter returned a non-text result".to_owned(),
+            }),
+        }
     }
 }

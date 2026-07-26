@@ -26,8 +26,8 @@ pub use decoder::{CustomDecoder, DecodedPayload, DecoderRegistry};
 pub use editor::RecordEditor;
 pub use error::{Result, SemanticError};
 pub use handler::{
-    HandlerContext, HandlerInvocation, HandlerMutation, HandlerOutput, SemanticHandler,
-    SemanticHandlerRegistry,
+    HandlerContext, HandlerInvocation, HandlerMutation, HandlerOutput, ResourceHashResolver,
+    SemanticHandler, SemanticHandlerRegistry,
 };
 pub use validation::{Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationReport};
 pub use value::{ByteSpan, FieldOrigin, FieldValue, NamedValue, OwnedFieldValue};

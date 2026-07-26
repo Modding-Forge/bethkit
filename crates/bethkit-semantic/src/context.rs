@@ -194,7 +194,13 @@ impl SemanticContext {
             .package()
             .callback_bindings()
             .iter()
-            .filter(|binding| binding.path == path && binding.callback_id == "def.value_transform")
+            .filter(|binding| {
+                binding.path == path
+                    && matches!(
+                        binding.callback_id.as_str(),
+                        "def.value_transform" | "integer.formatter" | "string.formatter"
+                    )
+            })
         {
             if !matches!(
                 binding.implementation,
