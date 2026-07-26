@@ -315,20 +315,15 @@ if ($PrepareOnly) {
     ) {
         throw 'Could not find the configurable xDump project properties'
     }
-    $mapNodes = @($ideProject.SelectNodes('//msb:DCC_MapFile', $namespace))
-    if ($mapNodes.Count -eq 0) {
+    $mapNode = $properties.SelectSingleNode('msb:DCC_MapFile', $namespace)
+    if ($null -eq $mapNode) {
         $mapNode = $ideProject.CreateElement(
             'DCC_MapFile',
             'http://schemas.microsoft.com/developer/msbuild/2003'
         )
-        $mapNode.InnerText = '3'
         $properties.AppendChild($mapNode) | Out-Null
     }
-    else {
-        foreach ($mapNode in $mapNodes) {
-            $mapNode.InnerText = '3'
-        }
-    }
+    $mapNode.InnerText = '3'
     $configNode.InnerText = $Configuration
     $platformNode.InnerText = $Platform
     $projectGuidNode.InnerText = if ($Configuration -eq 'Release') {
