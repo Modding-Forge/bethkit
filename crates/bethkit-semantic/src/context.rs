@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use bethkit_core::Record;
-use bethkit_schema::{CallbackImplementation, SchemaPackage, SchemaRegistry};
+use bethkit_schema::{CallbackImplementation, ConflictPriority, SchemaPackage, SchemaRegistry};
 
 use crate::{
     DecoderRegistry, FieldValue, HandlerOutput, RecordEditor, RecordView, Result, SemanticError,
@@ -94,6 +94,55 @@ impl SemanticContext {
         &self.handlers
     }
 
+    /// Returns the effective xEdit conflict priority for an exact schema path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::MissingPath`] when the path is not part of the
+    /// record schema, or [`SemanticError::Handler`] when a dynamic priority
+    /// callback returns an invalid result.
+    pub fn conflict_priority(&self, record: &Record, path: &str) -> Result<ConflictPriority> {
+        let node = self
+            .registry
+            .get_node(record.header.signature, path)
+            .ok_or_else(|| SemanticError::MissingPath(path.to_owned()))?;
+        let mut priority = node.conflict_priority;
+        for binding in self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| {
+                binding.path == path && binding.callback_id == "def.conflict_priority"
+            })
+        {
+            if !matches!(
+                binding.implementation,
+                CallbackImplementation::BuiltIn { .. }
+                    | CallbackImplementation::CustomHandler { .. }
+            ) {
+                continue;
+            }
+            priority = match self.handlers.invoke(
+                binding,
+                record.header.signature,
+                record.header.form_id,
+                record.header.form_version,
+                self.registry.package().manifest().game,
+                None,
+            )? {
+                HandlerOutput::ConflictPriority(priority) => priority,
+                _ => {
+                    return Err(SemanticError::Handler {
+                        handler: binding.callback_id.clone(),
+                        message: "conflict-priority callback returned an invalid result".to_owned(),
+                    });
+                }
+            };
+        }
+        Ok(priority)
+    }
+
     pub(crate) fn apply_normalizers<'a>(
         &self,
         path: &str,
@@ -123,6 +172,7 @@ impl SemanticContext {
                 record.header.signature,
                 record.header.form_id,
                 record.header.form_version,
+                self.registry.package().manifest().game,
                 Some(&handler_value),
             )? {
                 HandlerOutput::Value(transformed) => transformed.into_record_value(),

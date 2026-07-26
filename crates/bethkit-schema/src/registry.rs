@@ -11,7 +11,8 @@ use bethkit_core::{Game, Signature};
 
 use crate::package::decode_bundle;
 use crate::{
-    Result, SchemaError, SchemaGame, SchemaLoadLimits, SchemaPackage, SchemaRecord, SchemaSignature,
+    Result, SchemaError, SchemaGame, SchemaLoadLimits, SchemaNode, SchemaNodeKind, SchemaPackage,
+    SchemaRecord, SchemaSignature,
 };
 
 include!(concat!(env!("OUT_DIR"), "/embedded_catalog.rs"));
@@ -44,6 +45,12 @@ impl SchemaRegistry {
         self.package.records().get(index)
     }
 
+    /// Returns the node at an exact stable schema path for a main-record signature.
+    pub fn get_node(&self, signature: Signature, path: &str) -> Option<&SchemaNode> {
+        let record = self.get(signature)?;
+        find_node(&record.root, path)
+    }
+
     /// Returns the owned package backing this registry.
     pub fn package(&self) -> &Arc<SchemaPackage> {
         &self.package
@@ -58,6 +65,29 @@ impl SchemaRegistry {
     pub fn is_empty(&self) -> bool {
         self.record_indices.is_empty()
     }
+}
+
+fn find_node<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaNode> {
+    if node.path == path {
+        return Some(node);
+    }
+    match &node.kind {
+        SchemaNodeKind::Sequence { children } => find_in_nodes(children, path),
+        SchemaNodeKind::Choice { alternatives } => find_in_nodes(alternatives, path),
+        SchemaNodeKind::Repeat { child, .. }
+        | SchemaNodeKind::Subrecord { payload: child, .. }
+        | SchemaNodeKind::Array { element: child, .. }
+        | SchemaNodeKind::Compressed { child, .. } => find_node(child, path),
+        SchemaNodeKind::Struct { fields } => find_in_nodes(fields, path),
+        SchemaNodeKind::Union { variants, .. } => find_in_nodes(variants, path),
+        SchemaNodeKind::Primitive { .. }
+        | SchemaNodeKind::Custom { .. }
+        | SchemaNodeKind::Reference { .. } => None,
+    }
+}
+
+fn find_in_nodes<'a>(nodes: &'a [SchemaNode], path: &str) -> Option<&'a SchemaNode> {
+    nodes.iter().find_map(|node| find_node(node, path))
 }
 
 /// Owned collection of schema packages keyed by game mode.

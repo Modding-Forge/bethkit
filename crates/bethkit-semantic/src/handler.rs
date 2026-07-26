@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bethkit_core::{FormId, Signature};
-use bethkit_schema::{CallbackBinding, CallbackImplementation};
+use bethkit_schema::{CallbackBinding, CallbackImplementation, ConflictPriority, SchemaGame};
 
 use crate::{FieldValue, OwnedFieldValue, Result, SemanticError};
 
@@ -20,6 +20,8 @@ pub struct HandlerContext<'a> {
     pub form_id: FormId,
     /// Main-record form version.
     pub form_version: u16,
+    /// Game mode selected by the schema package.
+    pub game: SchemaGame,
     /// Deterministic operation configuration from the schema package.
     pub configuration: &'a serde_json::Value,
 }
@@ -61,8 +63,10 @@ pub enum HandlerOutput {
     Value(FieldValue<'static>),
     /// Boolean decision such as visibility, sorting, or inclusion.
     Boolean(bool),
-    /// Integer result such as conflict priority or union selection.
+    /// Integer result such as a union selection.
     Integer(i64),
+    /// xEdit conflict priority selected for one schema node.
+    ConflictPriority(ConflictPriority),
     /// Text result such as an editor identifier.
     Text(String),
     /// File-local FormID result.
@@ -116,6 +120,7 @@ impl SemanticHandlerRegistry {
     pub fn builtin() -> Self {
         let mut registry = Self::new();
         registry.register(Arc::new(NormalizeRadians));
+        registry.register(Arc::new(ModelInfoConflictPriority));
         registry
     }
 
@@ -155,6 +160,7 @@ impl SemanticHandlerRegistry {
         record_signature: Signature,
         form_id: FormId,
         form_version: u16,
+        game: SchemaGame,
         value: Option<&FieldValue<'static>>,
     ) -> Result<HandlerOutput> {
         let empty_configuration = serde_json::Value::Null;
@@ -186,6 +192,7 @@ impl SemanticHandlerRegistry {
                     record_signature,
                     form_id,
                     form_version,
+                    game,
                     configuration,
                 },
                 value,
@@ -214,6 +221,42 @@ impl SemanticHandler for NormalizeRadians {
         Ok(HandlerOutput::Value(FieldValue::Float(
             normalize_xedit_radians(*value),
         )))
+    }
+}
+
+struct ModelInfoConflictPriority;
+
+impl SemanticHandler for ModelInfoConflictPriority {
+    fn id(&self) -> &'static str {
+        "conflict.model_info_form_version"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        Ok(HandlerOutput::ConflictPriority(
+            model_info_conflict_priority(invocation.context.game, invocation.context.form_version),
+        ))
+    }
+}
+
+const fn model_info_conflict_priority(game: SchemaGame, form_version: u16) -> ConflictPriority {
+    let uses_modern_model_info = matches!(
+        game,
+        SchemaGame::SkyrimLe
+            | SchemaGame::SkyrimSe
+            | SchemaGame::SkyrimVr
+            | SchemaGame::Fallout4
+            | SchemaGame::Fallout4Vr
+            | SchemaGame::Fallout76
+            | SchemaGame::Starfield
+    );
+    if uses_modern_model_info && form_version < 38 {
+        ConflictPriority::Ignore
+    } else {
+        ConflictPriority::Normal
     }
 }
 
@@ -271,5 +314,22 @@ mod tests {
         assert_eq!(full_turn, 0.0);
         assert_eq!(guarded, 0.0);
         Ok(())
+    }
+
+    /// Matches xEdit's `wbModelInfoGetCP` form-version boundary.
+    #[test]
+    fn model_info_conflict_priority_matches_xedit_boundary() {
+        assert_eq!(
+            model_info_conflict_priority(SchemaGame::SkyrimSe, 37),
+            ConflictPriority::Ignore
+        );
+        assert_eq!(
+            model_info_conflict_priority(SchemaGame::SkyrimSe, 38),
+            ConflictPriority::Normal
+        );
+        assert_eq!(
+            model_info_conflict_priority(SchemaGame::Fallout3, 15),
+            ConflictPriority::Normal
+        );
     }
 }

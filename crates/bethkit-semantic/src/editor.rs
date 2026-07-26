@@ -243,6 +243,7 @@ impl RecordEditor {
                 self.record.signature,
                 self.record.form_id,
                 self.record.form_version,
+                self.registry.package().manifest().game,
                 Some(&handler_value),
             )? {
                 HandlerOutput::Value(value) => handler_to_owned_value(value, path)?,
@@ -283,6 +284,7 @@ impl RecordEditor {
                 record.signature,
                 record.form_id,
                 record.form_version,
+                self.registry.package().manifest().game,
                 Some(&handler_value),
             )? {
                 HandlerOutput::None => {}
