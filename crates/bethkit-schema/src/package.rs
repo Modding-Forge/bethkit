@@ -567,9 +567,9 @@ fn validate_node(
                 node.path
             )));
         }
-        if *digits < -1 {
+        if *digits < 0 && *digits != i32::MIN {
             return Err(SchemaError::InvalidGraph(format!(
-                "float digits must be -1 or non-negative at {}",
+                "float digits must be i32::MIN or non-negative at {}",
                 node.path
             )));
         }

@@ -204,19 +204,19 @@ pub enum OwnedFieldValue {
     Array(Vec<OwnedFieldValue>),
 }
 
-pub(crate) fn float_from_raw(value: f64, scale: f64, digits: i16) -> f64 {
+pub(crate) fn float_from_raw(value: f64, scale: f64, digits: i32) -> f64 {
     round_float_to_digits(value * scale, digits)
 }
 
-pub(crate) fn float_to_raw(value: f64, scale: f64, digits: i16) -> f64 {
+pub(crate) fn float_to_raw(value: f64, scale: f64, digits: i32) -> f64 {
     round_float_to_digits(value, digits) / scale
 }
 
-fn round_float_to_digits(value: f64, digits: i16) -> f64 {
-    if digits < 0 || !value.is_finite() {
+fn round_float_to_digits(value: f64, digits: i32) -> f64 {
+    if digits == i32::MIN || !value.is_finite() {
         return value;
     }
-    let factor = 10.0_f64.powi(-i32::from(digits));
+    let factor = 10.0_f64.powi(-digits);
     (value / factor).round_ties_even() * factor
 }
 

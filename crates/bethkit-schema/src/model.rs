@@ -348,9 +348,9 @@ pub enum PrimitiveType {
         /// Multiplier applied after raw-value normalization.
         #[serde(default = "default_float_scale")]
         scale: f64,
-        /// Decimal places retained by xEdit, or `-1` when rounding is disabled.
+        /// Decimal places retained by xEdit, or [`i32::MIN`] when rounding is disabled.
         #[serde(default = "default_float_digits")]
-        digits: i16,
+        digits: i32,
     },
     /// String value.
     String {
@@ -431,8 +431,8 @@ const fn default_float_scale() -> f64 {
     1.0
 }
 
-const fn default_float_digits() -> i16 {
-    -1
+const fn default_float_digits() -> i32 {
+    i32::MIN
 }
 
 /// Supported node kinds in the schema grammar.
