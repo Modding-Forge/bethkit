@@ -13,7 +13,7 @@ use std::fmt;
 ///
 /// Stored as a fixed `[u8; 4]` array to avoid heap allocation and to allow
 /// use as hash-map keys and `match` arms.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Signature(pub [u8; 4]);
 
 impl Signature {

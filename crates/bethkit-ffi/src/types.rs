@@ -17,16 +17,28 @@ use bethkit_core::{Game, GameContext, PluginKind, StringFileKind};
 // NOTE: variants are constructed by C callers via integer cast, not in Rust.
 #[allow(dead_code)]
 pub enum BethkitGame {
-    /// The Elder Scrolls V: Skyrim Special Edition (and Anniversary Edition).
-    SkyrimSe = 0,
-    /// Fallout 4.
-    Fallout4 = 1,
     /// The Elder Scrolls V: Skyrim (original 2011 release).
-    Skyrim = 2,
+    SkyrimLe = 0,
+    /// The Elder Scrolls V: Skyrim Special Edition (and Anniversary Edition).
+    SkyrimSe = 1,
+    /// The Elder Scrolls V: Skyrim VR.
+    SkyrimVr = 2,
     /// Fallout 3.
     Fallout3 = 3,
     /// Fallout: New Vegas.
     FalloutNv = 4,
+    /// Fallout 4.
+    Fallout4 = 5,
+    /// Fallout 4 VR.
+    Fallout4Vr = 6,
+    /// Fallout 76.
+    Fallout76 = 7,
+    /// The Elder Scrolls IV: Oblivion.
+    Oblivion = 8,
+    /// The Elder Scrolls III: Morrowind.
+    Morrowind = 9,
+    /// Starfield.
+    Starfield = 10,
 }
 
 /// Plugin file type (determines FormID space and load-order slot allocation).
@@ -110,12 +122,10 @@ pub enum BethkitFieldValueKind {
     Struct = 8,
     /// A homogeneous array of field values.
     Array = 9,
-    /// A localized string-table ID (only present when the plugin is localized).
-    LocalizedId = 10,
     /// The subrecord matching this field definition was absent from the record.
-    Missing = 11,
+    Missing = 10,
     /// An unsigned 64-bit integer that cannot be losslessly represented as i64.
-    UInt = 12,
+    UInt = 11,
 }
 
 /// A typed FormID with its allowed target record-type signatures.
@@ -168,22 +178,25 @@ pub struct BethkitFlagsVal {
 
 /// Converts a [`BethkitGame`] to a [`GameContext`] usable by bethkit-core.
 pub(crate) fn game_to_ctx(game: BethkitGame) -> GameContext {
+    GameContext {
+        game: game_to_core(game),
+    }
+}
+
+/// Converts a C-ABI game value to the core game enum.
+pub(crate) const fn game_to_core(game: BethkitGame) -> Game {
     match game {
-        BethkitGame::SkyrimSe => GameContext {
-            game: Game::SkyrimSE,
-        },
-        BethkitGame::Fallout4 => GameContext {
-            game: Game::Fallout4,
-        },
-        BethkitGame::Skyrim => GameContext {
-            game: Game::SkyrimLE,
-        },
-        BethkitGame::Fallout3 => GameContext {
-            game: Game::Fallout3,
-        },
-        BethkitGame::FalloutNv => GameContext {
-            game: Game::FalloutNV,
-        },
+        BethkitGame::SkyrimLe => Game::SkyrimLE,
+        BethkitGame::SkyrimSe => Game::SkyrimSE,
+        BethkitGame::SkyrimVr => Game::SkyrimVR,
+        BethkitGame::Fallout3 => Game::Fallout3,
+        BethkitGame::FalloutNv => Game::FalloutNV,
+        BethkitGame::Fallout4 => Game::Fallout4,
+        BethkitGame::Fallout4Vr => Game::Fallout4VR,
+        BethkitGame::Fallout76 => Game::Fallout76,
+        BethkitGame::Oblivion => Game::Oblivion,
+        BethkitGame::Morrowind => Game::Morrowind,
+        BethkitGame::Starfield => Game::Starfield,
     }
 }
 

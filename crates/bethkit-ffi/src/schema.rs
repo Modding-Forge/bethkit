@@ -2,7 +2,7 @@
 //!
 //! FFI functions for schema-guided record inspection.
 //!
-//! Because [`bethkit_core::RecordView`] holds a lifetime parameter tied to
+//! Because [`bethkit_semantic::RecordView`] holds a lifetime parameter tied to
 //! the record data, it cannot be stored directly behind an opaque FFI handle.
 //! Instead, [`bethkit_record_view_new`] eagerly converts all decoded
 //! [`FieldValue`]s into owned [`BethkitNamedField`] snapshots that are
@@ -23,18 +23,23 @@
 //! arena.  They are NUL-terminated and valid until the view is freed; never
 //! free them individually.
 //!
-//! The [`BethkitSchemaRegistry`] returned by [`bethkit_schema_registry_sse`]
-//! points to a `'static` value and must never be freed.
+//! Catalog, package, and semantic-context handles are owned and must be freed
+//! with their matching functions.
 
 use std::ffi::c_char;
 use std::mem::ManuallyDrop;
+use std::path::Path;
+use std::sync::Arc;
 
-use bethkit_core::{FieldValue, RecordView, SchemaRegistry, Signature};
+use bethkit_schema::{SchemaCatalog, SchemaPackage};
+use bethkit_semantic::{DecoderRegistry, FieldValue, SemanticContext};
 
-use crate::error::FfiError;
 use crate::record::BethkitRecord;
-use crate::types::{BethkitEnumVal, BethkitFieldValueKind, BethkitFlagsVal, BethkitTypedFormId};
-use crate::{ffi_try, null_check, set_last_error, BethkitSlice};
+use crate::types::{
+    game_to_core, BethkitEnumVal, BethkitFieldValueKind, BethkitFlagsVal, BethkitGame,
+    BethkitTypedFormId,
+};
+use crate::{cstr_to_str, ffi_try, null_check, set_last_error, BethkitSlice};
 
 /// A decoded field value stored as a `#[repr(C)]` tagged union.
 ///
@@ -85,8 +90,6 @@ pub union BethkitFieldValuePayload {
     /// **Do not pass to [`bethkit_field_values_free`] if this value was
     /// obtained from a view** — that causes a double-free.
     pub array_values: *mut BethkitFieldValues,
-    /// Active when `kind == LocalizedId`.
-    pub localized_id: u32,
     /// Active when `kind == Missing` or `kind == FormId` with zero value.
     /// No meaningful data; present so the union is never zero-sized.
     pub _pad: u64,
@@ -141,46 +144,119 @@ pub struct BethkitRecordView {
     string_arena: Vec<std::ffi::CString>,
 }
 
-/// An opaque handle to a schema registry (a map from record signature to
-/// schema definition).
-///
-/// The registry returned by [`bethkit_schema_registry_sse`] is `'static`
-/// and must never be freed.
-pub struct BethkitSchemaRegistry(&'static SchemaRegistry);
+/// Owned catalog of schema packages.
+pub struct BethkitSchemaCatalog(SchemaCatalog);
 
-/// Returns a pointer to the Skyrim SE schema registry.
+/// Owned schema-package handle.
+pub struct BethkitSchemaPackage(Arc<SchemaPackage>);
+
+/// Owned semantic runtime context.
+pub struct BethkitSemanticContext(SemanticContext);
+
+/// Loads the release-time embedded schema catalog.
 ///
-/// The registry is a static singleton; do not free the returned pointer.
+/// Returns null and sets the last error when this library was built without
+/// `BETHKIT_SCHEMA_BUNDLE` or the embedded bundle is invalid.
 #[no_mangle]
-pub extern "C" fn bethkit_schema_registry_sse() -> *const BethkitSchemaRegistry {
-    static HANDLE: std::sync::OnceLock<BethkitSchemaRegistry> = std::sync::OnceLock::new();
-    HANDLE.get_or_init(|| BethkitSchemaRegistry(SchemaRegistry::sse()))
+pub extern "C" fn bethkit_schema_catalog_embedded() -> *mut BethkitSchemaCatalog {
+    let catalog = ffi_try!(SchemaCatalog::embedded(), std::ptr::null_mut());
+    Box::into_raw(Box::new(BethkitSchemaCatalog(catalog)))
 }
 
-/// Returns `true` if the registry contains a schema for the 4-byte record
-/// signature pointed to by `sig`.
+/// Loads a schema catalog bundle from `path`.
 ///
-/// `sig` must point to exactly 4 readable bytes.
-///
-/// Returns `false` and sets the last error if `reg` or `sig` is null.
+/// Returns null and sets the last error when the path or bundle is invalid.
 #[no_mangle]
-pub extern "C" fn bethkit_schema_registry_has(
-    reg: *const BethkitSchemaRegistry,
-    sig: *const u8,
-) -> bool {
-    null_check!(reg, "bethkit_schema_registry_has", false);
-    null_check!(sig, "bethkit_schema_registry_has/sig", false);
-    // SAFETY: reg and sig are non-null; sig is 4 bytes by contract.
-    let reg = unsafe { &*reg };
-    let sig_bytes: [u8; 4] = unsafe { std::ptr::read(sig as *const [u8; 4]) };
-    reg.0.get(Signature(sig_bytes)).is_some()
+pub extern "C" fn bethkit_schema_catalog_open(path: *const c_char) -> *mut BethkitSchemaCatalog {
+    let path = match cstr_to_str(path, "bethkit_schema_catalog_open/path") {
+        Some(value) => value,
+        None => return std::ptr::null_mut(),
+    };
+    let catalog = ffi_try!(SchemaCatalog::open(Path::new(path)), std::ptr::null_mut());
+    Box::into_raw(Box::new(BethkitSchemaCatalog(catalog)))
+}
+
+/// Frees an owned schema catalog. Passing null is a no-op.
+#[no_mangle]
+pub extern "C" fn bethkit_schema_catalog_free(catalog: *mut BethkitSchemaCatalog) {
+    if !catalog.is_null() {
+        // SAFETY: catalog was produced by Box::into_raw in this module.
+        drop(unsafe { Box::from_raw(catalog) });
+    }
+}
+
+/// Returns an owned package handle for `game`.
+///
+/// Returns null and sets the last error when the catalog does not contain the
+/// requested game.
+#[no_mangle]
+pub extern "C" fn bethkit_schema_catalog_package(
+    catalog: *const BethkitSchemaCatalog,
+    game: BethkitGame,
+) -> *mut BethkitSchemaPackage {
+    null_check!(
+        catalog,
+        "bethkit_schema_catalog_package",
+        std::ptr::null_mut()
+    );
+    // SAFETY: catalog was checked for null and remains borrowed.
+    let catalog = unsafe { &*catalog };
+    let package = ffi_try!(catalog.0.require(game_to_core(game)), std::ptr::null_mut());
+    Box::into_raw(Box::new(BethkitSchemaPackage(package)))
+}
+
+/// Opens one `.bkschema` package from `path`.
+#[no_mangle]
+pub extern "C" fn bethkit_schema_package_open(path: *const c_char) -> *mut BethkitSchemaPackage {
+    let path = match cstr_to_str(path, "bethkit_schema_package_open/path") {
+        Some(value) => value,
+        None => return std::ptr::null_mut(),
+    };
+    let package = ffi_try!(SchemaPackage::open(Path::new(path)), std::ptr::null_mut());
+    Box::into_raw(Box::new(BethkitSchemaPackage(Arc::new(package))))
+}
+
+/// Frees an owned schema-package handle. Passing null is a no-op.
+#[no_mangle]
+pub extern "C" fn bethkit_schema_package_free(package: *mut BethkitSchemaPackage) {
+    if !package.is_null() {
+        // SAFETY: package was produced by Box::into_raw in this module.
+        drop(unsafe { Box::from_raw(package) });
+    }
+}
+
+/// Creates a semantic context for `package` and the built-in decoders.
+#[no_mangle]
+pub extern "C" fn bethkit_semantic_context_new(
+    package: *const BethkitSchemaPackage,
+) -> *mut BethkitSemanticContext {
+    null_check!(
+        package,
+        "bethkit_semantic_context_new",
+        std::ptr::null_mut()
+    );
+    // SAFETY: package was checked for null and remains borrowed.
+    let package = unsafe { &*package };
+    let context = ffi_try!(
+        SemanticContext::new(package.0.clone(), DecoderRegistry::builtin()),
+        std::ptr::null_mut()
+    );
+    Box::into_raw(Box::new(BethkitSemanticContext(context)))
+}
+
+/// Frees an owned semantic context. Passing null is a no-op.
+#[no_mangle]
+pub extern "C" fn bethkit_semantic_context_free(context: *mut BethkitSemanticContext) {
+    if !context.is_null() {
+        // SAFETY: context was produced by Box::into_raw in this module.
+        drop(unsafe { Box::from_raw(context) });
+    }
 }
 
 /// Creates a schema-guided snapshot of all decoded fields in `record`.
 ///
-/// Looks up the schema for the 4-byte `sig` in the SSE registry.  If no
-/// schema is found for `sig`, or decoding a field fails, the affected field
-/// is stored as [`BethkitFieldValueKind::Missing`].
+/// Uses the schema package owned by `context`. Unknown subrecords remain
+/// visible as raw bytes.
 ///
 /// `localized` should be `true` when the plugin that contains `record` has
 /// its LOCALIZED flag set; see [`bethkit_plugin_is_localized`].
@@ -196,37 +272,28 @@ pub extern "C" fn bethkit_schema_registry_has(
 ///
 /// # Errors
 ///
-/// Returns null and sets the last error if `record` or `sig` is null, or
-/// schema decoding fails entirely.
+/// Returns null and sets the last error if a handle is null or decoding fails.
 #[no_mangle]
 pub extern "C" fn bethkit_record_view_new(
+    context: *const BethkitSemanticContext,
     record: *const BethkitRecord,
-    sig: *const u8,
     localized: bool,
 ) -> *mut BethkitRecordView {
+    null_check!(
+        context,
+        "bethkit_record_view_new/context",
+        std::ptr::null_mut()
+    );
     null_check!(record, "bethkit_record_view_new", std::ptr::null_mut());
-    null_check!(sig, "bethkit_record_view_new/sig", std::ptr::null_mut());
 
-    // SAFETY: record and sig are non-null; sig is 4 bytes by contract.
+    // SAFETY: context and record were checked for null and remain borrowed.
+    let context = unsafe { &*context };
     let rec = unsafe { &*record };
-    let sig_bytes: [u8; 4] = unsafe { std::ptr::read(sig as *const [u8; 4]) };
-
-    let registry = SchemaRegistry::sse();
-    let schema = match registry.get(Signature(sig_bytes)) {
-        Some(s) => s,
-        None => {
-            set_last_error(format!(
-                "bethkit_record_view_new: no schema for signature {:?}",
-                sig_bytes
-            ));
-            return std::ptr::null_mut();
-        }
-    };
-
     let view = ffi_try!(
-        RecordView::new(&rec.0, schema, localized)
-            .fields()
-            .map_err(FfiError::Core),
+        context
+            .0
+            .view(&rec.0, localized)
+            .and_then(|value| value.fields()),
         std::ptr::null_mut()
     );
 
@@ -236,7 +303,7 @@ pub extern "C" fn bethkit_record_view_new(
         .map(|fe| {
             let value = convert_field_value(&fe.value, &mut owned_strings);
             BethkitNamedField {
-                name: intern_str(fe.name, &mut owned_strings),
+                name: intern_str(&fe.name, &mut owned_strings),
                 value,
             }
         })
@@ -457,7 +524,7 @@ fn convert_field_value<'a>(
             kind: BethkitFieldValueKind::Float,
             payload: BethkitFieldValuePayload { float_val: *v },
         },
-        FieldValue::Str(s) => {
+        FieldValue::String(s) => {
             let sanitized: Vec<u8> = s.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
             let cs = std::ffi::CString::new(sanitized)
                 .unwrap_or_else(|_| std::ffi::CString::new("?").expect("single char is valid"));
@@ -468,20 +535,25 @@ fn convert_field_value<'a>(
                 payload: BethkitFieldValuePayload { str_val: ptr },
             }
         }
-        FieldValue::FormId(id) => BethkitFieldValue {
-            kind: BethkitFieldValueKind::FormId,
-            payload: BethkitFieldValuePayload { form_id: id.0 },
-        },
-        FieldValue::FormIdTyped { raw, allowed } => BethkitFieldValue {
-            kind: BethkitFieldValueKind::FormIdTyped,
-            payload: BethkitFieldValuePayload {
-                form_id_typed: BethkitTypedFormId {
-                    raw: raw.0,
-                    allowed_sigs: allowed.as_ptr() as *const [u8; 4],
-                    allowed_count: allowed.len(),
-                },
-            },
-        },
+        FieldValue::FormId { value, targets } => {
+            if targets.is_empty() {
+                BethkitFieldValue {
+                    kind: BethkitFieldValueKind::FormId,
+                    payload: BethkitFieldValuePayload { form_id: value.0 },
+                }
+            } else {
+                BethkitFieldValue {
+                    kind: BethkitFieldValueKind::FormIdTyped,
+                    payload: BethkitFieldValuePayload {
+                        form_id_typed: BethkitTypedFormId {
+                            raw: value.0,
+                            allowed_sigs: targets.as_ptr() as *const [u8; 4],
+                            allowed_count: targets.len(),
+                        },
+                    },
+                }
+            }
+        }
         FieldValue::Bytes(b) => BethkitFieldValue {
             kind: BethkitFieldValueKind::Bytes,
             payload: BethkitFieldValuePayload {
@@ -491,7 +563,7 @@ fn convert_field_value<'a>(
                 }),
             },
         },
-        FieldValue::Enum { value, name } => BethkitFieldValue {
+        FieldValue::Enumeration { value, name } => BethkitFieldValue {
             kind: BethkitFieldValueKind::Enum,
             payload: BethkitFieldValuePayload {
                 enum_val: BethkitEnumVal {
@@ -533,7 +605,7 @@ fn convert_field_value<'a>(
                 .map(|fe| {
                     let value = convert_field_value(&fe.value, owned_strings);
                     BethkitNamedField {
-                        name: intern_str(fe.name, owned_strings),
+                        name: intern_str(&fe.name, owned_strings),
                         value,
                     }
                 })
@@ -559,11 +631,7 @@ fn convert_field_value<'a>(
                 },
             }
         }
-        FieldValue::LocalizedId(id) => BethkitFieldValue {
-            kind: BethkitFieldValueKind::LocalizedId,
-            payload: BethkitFieldValuePayload { localized_id: *id },
-        },
-        FieldValue::Missing => BethkitFieldValue {
+        FieldValue::Absent => BethkitFieldValue {
             kind: BethkitFieldValueKind::Missing,
             payload: BethkitFieldValuePayload { _pad: 0 },
         },

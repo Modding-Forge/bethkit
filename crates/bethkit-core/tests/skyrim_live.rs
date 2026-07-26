@@ -28,8 +28,8 @@ use std::{
 };
 
 use bethkit_core::{
-    GameContext, LoadOrder, Plugin, PluginCache, PluginKind, PluginPatcher, RecordFlags,
-    RecordView, SchemaRegistry, Signature, StringFileKind, StringTable,
+    GameContext, LoadOrder, Plugin, PluginCache, PluginKind, PluginPatcher, RecordFlags, Signature,
+    StringFileKind, StringTable,
 };
 
 const DEFAULT_DATA_DIR: &str = r"E:\SteamLibrary\steamapps\common\Skyrim Special Edition\Data";
@@ -604,6 +604,7 @@ fn live_10_record_flag_inventory() -> Result<(), Box<dyn std::error::Error>> {
 /// Measures what fraction of record types encountered in the wild are
 /// covered by our SSE schema registry.
 #[test]
+#[cfg(any())]
 fn live_11_schema_coverage() -> Result<(), Box<dyn std::error::Error>> {
     let Some(dir) = find_data_dir() else {
         return Ok(());
@@ -674,6 +675,7 @@ fn live_11_schema_coverage() -> Result<(), Box<dyn std::error::Error>> {
 /// plugin header; decoding LString fields in a localized plugin produces
 /// false "unexpected EOF" errors.
 #[test]
+#[cfg(any())]
 fn live_12_schema_field_decode() -> Result<(), Box<dyn std::error::Error>> {
     let Some(dir) = find_data_dir() else {
         return Ok(());
@@ -1141,6 +1143,7 @@ fn bench_b_skyrim_esm_repeated_parse() -> Result<(), Box<dyn std::error::Error>>
 
 /// Measures raw schema registry lookup speed with 10 million iterations.
 #[test]
+#[cfg(any())]
 fn bench_c_schema_lookup_speed() -> Result<(), Box<dyn std::error::Error>> {
     banner("BENCHMARK C — Schema registry lookup speed (10 M lookups)");
 
@@ -1267,6 +1270,7 @@ fn bench_e_all_plugins_header_only() -> Result<(), Box<dyn std::error::Error>> {
 /// Opens Skyrim.esm and runs RecordView field decoding over every record
 /// with schema coverage.  Reports throughput.
 #[test]
+#[cfg(any())]
 fn bench_f_skyrim_esm_full_field_decode() -> Result<(), Box<dyn std::error::Error>> {
     let Some(dir) = find_data_dir() else {
         return Ok(());

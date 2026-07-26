@@ -397,22 +397,7 @@ pub extern "C" fn bethkit_writable_record_add_subrecord(
 
 /// Maps a [`BethkitGame`] discriminant to a [`GameContext`].
 fn game_to_context(game: BethkitGame) -> GameContext {
-    use bethkit_core::Game;
-    match game {
-        BethkitGame::SkyrimSe => GameContext {
-            game: Game::SkyrimSE,
-        },
-        BethkitGame::Fallout4 => GameContext {
-            game: Game::Fallout4,
-        },
-        BethkitGame::Skyrim => GameContext {
-            game: Game::SkyrimLE,
-        },
-        BethkitGame::Fallout3 => GameContext {
-            game: Game::Fallout3,
-        },
-        BethkitGame::FalloutNv => GameContext {
-            game: Game::FalloutNV,
-        },
+    GameContext {
+        game: crate::types::game_to_core(game),
     }
 }

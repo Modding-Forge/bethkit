@@ -36,6 +36,15 @@ mod writer;
 pub(crate) use error::set_last_error;
 pub use error::{bethkit_last_error, FfiError, Result};
 
+/// Current major C ABI version.
+pub const BETHKIT_ABI_VERSION: u32 = 2;
+
+/// Returns the major C ABI version implemented by this library.
+#[no_mangle]
+pub const extern "C" fn bethkit_abi_version() -> u32 {
+    BETHKIT_ABI_VERSION
+}
+
 /// A non-owning view of a byte slice passed across the FFI boundary.
 ///
 /// `ptr` points into memory owned by the object that produced this slice;

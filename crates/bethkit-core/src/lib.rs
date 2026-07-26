@@ -30,7 +30,6 @@ mod localized;
 mod patcher;
 mod plugin;
 mod record;
-mod schema;
 mod strings;
 #[cfg(test)]
 mod test_helpers;
@@ -50,7 +49,6 @@ pub use localized::{
 pub use patcher::{PluginHeaderPatch, PluginPatcher, RecordPatch};
 pub use plugin::{Plugin, PluginHeader};
 pub use record::{Record, RecordHeader, SubRecord, SubRecordData};
-pub use schema::{FieldEntry, FieldValue, RecordView, SchemaRegistry};
 pub use strings::{StringFileKind, StringTable};
 pub use types::{FormId, Game, GameContext, PluginKind, RecordFlags, Signature};
 pub use writer::{

@@ -9,6 +9,11 @@
 #include <stdlib.h>
 
 /**
+ * Current major C ABI version.
+ */
+#define BETHKIT_ABI_VERSION 2
+
+/**
  * BSA archive format version.
  */
 typedef enum BethkitBsaVersion {
@@ -71,17 +76,17 @@ typedef enum BethkitPluginKind {
  */
 typedef enum BethkitGame {
     /**
-     * The Elder Scrolls V: Skyrim Special Edition (and Anniversary Edition).
-     */
-    SkyrimSe = 0,
-    /**
-     * Fallout 4.
-     */
-    Fallout4 = 1,
-    /**
      * The Elder Scrolls V: Skyrim (original 2011 release).
      */
-    Skyrim = 2,
+    SkyrimLe = 0,
+    /**
+     * The Elder Scrolls V: Skyrim Special Edition (and Anniversary Edition).
+     */
+    SkyrimSe = 1,
+    /**
+     * The Elder Scrolls V: Skyrim VR.
+     */
+    SkyrimVr = 2,
     /**
      * Fallout 3.
      */
@@ -90,6 +95,30 @@ typedef enum BethkitGame {
      * Fallout: New Vegas.
      */
     FalloutNv = 4,
+    /**
+     * Fallout 4.
+     */
+    Fallout4 = 5,
+    /**
+     * Fallout 4 VR.
+     */
+    Fallout4Vr = 6,
+    /**
+     * Fallout 76.
+     */
+    Fallout76 = 7,
+    /**
+     * The Elder Scrolls IV: Oblivion.
+     */
+    Oblivion = 8,
+    /**
+     * The Elder Scrolls III: Morrowind.
+     */
+    Morrowind = 9,
+    /**
+     * Starfield.
+     */
+    Starfield = 10,
 } BethkitGame;
 
 /**
@@ -138,17 +167,13 @@ typedef enum BethkitFieldValueKind {
      */
     Array = 9,
     /**
-     * A localized string-table ID (only present when the plugin is localized).
-     */
-    LocalizedId = 10,
-    /**
      * The subrecord matching this field definition was absent from the record.
      */
-    Missing = 11,
+    Missing = 10,
     /**
      * An unsigned 64-bit integer that cannot be losslessly represented as i64.
      */
-    UInt = 12,
+    UInt = 11,
 } BethkitFieldValueKind;
 
 /**
@@ -277,13 +302,19 @@ typedef struct BethkitPluginWriter BethkitPluginWriter;
 typedef struct BethkitRecordView BethkitRecordView;
 
 /**
- * An opaque handle to a schema registry (a map from record signature to
- * schema definition).
- *
- * The registry returned by [`bethkit_schema_registry_sse`] is `'static`
- * and must never be freed.
+ * Owned catalog of schema packages.
  */
-typedef struct BethkitSchemaRegistry BethkitSchemaRegistry;
+typedef struct BethkitSchemaCatalog BethkitSchemaCatalog;
+
+/**
+ * Owned schema-package handle.
+ */
+typedef struct BethkitSchemaPackage BethkitSchemaPackage;
+
+/**
+ * Owned semantic runtime context.
+ */
+typedef struct BethkitSemanticContext BethkitSemanticContext;
 
 /**
  * An opaque handle to a single string table (`.strings`, `.dlstrings`, or
@@ -501,10 +532,6 @@ typedef union BethkitFieldValuePayload {
      */
     struct BethkitFieldValues *array_values;
     /**
-     * Active when `kind == LocalizedId`.
-     */
-    uint32_t localized_id;
-    /**
      * Active when `kind == Missing` or `kind == FormId` with zero value.
      * No meaningful data; present so the union is never zero-sized.
      */
@@ -547,6 +574,11 @@ typedef struct BethkitNamedField {
      */
     struct BethkitFieldValue value;
 } BethkitNamedField;
+
+/**
+ * Returns the major C ABI version implemented by this library.
+ */
+uint32_t bethkit_abi_version(void);
 
 /**
  * Frees a byte buffer that was returned as an owned allocation by a
@@ -1436,28 +1468,59 @@ char *bethkit_subrecord_as_zstring(const BethkitSubRecord *sr);
 void bethkit_zstring_free(char *ptr);
 
 /**
- * Returns a pointer to the Skyrim SE schema registry.
+ * Loads the release-time embedded schema catalog.
  *
- * The registry is a static singleton; do not free the returned pointer.
+ * Returns null and sets the last error when this library was built without
+ * `BETHKIT_SCHEMA_BUNDLE` or the embedded bundle is invalid.
  */
-const struct BethkitSchemaRegistry *bethkit_schema_registry_sse(void);
+struct BethkitSchemaCatalog *bethkit_schema_catalog_embedded(void);
 
 /**
- * Returns `true` if the registry contains a schema for the 4-byte record
- * signature pointed to by `sig`.
+ * Loads a schema catalog bundle from `path`.
  *
- * `sig` must point to exactly 4 readable bytes.
- *
- * Returns `false` and sets the last error if `reg` or `sig` is null.
+ * Returns null and sets the last error when the path or bundle is invalid.
  */
-bool bethkit_schema_registry_has(const struct BethkitSchemaRegistry *reg, const uint8_t *sig);
+struct BethkitSchemaCatalog *bethkit_schema_catalog_open(const char *path);
+
+/**
+ * Frees an owned schema catalog. Passing null is a no-op.
+ */
+void bethkit_schema_catalog_free(struct BethkitSchemaCatalog *catalog);
+
+/**
+ * Returns an owned package handle for `game`.
+ *
+ * Returns null and sets the last error when the catalog does not contain the
+ * requested game.
+ */
+struct BethkitSchemaPackage *bethkit_schema_catalog_package(const struct BethkitSchemaCatalog *catalog,
+                                                            enum BethkitGame game);
+
+/**
+ * Opens one `.bkschema` package from `path`.
+ */
+struct BethkitSchemaPackage *bethkit_schema_package_open(const char *path);
+
+/**
+ * Frees an owned schema-package handle. Passing null is a no-op.
+ */
+void bethkit_schema_package_free(struct BethkitSchemaPackage *package);
+
+/**
+ * Creates a semantic context for `package` and the built-in decoders.
+ */
+struct BethkitSemanticContext *bethkit_semantic_context_new(const struct BethkitSchemaPackage *package);
+
+/**
+ * Frees an owned semantic context. Passing null is a no-op.
+ */
+void bethkit_semantic_context_free(struct BethkitSemanticContext *context);
 
 /**
  * Creates a schema-guided snapshot of all decoded fields in `record`.
  *
- * Looks up the schema for the 4-byte `sig` in the SSE registry.  If no
- * schema is found for `sig`, or decoding a field fails, the affected field
- * is stored as [`BethkitFieldValueKind::Missing`].
+ * Uses the schema package owned by `context`. Unknown subrecords remain
+ * visible as raw bytes.
  *
  * `localized` should be `true` when the plugin that contains `record` has
  * its LOCALIZED flag set; see [`bethkit_plugin_is_localized`].
@@ -1473,11 +1536,10 @@ bool bethkit_schema_registry_has(const struct BethkitSchemaRegistry *reg, const 
  *
  * # Errors
  *
- * Returns null and sets the last error if `record` or `sig` is null, or
- * schema decoding fails entirely.
+ * Returns null and sets the last error if a handle is null or decoding fails.
  */
-struct BethkitRecordView *bethkit_record_view_new(const BethkitRecord *record,
-                                                  const uint8_t *sig,
+struct BethkitRecordView *bethkit_record_view_new(const struct BethkitSemanticContext *context,
+                                                  const BethkitRecord *record,
                                                   bool localized);
 
 /**

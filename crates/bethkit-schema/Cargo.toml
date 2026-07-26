@@ -1,0 +1,18 @@
+[package]
+name = "bethkit-schema"
+version = "0.4.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+bethkit-core = { path = "../bethkit-core" }
+ciborium = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "bethkit-schema-compiler"
+path = "src/bin/compiler.rs"
