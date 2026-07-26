@@ -3,14 +3,20 @@
 //! Lossless schema-guided record editing.
 
 use bethkit_core::{Record, Signature, WritableRecord, WritableSubRecord};
-use bethkit_schema::{ByteOrder, IntegerType, PrimitiveType, SchemaNode, SchemaNodeKind};
+use bethkit_schema::{
+    ByteOrder, CallbackImplementation, IntegerType, PrimitiveType, SchemaNode, SchemaNodeKind,
+};
 
-use crate::{OwnedFieldValue, Result, SemanticContext, SemanticError};
+use crate::{
+    FieldValue, HandlerMutation, HandlerOutput, OwnedFieldValue, Result, SemanticContext,
+    SemanticError, SemanticHandlerRegistry,
+};
 
 /// Lossless editor for one record.
 pub struct RecordEditor {
     registry: bethkit_schema::SchemaRegistry,
     decoders: crate::DecoderRegistry,
+    handlers: SemanticHandlerRegistry,
     record: WritableRecord,
     localized: bool,
 }
@@ -37,6 +43,7 @@ impl RecordEditor {
         Ok(Self {
             registry: context.registry().clone(),
             decoders: context.decoders().clone(),
+            handlers: context.handlers().clone(),
             record: WritableRecord {
                 signature: record.header.signature,
                 flags: record.header.flags,
@@ -75,8 +82,12 @@ impl RecordEditor {
                 path: path.to_owned(),
                 occurrence,
             })?;
-        let encoded: Vec<u8> = self.encode_node(payload, value)?;
-        self.record.subrecords[index].data = encoded;
+        let normalized = self.normalize_value(&payload.path, value)?;
+        let encoded: Vec<u8> = self.encode_node(payload, &normalized)?;
+        let mut candidate = clone_record(&self.record);
+        candidate.subrecords[index].data = encoded;
+        self.apply_after_set(&payload.path, &normalized, &mut candidate)?;
+        self.record = candidate;
         Ok(())
     }
 
@@ -95,20 +106,36 @@ impl RecordEditor {
             });
         };
         let target_signature: Signature = (*signature).into();
-        let insertion_index: usize = self
+        let schema = self
+            .registry
+            .get(self.record.signature)
+            .ok_or_else(|| SemanticError::MissingRecordSchema(self.record.signature.to_string()))?;
+        let ordered = top_level_subrecords(&schema.root);
+        let target_order = ordered
+            .iter()
+            .position(|candidate| candidate.id == node.id)
+            .ok_or_else(|| SemanticError::MissingPath(path.to_owned()))?;
+        let insertion_index = self
             .record
             .subrecords
             .iter()
-            .rposition(|subrecord| subrecord.signature == target_signature)
-            .map_or(self.record.subrecords.len(), |index| index + 1);
-        let encoded: Vec<u8> = self.encode_node(payload, value)?;
-        self.record.subrecords.insert(
+            .position(|subrecord| {
+                first_signature_order(&ordered, subrecord.signature)
+                    .is_some_and(|order| order > target_order)
+            })
+            .unwrap_or(self.record.subrecords.len());
+        let normalized = self.normalize_value(&payload.path, value)?;
+        let encoded: Vec<u8> = self.encode_node(payload, &normalized)?;
+        let mut candidate = clone_record(&self.record);
+        candidate.subrecords.insert(
             insertion_index,
             WritableSubRecord {
                 signature: target_signature,
                 data: encoded,
             },
         );
+        self.apply_after_set(&payload.path, &normalized, &mut candidate)?;
+        self.record = candidate;
         Ok(())
     }
 
@@ -138,7 +165,9 @@ impl RecordEditor {
                 path: path.to_owned(),
                 occurrence,
             })?;
-        self.record.subrecords.remove(index);
+        let mut candidate = clone_record(&self.record);
+        candidate.subrecords.remove(index);
+        self.record = candidate;
         Ok(())
     }
 
@@ -178,6 +207,246 @@ impl RecordEditor {
             }),
         }
     }
+
+    fn normalize_value(&self, path: &str, value: &OwnedFieldValue) -> Result<OwnedFieldValue> {
+        let mut normalized = value.clone();
+        for binding in self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| binding.path == path && binding.callback_id == "float.normalizer")
+        {
+            if !matches!(
+                binding.implementation,
+                CallbackImplementation::BuiltIn { .. }
+                    | CallbackImplementation::CustomHandler { .. }
+            ) {
+                continue;
+            }
+            let handler_value = owned_to_handler_value(&normalized);
+            normalized = match self.handlers.invoke(
+                binding,
+                self.record.signature,
+                self.record.form_id,
+                self.record.form_version,
+                Some(&handler_value),
+            )? {
+                HandlerOutput::Value(value) => handler_to_owned_value(value, path)?,
+                _ => {
+                    return Err(SemanticError::Handler {
+                        handler: binding.callback_id.clone(),
+                        message: "normalizer returned a non-value result".to_owned(),
+                    });
+                }
+            };
+        }
+        Ok(normalized)
+    }
+
+    fn apply_after_set(
+        &self,
+        path: &str,
+        value: &OwnedFieldValue,
+        record: &mut WritableRecord,
+    ) -> Result<()> {
+        for binding in self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| binding.path == path && binding.callback_id == "def.after_set")
+        {
+            if !matches!(
+                binding.implementation,
+                CallbackImplementation::BuiltIn { .. }
+                    | CallbackImplementation::CustomHandler { .. }
+            ) {
+                continue;
+            }
+            let handler_value = owned_to_handler_value(value);
+            match self.handlers.invoke(
+                binding,
+                record.signature,
+                record.form_id,
+                record.form_version,
+                Some(&handler_value),
+            )? {
+                HandlerOutput::None => {}
+                HandlerOutput::Mutations(mutations) => {
+                    self.apply_mutations(record, mutations)?;
+                }
+                _ => {
+                    return Err(SemanticError::Handler {
+                        handler: binding.callback_id.clone(),
+                        message: "after-set handler returned an invalid result".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_mutations(
+        &self,
+        record: &mut WritableRecord,
+        mutations: Vec<HandlerMutation>,
+    ) -> Result<()> {
+        for mutation in mutations {
+            match mutation {
+                HandlerMutation::Set {
+                    path,
+                    occurrence,
+                    value,
+                } => {
+                    let (signature, encoded) = self.encode_path(&path, &value)?;
+                    let target = record
+                        .subrecords
+                        .iter_mut()
+                        .filter(|subrecord| subrecord.signature == signature)
+                        .nth(occurrence)
+                        .ok_or(SemanticError::MissingOccurrence { path, occurrence })?;
+                    target.data = encoded;
+                }
+                HandlerMutation::Insert { path, value } => {
+                    let (signature, encoded) = self.encode_path(&path, &value)?;
+                    record.subrecords.push(WritableSubRecord {
+                        signature,
+                        data: encoded,
+                    });
+                }
+                HandlerMutation::Remove { path, occurrence } => {
+                    let node = self.find_node(&path)?;
+                    let SchemaNodeKind::Subrecord { signature, .. } = &node.kind else {
+                        return Err(SemanticError::Encode {
+                            path,
+                            message: "handler mutation path is not a subrecord".to_owned(),
+                        });
+                    };
+                    let signature = Signature::from(*signature);
+                    let index = record
+                        .subrecords
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, subrecord)| subrecord.signature == signature)
+                        .nth(occurrence)
+                        .map(|(index, _)| index)
+                        .ok_or(SemanticError::MissingOccurrence { path, occurrence })?;
+                    record.subrecords.remove(index);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn encode_path(&self, path: &str, value: &OwnedFieldValue) -> Result<(Signature, Vec<u8>)> {
+        let node = self.find_node(path)?;
+        let SchemaNodeKind::Subrecord { signature, payload } = &node.kind else {
+            return Err(SemanticError::Encode {
+                path: path.to_owned(),
+                message: "handler mutation path is not a subrecord".to_owned(),
+            });
+        };
+        Ok((
+            Signature::from(*signature),
+            self.encode_node(payload, value)?,
+        ))
+    }
+}
+
+fn clone_record(record: &WritableRecord) -> WritableRecord {
+    WritableRecord {
+        signature: record.signature,
+        flags: record.flags,
+        form_id: record.form_id,
+        form_version: record.form_version,
+        subrecords: record
+            .subrecords
+            .iter()
+            .map(|subrecord| WritableSubRecord {
+                signature: subrecord.signature,
+                data: subrecord.data.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn owned_to_handler_value(value: &OwnedFieldValue) -> FieldValue<'static> {
+    match value {
+        OwnedFieldValue::Int(value) => FieldValue::Int(*value),
+        OwnedFieldValue::UInt(value) => FieldValue::UInt(*value),
+        OwnedFieldValue::Float(value) => FieldValue::Float(*value),
+        OwnedFieldValue::String(value) => {
+            FieldValue::String(std::borrow::Cow::Owned(value.clone()))
+        }
+        OwnedFieldValue::FormId(value) => FieldValue::FormId {
+            value: *value,
+            targets: Vec::new(),
+        },
+        OwnedFieldValue::Bytes(value) => FieldValue::Bytes(std::borrow::Cow::Owned(value.clone())),
+        OwnedFieldValue::Struct(values) => {
+            FieldValue::Array(values.iter().map(owned_to_handler_value).collect())
+        }
+        OwnedFieldValue::Array(values) => {
+            FieldValue::Array(values.iter().map(owned_to_handler_value).collect())
+        }
+    }
+}
+
+fn handler_to_owned_value(value: FieldValue<'static>, path: &str) -> Result<OwnedFieldValue> {
+    match value {
+        FieldValue::Int(value) => Ok(OwnedFieldValue::Int(value)),
+        FieldValue::UInt(value) => Ok(OwnedFieldValue::UInt(value)),
+        FieldValue::Float(value) => Ok(OwnedFieldValue::Float(value)),
+        FieldValue::String(value) => Ok(OwnedFieldValue::String(value.into_owned())),
+        FieldValue::FormId { value, .. } => Ok(OwnedFieldValue::FormId(value)),
+        FieldValue::Bytes(value) => Ok(OwnedFieldValue::Bytes(value.into_owned())),
+        FieldValue::Array(values) => values
+            .into_iter()
+            .map(|value| handler_to_owned_value(value, path))
+            .collect::<Result<Vec<_>>>()
+            .map(OwnedFieldValue::Array),
+        _ => Err(SemanticError::Handler {
+            handler: path.to_owned(),
+            message: "handler returned a value unsupported by the editor".to_owned(),
+        }),
+    }
+}
+
+fn top_level_subrecords(root: &SchemaNode) -> Vec<&SchemaNode> {
+    fn collect<'a>(node: &'a SchemaNode, output: &mut Vec<&'a SchemaNode>) {
+        match &node.kind {
+            SchemaNodeKind::Subrecord { .. } => output.push(node),
+            SchemaNodeKind::Sequence { children } => {
+                for child in children {
+                    collect(child, output);
+                }
+            }
+            SchemaNodeKind::Choice { alternatives } => {
+                for alternative in alternatives {
+                    collect(alternative, output);
+                }
+            }
+            SchemaNodeKind::Repeat { child, .. } => collect(child, output),
+            _ => {}
+        }
+    }
+
+    let mut output = Vec::new();
+    collect(root, &mut output);
+    output
+}
+
+fn first_signature_order(nodes: &[&SchemaNode], signature: Signature) -> Option<usize> {
+    nodes.iter().position(|node| {
+        matches!(
+            node.kind,
+            SchemaNodeKind::Subrecord {
+                signature: expected,
+                ..
+            } if Signature::from(expected) == signature
+        )
+    })
 }
 
 fn find_node_by_path<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaNode> {
