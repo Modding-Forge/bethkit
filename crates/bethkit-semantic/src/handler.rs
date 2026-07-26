@@ -121,6 +121,7 @@ impl SemanticHandlerRegistry {
         let mut registry = Self::new();
         registry.register(Arc::new(NormalizeRadians));
         registry.register(Arc::new(ModelInfoConflictPriority));
+        registry.register(Arc::new(IgnoreEmptyConflictPriority));
         registry.register(Arc::new(FormatRgb));
         registry.register(Arc::new(RemovableWhenZero));
         registry
@@ -241,6 +242,40 @@ impl SemanticHandler for ModelInfoConflictPriority {
         Ok(HandlerOutput::ConflictPriority(
             model_info_conflict_priority(invocation.context.game, invocation.context.form_version),
         ))
+    }
+}
+
+struct IgnoreEmptyConflictPriority;
+
+impl SemanticHandler for IgnoreEmptyConflictPriority {
+    fn id(&self) -> &'static str {
+        "conflict.ignore_empty"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "empty-value conflict priority requires a value".to_owned(),
+        })?;
+        Ok(HandlerOutput::ConflictPriority(if is_empty_value(value) {
+            ConflictPriority::Ignore
+        } else {
+            ConflictPriority::Normal
+        }))
+    }
+}
+
+fn is_empty_value(value: &FieldValue<'_>) -> bool {
+    match value {
+        FieldValue::Bytes(value) => value.is_empty(),
+        FieldValue::String(value) => value.is_empty(),
+        FieldValue::Array(values) => values.is_empty(),
+        FieldValue::Struct(values) => values.is_empty(),
+        _ => false,
     }
 }
 
@@ -434,6 +469,17 @@ mod tests {
             model_info_conflict_priority(SchemaGame::Fallout3, 15),
             ConflictPriority::Normal
         );
+    }
+
+    /// Matches xEdit's `wbModelInfoUnknownGetCP` empty edit-value behavior.
+    #[test]
+    fn empty_value_uses_ignored_conflict_priority() {
+        assert!(is_empty_value(&FieldValue::Bytes(
+            std::borrow::Cow::Borrowed(&[])
+        )));
+        assert!(!is_empty_value(&FieldValue::Bytes(
+            std::borrow::Cow::Borrowed(&[1])
+        )));
     }
 
     /// Matches xEdit's `wbRGBAToStr` output without replacing typed values.

@@ -102,6 +102,35 @@ impl SemanticContext {
     /// record schema, or [`SemanticError::Handler`] when a dynamic priority
     /// callback returns an invalid result.
     pub fn conflict_priority(&self, record: &Record, path: &str) -> Result<ConflictPriority> {
+        self.conflict_priority_with_value(record, path, None)
+    }
+
+    /// Returns the effective xEdit conflict priority with a decoded value.
+    ///
+    /// Value-dependent callbacks, including ignore-empty rules, require this
+    /// method instead of [`Self::conflict_priority`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::MissingPath`] when the path is not part of the
+    /// record schema, or [`SemanticError::Handler`] when a dynamic priority
+    /// callback rejects the value or returns an invalid result.
+    pub fn conflict_priority_for_value(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+    ) -> Result<ConflictPriority> {
+        let handler_value = value.to_handler_value();
+        self.conflict_priority_with_value(record, path, Some(&handler_value))
+    }
+
+    fn conflict_priority_with_value(
+        &self,
+        record: &Record,
+        path: &str,
+        value: Option<&FieldValue<'static>>,
+    ) -> Result<ConflictPriority> {
         let node = self
             .registry
             .get_node(record.header.signature, path)
@@ -129,7 +158,7 @@ impl SemanticContext {
                 record.header.form_id,
                 record.header.form_version,
                 self.registry.package().manifest().game,
-                None,
+                value,
             )? {
                 HandlerOutput::ConflictPriority(priority) => priority,
                 _ => {

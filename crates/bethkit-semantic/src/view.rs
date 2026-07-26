@@ -93,6 +93,21 @@ impl<'context, 'record> RecordView<'context, 'record> {
         self.context.is_removable(self.record, path, value)
     }
 
+    /// Returns the effective xEdit conflict priority for a decoded value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the path is unknown or a bound callback
+    /// rejects the value.
+    pub fn conflict_priority(
+        &self,
+        path: &str,
+        value: &FieldValue<'_>,
+    ) -> Result<bethkit_schema::ConflictPriority> {
+        self.context
+            .conflict_priority_for_value(self.record, path, value)
+    }
+
     /// Decodes top-level subrecords in their source order.
     ///
     /// Unknown and out-of-order known subrecords are preserved as borrowed
