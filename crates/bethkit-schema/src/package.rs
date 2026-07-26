@@ -22,7 +22,7 @@ pub const PACKAGE_MAGIC: [u8; 4] = *b"BKSC";
 pub const BUNDLE_MAGIC: [u8; 4] = *b"BKCT";
 
 /// Current binary package format version.
-pub const PACKAGE_FORMAT_VERSION: u16 = 1;
+pub const PACKAGE_FORMAT_VERSION: u16 = 2;
 
 const PACKAGE_HEADER_LENGTH: usize = 48;
 const BUNDLE_HEADER_LENGTH: usize = 12;
@@ -307,9 +307,18 @@ impl SchemaPackage {
             }
             validate_string(&decoder.id, limits)?;
         }
+        for handler in &self.manifest.required_handlers {
+            if handler.id.trim().is_empty() || handler.minimum_version == 0 {
+                return Err(SchemaError::InvalidGraph(
+                    "handler identifier and version must be valid".to_owned(),
+                ));
+            }
+            validate_string(&handler.id, limits)?;
+        }
         validate_callback_bindings(
             &self.callback_bindings,
             &self.manifest.required_decoders,
+            &self.manifest.required_handlers,
             limits,
         )?;
         Ok(())
@@ -319,18 +328,31 @@ impl SchemaPackage {
 fn validate_callback_bindings(
     bindings: &[CallbackBinding],
     decoders: &[crate::DecoderRequirement],
+    handlers: &[crate::HandlerRequirement],
     limits: &SchemaLoadLimits,
 ) -> Result<()> {
-    let mut keys: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let mut keys: BTreeSet<(&str, &str, Option<u32>)> = BTreeSet::new();
     for binding in bindings {
         validate_string(&binding.path, limits)?;
         validate_string(&binding.callback_id, limits)?;
+        validate_string(&binding.implementation_fingerprint, limits)?;
         if binding.path.trim().is_empty() || binding.callback_id.trim().is_empty() {
             return Err(SchemaError::InvalidGraph(
                 "callback path and identifier must not be empty".to_owned(),
             ));
         }
-        if !keys.insert((&binding.path, &binding.callback_id)) {
+        if binding.implementation_fingerprint.len() != 64
+            || !binding
+                .implementation_fingerprint
+                .bytes()
+                .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
+        {
+            return Err(SchemaError::InvalidGraph(format!(
+                "callback {} at {} has an invalid implementation fingerprint",
+                binding.callback_id, binding.path
+            )));
+        }
+        if !keys.insert((&binding.path, &binding.callback_id, binding.callback_slot)) {
             return Err(SchemaError::InvalidGraph(format!(
                 "duplicate callback binding {} at {}",
                 binding.callback_id, binding.path
@@ -340,14 +362,20 @@ fn validate_callback_bindings(
             CallbackImplementation::Declarative { .. }
             | CallbackImplementation::UserInterfaceOnly => {}
             CallbackImplementation::BuiltIn { operation } => {
-                validate_string(operation, limits)?;
-                if operation.trim().is_empty() {
+                validate_string(&operation.id, limits)?;
+                if operation.id.trim().is_empty() || operation.minimum_version == 0 {
                     return Err(SchemaError::InvalidGraph(
                         "built-in callback operation must not be empty".to_owned(),
                     ));
                 }
+                require_handler(
+                    handlers,
+                    &operation.id,
+                    operation.minimum_version,
+                    &binding.path,
+                )?;
             }
-            CallbackImplementation::Custom {
+            CallbackImplementation::PayloadDecoder {
                 decoder,
                 minimum_decoder_version,
             } => {
@@ -366,9 +394,37 @@ fn validate_callback_bindings(
                     )));
                 }
             }
+            CallbackImplementation::CustomHandler {
+                handler,
+                minimum_handler_version,
+            } => {
+                validate_string(handler, limits)?;
+                if handler.trim().is_empty() || *minimum_handler_version == 0 {
+                    return Err(SchemaError::InvalidGraph(
+                        "custom callback handler and version must be valid".to_owned(),
+                    ));
+                }
+                require_handler(handlers, handler, *minimum_handler_version, &binding.path)?;
+            }
         }
     }
     Ok(())
+}
+
+fn require_handler(
+    handlers: &[crate::HandlerRequirement],
+    handler: &str,
+    minimum_version: u32,
+    path: &str,
+) -> Result<()> {
+    if handlers.iter().any(|requirement| {
+        requirement.id == handler && requirement.minimum_version >= minimum_version
+    }) {
+        return Ok(());
+    }
+    Err(SchemaError::InvalidGraph(format!(
+        "callback handler {handler} at {path} is missing from manifest requirements"
+    )))
 }
 
 /// Encodes packages into one deterministic catalog bundle.
@@ -549,6 +605,7 @@ mod tests {
                 source_archive_sha256: "00".repeat(32),
                 exporter_version: "0.1.0".to_owned(),
                 exporter_binary_sha256: "22".repeat(32),
+                exporter_map_sha256: "23".repeat(32),
                 exporter_patch_sha256: "33".repeat(32),
                 exporter_build_sha256: "44".repeat(32),
                 conversion_rules_sha256: "11".repeat(32),
@@ -561,6 +618,7 @@ mod tests {
                 callbacks_total: 0,
                 callbacks_classified: 0,
                 required_decoders: Vec::new(),
+                required_handlers: Vec::new(),
             },
             vec![SchemaRecord {
                 signature: SchemaSignature(*b"TEST"),

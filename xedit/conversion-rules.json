@@ -1,5 +1,5 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "callbacks": [
     {
       "path": "ACHR",
@@ -10073,5 +10073,6 @@
       "minimum_decoder_version": null,
       "rationale": "xEdit exposes this callback as presentation-only metadata."
     }
-  ]
+  ],
+  "implementations": []
 }

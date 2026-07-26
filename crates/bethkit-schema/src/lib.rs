@@ -17,9 +17,10 @@ mod xedit;
 pub use error::{Result, SchemaError};
 pub use expression::{EvalContext, EvalValue, Expression};
 pub use model::{
-    ArrayCount, ByteOrder, CallbackBinding, CallbackClass, CallbackImplementation,
-    DecoderRequirement, IntegerType, PrimitiveType, SchemaGame, SchemaManifest, SchemaNode,
-    SchemaNodeId, SchemaNodeKind, SchemaRecord, SchemaSignature, StringType, ValidationStatus,
+    ArrayCount, BuiltInOperation, ByteOrder, CallbackBinding, CallbackClass,
+    CallbackImplementation, DecoderRequirement, HandlerRequirement, IntegerType, PrimitiveType,
+    SchemaGame, SchemaManifest, SchemaNode, SchemaNodeId, SchemaNodeKind, SchemaRecord,
+    SchemaSignature, StringType, ValidationStatus,
 };
 pub use package::{
     encode_bundle, SchemaLoadLimits, SchemaPackage, BUNDLE_MAGIC, PACKAGE_FORMAT_VERSION,
@@ -27,6 +28,6 @@ pub use package::{
 };
 pub use registry::{SchemaCatalog, SchemaRegistry};
 pub use xedit::{
-    convert_xedit_export, CallbackRule, ConversionRules, ExportedCallback, ExporterProvenance,
-    XEditExport,
+    convert_xedit_export, CallbackRule, CallbackRuleAction, ConversionRules, ExportedCallback,
+    ExporterProvenance, ImplementationRule, ImplementationRuleMatch, XEditExport,
 };

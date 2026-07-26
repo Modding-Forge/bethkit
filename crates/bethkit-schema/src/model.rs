@@ -150,6 +150,8 @@ pub struct SchemaManifest {
     pub exporter_version: String,
     /// SHA-256 of the exporter executable.
     pub exporter_binary_sha256: String,
+    /// SHA-256 of the detailed Delphi MAP paired with the exporter.
+    pub exporter_map_sha256: String,
     /// SHA-256 of the patch set applied to xEdit.
     pub exporter_patch_sha256: String,
     /// Hash identifying the external Delphi build environment.
@@ -174,6 +176,8 @@ pub struct SchemaManifest {
     pub callbacks_classified: u64,
     /// Custom decoders required by this package.
     pub required_decoders: Vec<DecoderRequirement>,
+    /// Semantic callback handlers required by this package.
+    pub required_handlers: Vec<HandlerRequirement>,
 }
 
 /// A custom semantic decoder required by a package.
@@ -185,6 +189,15 @@ pub struct DecoderRequirement {
     pub minimum_version: u32,
 }
 
+/// A semantic callback handler required by a package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandlerRequirement {
+    /// Stable handler identifier.
+    pub id: String,
+    /// Minimum compatible handler implementation version.
+    pub minimum_version: u32,
+}
+
 /// Classification assigned to xEdit callbacks during conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -193,8 +206,9 @@ pub enum CallbackClass {
     Declarative,
     /// Callback maps directly to a built-in runtime operation.
     BuiltIn,
-    /// Callback is implemented by a registered custom decoder.
-    Custom,
+    /// Callback is implemented by a registered semantic handler.
+    #[serde(rename = "custom_handler", alias = "custom")]
+    CustomHandler,
     /// Callback affects xEdit presentation only.
     UserInterfaceOnly,
 }
@@ -210,18 +224,36 @@ pub enum CallbackImplementation {
     },
     /// Callback behavior implemented by a stable built-in operation.
     BuiltIn {
-        /// Stable operation identifier.
-        operation: String,
+        /// Structured built-in operation.
+        operation: BuiltInOperation,
     },
-    /// Callback behavior implemented by a registered custom handler.
-    Custom {
-        /// Stable custom decoder identifier.
+    /// Callback is satisfied by the payload decoder attached to the schema node.
+    PayloadDecoder {
+        /// Stable custom payload decoder identifier.
         decoder: String,
-        /// Minimum compatible decoder version.
+        /// Minimum compatible payload decoder version.
         minimum_decoder_version: u32,
+    },
+    /// Callback behavior implemented by a registered semantic handler.
+    CustomHandler {
+        /// Stable semantic handler identifier.
+        handler: String,
+        /// Minimum compatible handler version.
+        minimum_handler_version: u32,
     },
     /// Callback affects presentation only and is not executed at runtime.
     UserInterfaceOnly,
+}
+
+/// Versioned built-in semantic operation with deterministic configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuiltInOperation {
+    /// Stable operation identifier resolved through the semantic handler registry.
+    pub id: String,
+    /// Minimum compatible handler implementation version.
+    pub minimum_version: u32,
+    /// Handler-specific deterministic configuration.
+    pub configuration: serde_json::Value,
 }
 
 /// Exact schema-path binding for one classified xEdit callback.
@@ -231,6 +263,10 @@ pub struct CallbackBinding {
     pub path: String,
     /// Stable exporter callback role.
     pub callback_id: String,
+    /// Optional callback slot for arrays of callbacks attached to one definition.
+    pub callback_slot: Option<u32>,
+    /// Build-bound implementation fingerprint used for audit traceability.
+    pub implementation_fingerprint: String,
     /// Executable callback representation.
     pub implementation: CallbackImplementation,
 }

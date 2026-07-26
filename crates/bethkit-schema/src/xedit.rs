@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CallbackBinding, CallbackClass, CallbackImplementation, DecoderRequirement, Expression, Result,
-    SchemaError, SchemaGame, SchemaManifest, SchemaNode, SchemaNodeKind, SchemaPackage,
-    SchemaRecord, ValidationStatus, PACKAGE_FORMAT_VERSION,
+    BuiltInOperation, CallbackBinding, CallbackClass, CallbackImplementation, DecoderRequirement,
+    Expression, HandlerRequirement, Result, SchemaError, SchemaGame, SchemaManifest, SchemaNode,
+    SchemaNodeKind, SchemaPackage, SchemaRecord, ValidationStatus, PACKAGE_FORMAT_VERSION,
 };
 
 /// Provenance emitted by the externally built xEdit exporter.
@@ -26,6 +26,8 @@ pub struct ExporterProvenance {
     pub exporter_version: String,
     /// SHA-256 of the exporter executable.
     pub exporter_binary_sha256: String,
+    /// SHA-256 of the detailed Delphi MAP paired with the executable.
+    pub exporter_map_sha256: String,
     /// SHA-256 of the applied exporter patch set.
     pub exporter_patch_sha256: String,
     /// Hash identifying the Delphi build environment.
@@ -39,8 +41,18 @@ pub struct ExportedCallback {
     pub path: String,
     /// Stable callback identifier emitted by the patched exporter.
     pub callback_id: String,
+    /// Optional slot for arrays of callbacks attached to one definition.
+    pub callback_slot: Option<u32>,
     /// Whether the callback can affect binary interpretation or validation.
     pub semantic: bool,
+    /// Build-bound callback implementation fingerprint.
+    pub implementation_fingerprint: String,
+    /// Detailed Delphi MAP symbol for the callback invoke address.
+    pub implementation_symbol: String,
+    /// Delphi unit containing the implementation symbol.
+    pub implementation_unit: String,
+    /// Source line when the detailed MAP provides one.
+    pub implementation_source_line: Option<u32>,
 }
 
 /// Complete normalized result produced for one xEdit game mode.
@@ -65,6 +77,17 @@ pub struct CallbackRule {
     pub path: String,
     /// Exact exporter callback identifier.
     pub callback_id: String,
+    /// Optional exact callback slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_slot: Option<u32>,
+    /// Audited implementation assigned to this exact path.
+    #[serde(flatten)]
+    pub action: CallbackRuleAction,
+}
+
+/// Audited callback behavior shared by exact-path and implementation rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallbackRuleAction {
     /// Audited callback classification.
     pub classification: CallbackClass,
     /// Bounded expression, required for `declarative`.
@@ -72,24 +95,52 @@ pub struct CallbackRule {
     pub expression: Option<Expression>,
     /// Stable built-in operation, required for `built_in`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub built_in_operation: Option<String>,
-    /// Custom decoder identifier, required for `custom`.
+    pub built_in_operation: Option<BuiltInOperation>,
+    /// Custom semantic handler identifier, required for `custom_handler`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_decoder: Option<String>,
-    /// Minimum custom decoder version.
+    pub custom_handler: Option<String>,
+    /// Minimum custom handler version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub minimum_decoder_version: Option<u32>,
+    pub minimum_handler_version: Option<u32>,
     /// Human-readable review note.
     pub rationale: String,
+}
+
+/// Expected per-game path set for one implementation fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImplementationRuleMatch {
+    /// Game for which the path-set guard applies.
+    pub game: SchemaGame,
+    /// Expected number of callback bindings.
+    pub expected_match_count: u32,
+    /// SHA-256 of sorted `slot|path` entries.
+    pub expected_paths_sha256: String,
+}
+
+/// Rule mapping one build-bound implementation to stable Bethkit behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImplementationRule {
+    /// Exact exporter implementation fingerprint.
+    pub implementation_fingerprint: String,
+    /// Exact callback role.
+    pub callback_id: String,
+    /// Guarded game-specific path sets.
+    pub matches: Vec<ImplementationRuleMatch>,
+    /// Audited behavior assigned to this implementation.
+    #[serde(flatten)]
+    pub action: CallbackRuleAction,
 }
 
 /// Versioned conversion-rule document tracked in the repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversionRules {
-    /// Rule format version. Version 1 is currently supported.
+    /// Rule format version. Version 2 is currently supported.
     pub format_version: u32,
-    /// Audited callback rules.
+    /// Audited exact-path rules, reserved for presentation-only metadata.
     pub callbacks: Vec<CallbackRule>,
+    /// Audited semantic implementation rules.
+    #[serde(default)]
+    pub implementations: Vec<ImplementationRule>,
 }
 
 /// Converts a normalized export into a validated candidate package.
@@ -110,10 +161,23 @@ pub fn convert_xedit_export(
     check_version(export.contract_version)?;
     check_version(rules.format_version)?;
 
-    let mut indexed: BTreeMap<(&str, &str), &CallbackRule> = BTreeMap::new();
+    let mut indexed: BTreeMap<(String, String, Option<u32>), &CallbackRule> = BTreeMap::new();
     for rule in &rules.callbacks {
+        if rule.action.classification != CallbackClass::UserInterfaceOnly {
+            return Err(SchemaError::InvalidGraph(format!(
+                "exact path rule {} at {} must be UI-only",
+                rule.callback_id, rule.path
+            )));
+        }
         if indexed
-            .insert((&rule.path, &rule.callback_id), rule)
+            .insert(
+                (
+                    rule.path.clone(),
+                    rule.callback_id.clone(),
+                    rule.callback_slot,
+                ),
+                rule,
+            )
             .is_some()
         {
             return Err(SchemaError::InvalidGraph(format!(
@@ -122,24 +186,83 @@ pub fn convert_xedit_export(
             )));
         }
     }
+    let mut implementations: BTreeMap<(String, String), &ImplementationRule> = BTreeMap::new();
+    for rule in &rules.implementations {
+        let key = (
+            rule.implementation_fingerprint.clone(),
+            rule.callback_id.clone(),
+        );
+        if implementations.insert(key, rule).is_some() {
+            return Err(SchemaError::InvalidGraph(format!(
+                "duplicate implementation rule for {} fingerprint {}",
+                rule.callback_id, rule.implementation_fingerprint
+            )));
+        }
+    }
+    validate_implementation_matches(&export, &rules.implementations)?;
 
     let mut missing: Vec<String> = Vec::new();
     let mut decoders: BTreeMap<String, u32> = BTreeMap::new();
+    let mut handlers: BTreeMap<String, u32> = BTreeMap::new();
     let mut schema_decoders: BTreeMap<String, String> = BTreeMap::new();
     let mut callback_bindings: Vec<CallbackBinding> = Vec::with_capacity(export.callbacks.len());
     for record in &export.records {
         collect_schema_decoders(&record.root, &mut decoders, &mut schema_decoders)?;
     }
     for callback in &export.callbacks {
-        let rule = indexed.get(&(callback.path.as_str(), callback.callback_id.as_str()));
+        validate_exported_callback(callback)?;
+        let exact_key = (
+            callback.path.clone(),
+            callback.callback_id.clone(),
+            callback.callback_slot,
+        );
+        let rule = indexed.get(&exact_key).or_else(|| {
+            callback.callback_slot.and_then(|_| {
+                indexed.get(&(callback.path.clone(), callback.callback_id.clone(), None))
+            })
+        });
         if let Some(rule) = rule {
-            if callback.semantic && rule.classification == CallbackClass::UserInterfaceOnly {
+            if callback.semantic && rule.action.classification == CallbackClass::UserInterfaceOnly {
                 return Err(SchemaError::InvalidGraph(format!(
                     "semantic callback {} at {} cannot be classified as UI-only",
                     callback.callback_id, callback.path
                 )));
             }
-            callback_bindings.push(build_callback_binding(rule, callback, &mut decoders)?);
+            callback_bindings.push(build_callback_binding(
+                &rule.action,
+                callback,
+                &mut handlers,
+            )?);
+            continue;
+        }
+        let implementation_key = (
+            callback.implementation_fingerprint.clone(),
+            callback.callback_id.clone(),
+        );
+        if let Some(rule) = implementations.get(&implementation_key) {
+            if !rule
+                .matches
+                .iter()
+                .any(|expected| expected.game == export.game)
+            {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "implementation {} role {} is not approved for {}",
+                    callback.implementation_fingerprint,
+                    callback.callback_id,
+                    export.game.slug()
+                )));
+            }
+            if !callback.semantic {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "UI-only callback {} at {} must use an exact path rule",
+                    callback.callback_id, callback.path
+                )));
+            }
+            callback_bindings.push(build_callback_binding(
+                &rule.action,
+                callback,
+                &mut handlers,
+            )?);
             continue;
         }
         if callback.semantic {
@@ -148,7 +271,9 @@ pub fn convert_xedit_export(
                 callback_bindings.push(CallbackBinding {
                     path: callback.path.clone(),
                     callback_id: callback.callback_id.clone(),
-                    implementation: CallbackImplementation::Custom {
+                    callback_slot: callback.callback_slot,
+                    implementation_fingerprint: callback.implementation_fingerprint.clone(),
+                    implementation: CallbackImplementation::PayloadDecoder {
                         decoder: decoder.clone(),
                         minimum_decoder_version: 1,
                     },
@@ -156,7 +281,10 @@ pub fn convert_xedit_export(
                 continue;
             }
         }
-        missing.push(format!("{}@{}", callback.callback_id, callback.path));
+        missing.push(format!(
+            "{}@{}#{}",
+            callback.callback_id, callback.path, callback.implementation_fingerprint
+        ));
     }
     if !missing.is_empty() {
         missing.sort();
@@ -170,8 +298,19 @@ pub fn convert_xedit_export(
             minimum_version,
         })
         .collect();
+    let required_handlers: Vec<HandlerRequirement> = handlers
+        .into_iter()
+        .map(|(id, minimum_version)| HandlerRequirement {
+            id,
+            minimum_version,
+        })
+        .collect();
     callback_bindings.sort_by(|left, right| {
-        (&left.path, &left.callback_id).cmp(&(&right.path, &right.callback_id))
+        (&left.path, &left.callback_id, left.callback_slot).cmp(&(
+            &right.path,
+            &right.callback_id,
+            right.callback_slot,
+        ))
     });
     let callback_count = u64::try_from(export.callbacks.len())
         .map_err(|_| SchemaError::LimitExceeded("callback count exceeds u64".to_owned()))?;
@@ -187,6 +326,7 @@ pub fn convert_xedit_export(
             source_archive_sha256: source.source_archive_sha256,
             exporter_version: source.exporter_version,
             exporter_binary_sha256: source.exporter_binary_sha256,
+            exporter_map_sha256: source.exporter_map_sha256,
             exporter_patch_sha256: source.exporter_patch_sha256,
             exporter_build_sha256: source.exporter_build_sha256,
             conversion_rules_sha256: hex::encode(Sha256::digest(rules_bytes)),
@@ -199,6 +339,7 @@ pub fn convert_xedit_export(
             callbacks_total: callback_count,
             callbacks_classified: callback_count,
             required_decoders,
+            required_handlers,
         },
         export.records,
         callback_bindings,
@@ -252,7 +393,7 @@ fn collect_schema_decoders(
 }
 
 fn check_version(version: u32) -> Result<()> {
-    if version == 1 {
+    if version == 2 {
         return Ok(());
     }
     Err(SchemaError::UnsupportedVersion(
@@ -260,29 +401,118 @@ fn check_version(version: u32) -> Result<()> {
     ))
 }
 
+fn validate_exported_callback(callback: &ExportedCallback) -> Result<()> {
+    let valid_fingerprint = callback.implementation_fingerprint.len() == 64
+        && callback
+            .implementation_fingerprint
+            .bytes()
+            .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value));
+    if !valid_fingerprint {
+        return Err(SchemaError::InvalidGraph(format!(
+            "callback {} at {} has an invalid implementation fingerprint",
+            callback.callback_id, callback.path
+        )));
+    }
+    if callback.semantic
+        && (callback.implementation_symbol.trim().is_empty()
+            || callback.implementation_unit.trim().is_empty())
+    {
+        return Err(SchemaError::InvalidGraph(format!(
+            "semantic callback {} at {} has no resolved Delphi symbol",
+            callback.callback_id, callback.path
+        )));
+    }
+    Ok(())
+}
+
+fn validate_implementation_matches(
+    export: &XEditExport,
+    rules: &[ImplementationRule],
+) -> Result<()> {
+    for rule in rules {
+        let mut games: BTreeMap<SchemaGame, &ImplementationRuleMatch> = BTreeMap::new();
+        for expected in &rule.matches {
+            if games.insert(expected.game, expected).is_some() {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "implementation rule {} has duplicate match guards for {}",
+                    rule.implementation_fingerprint,
+                    expected.game.slug()
+                )));
+            }
+        }
+        let Some(expected) = games.get(&export.game) else {
+            continue;
+        };
+        let mut paths: Vec<String> = export
+            .callbacks
+            .iter()
+            .filter(|callback| {
+                callback.callback_id == rule.callback_id
+                    && callback.implementation_fingerprint == rule.implementation_fingerprint
+            })
+            .map(|callback| {
+                format!(
+                    "{}|{}",
+                    callback
+                        .callback_slot
+                        .map_or_else(|| "*".to_owned(), |slot| slot.to_string()),
+                    callback.path
+                )
+            })
+            .collect();
+        paths.sort();
+        let count: u32 = u32::try_from(paths.len()).map_err(|_| {
+            SchemaError::LimitExceeded("implementation rule path count exceeds u32".to_owned())
+        })?;
+        if count != expected.expected_match_count {
+            return Err(SchemaError::InvalidGraph(format!(
+                "implementation {} role {} matched {count} paths for {}, expected {}",
+                rule.implementation_fingerprint,
+                rule.callback_id,
+                export.game.slug(),
+                expected.expected_match_count
+            )));
+        }
+        let mut canonical = paths.join("\n");
+        if !canonical.is_empty() {
+            canonical.push('\n');
+        }
+        let actual_digest = hex::encode(Sha256::digest(canonical.as_bytes()));
+        if actual_digest != expected.expected_paths_sha256 {
+            return Err(SchemaError::InvalidGraph(format!(
+                "implementation {} role {} path digest changed for {}",
+                rule.implementation_fingerprint,
+                rule.callback_id,
+                export.game.slug()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn build_callback_binding(
-    rule: &CallbackRule,
+    action: &CallbackRuleAction,
     callback: &ExportedCallback,
-    decoders: &mut BTreeMap<String, u32>,
+    handlers: &mut BTreeMap<String, u32>,
 ) -> Result<CallbackBinding> {
     let unexpected = |field: &str| {
         SchemaError::InvalidGraph(format!(
             "{} callback {} at {} has unexpected {field}",
-            callback_class_name(rule.classification),
+            callback_class_name(action.classification),
             callback.callback_id,
             callback.path
         ))
     };
-    let implementation = match rule.classification {
+    let implementation = match action.classification {
         CallbackClass::Declarative => {
-            if rule.built_in_operation.is_some()
-                || rule.custom_decoder.is_some()
-                || rule.minimum_decoder_version.is_some()
+            if action.built_in_operation.is_some()
+                || action.custom_handler.is_some()
+                || action.minimum_handler_version.is_some()
             {
                 return Err(unexpected("implementation metadata"));
             }
             CallbackImplementation::Declarative {
-                expression: rule.expression.clone().ok_or_else(|| {
+                expression: action.expression.clone().ok_or_else(|| {
                     SchemaError::InvalidGraph(format!(
                         "declarative callback {} at {} has no expression",
                         callback.callback_id, callback.path
@@ -291,50 +521,66 @@ fn build_callback_binding(
             }
         }
         CallbackClass::BuiltIn => {
-            if rule.expression.is_some()
-                || rule.custom_decoder.is_some()
-                || rule.minimum_decoder_version.is_some()
+            if action.expression.is_some()
+                || action.custom_handler.is_some()
+                || action.minimum_handler_version.is_some()
             {
                 return Err(unexpected("implementation metadata"));
             }
-            let operation = rule.built_in_operation.clone().ok_or_else(|| {
+            let operation = action.built_in_operation.clone().ok_or_else(|| {
                 SchemaError::InvalidGraph(format!(
                     "built-in callback {} at {} has no operation",
                     callback.callback_id, callback.path
                 ))
             })?;
+            if operation.id.trim().is_empty() || operation.minimum_version == 0 {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "built-in callback {} at {} has an invalid operation",
+                    callback.callback_id, callback.path
+                )));
+            }
+            handlers
+                .entry(operation.id.clone())
+                .and_modify(|current| *current = (*current).max(operation.minimum_version))
+                .or_insert(operation.minimum_version);
             CallbackImplementation::BuiltIn { operation }
         }
-        CallbackClass::Custom => {
-            if rule.expression.is_some() || rule.built_in_operation.is_some() {
+        CallbackClass::CustomHandler => {
+            if action.expression.is_some() || action.built_in_operation.is_some() {
                 return Err(unexpected("implementation metadata"));
             }
-            let decoder = rule.custom_decoder.clone().ok_or_else(|| {
+            let handler = action.custom_handler.clone().ok_or_else(|| {
                 SchemaError::InvalidGraph(format!(
-                    "custom callback {} at {} has no decoder",
+                    "custom callback {} at {} has no handler",
                     callback.callback_id, callback.path
                 ))
             })?;
-            let version = rule.minimum_decoder_version.ok_or_else(|| {
+            let version = action.minimum_handler_version.ok_or_else(|| {
                 SchemaError::InvalidGraph(format!(
-                    "custom callback {} at {} has no decoder version",
+                    "custom callback {} at {} has no handler version",
                     callback.callback_id, callback.path
                 ))
             })?;
-            decoders
-                .entry(decoder.clone())
+            if handler.trim().is_empty() || version == 0 {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "custom callback {} at {} has invalid handler metadata",
+                    callback.callback_id, callback.path
+                )));
+            }
+            handlers
+                .entry(handler.clone())
                 .and_modify(|current| *current = (*current).max(version))
                 .or_insert(version);
-            CallbackImplementation::Custom {
-                decoder,
-                minimum_decoder_version: version,
+            CallbackImplementation::CustomHandler {
+                handler,
+                minimum_handler_version: version,
             }
         }
         CallbackClass::UserInterfaceOnly => {
-            if rule.expression.is_some()
-                || rule.built_in_operation.is_some()
-                || rule.custom_decoder.is_some()
-                || rule.minimum_decoder_version.is_some()
+            if action.expression.is_some()
+                || action.built_in_operation.is_some()
+                || action.custom_handler.is_some()
+                || action.minimum_handler_version.is_some()
             {
                 return Err(unexpected("implementation metadata"));
             }
@@ -344,6 +590,8 @@ fn build_callback_binding(
     Ok(CallbackBinding {
         path: callback.path.clone(),
         callback_id: callback.callback_id.clone(),
+        callback_slot: callback.callback_slot,
+        implementation_fingerprint: callback.implementation_fingerprint.clone(),
         implementation,
     })
 }
@@ -352,7 +600,7 @@ const fn callback_class_name(classification: CallbackClass) -> &'static str {
     match classification {
         CallbackClass::Declarative => "declarative",
         CallbackClass::BuiltIn => "built-in",
-        CallbackClass::Custom => "custom",
+        CallbackClass::CustomHandler => "custom handler",
         CallbackClass::UserInterfaceOnly => "UI-only",
     }
 }
@@ -360,6 +608,51 @@ const fn callback_class_name(classification: CallbackClass) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn provenance() -> ExporterProvenance {
+        ExporterProvenance {
+            source_tag: "xedit-4.1.5f".to_owned(),
+            source_commit: "f5c00f3fa3ee39511185515802647246c807f759".to_owned(),
+            source_archive_sha256: "00".repeat(32),
+            exporter_version: "2".to_owned(),
+            exporter_binary_sha256: "11".repeat(32),
+            exporter_map_sha256: "12".repeat(32),
+            exporter_patch_sha256: "22".repeat(32),
+            exporter_build_sha256: "33".repeat(32),
+        }
+    }
+
+    fn callback(path: &str, callback_id: &str, semantic: bool) -> ExportedCallback {
+        ExportedCallback {
+            path: path.to_owned(),
+            callback_id: callback_id.to_owned(),
+            callback_slot: None,
+            semantic,
+            implementation_fingerprint: "aa".repeat(32),
+            implementation_symbol: if semantic {
+                "Test.UnitCallback".to_owned()
+            } else {
+                String::new()
+            },
+            implementation_unit: if semantic {
+                "Test".to_owned()
+            } else {
+                String::new()
+            },
+            implementation_source_line: None,
+        }
+    }
+
+    fn ui_action() -> CallbackRuleAction {
+        CallbackRuleAction {
+            classification: CallbackClass::UserInterfaceOnly,
+            expression: None,
+            built_in_operation: None,
+            custom_handler: None,
+            minimum_handler_version: None,
+            rationale: "Presentation only.".to_owned(),
+        }
+    }
 
     /// Verifies the flat node representation emitted by the Delphi exporter.
     #[test]
@@ -404,36 +697,21 @@ mod tests {
     {
         // given
         let export = XEditExport {
-            contract_version: 1,
-            provenance: ExporterProvenance {
-                source_tag: "xedit-4.1.5f".to_owned(),
-                source_commit: "f5c00f3fa3ee39511185515802647246c807f759".to_owned(),
-                source_archive_sha256: "00".repeat(32),
-                exporter_version: "1".to_owned(),
-                exporter_binary_sha256: "11".repeat(32),
-                exporter_patch_sha256: "22".repeat(32),
-                exporter_build_sha256: "33".repeat(32),
-            },
+            contract_version: 2,
+            provenance: provenance(),
             game: SchemaGame::SkyrimSe,
             records: Vec::new(),
-            callbacks: vec![ExportedCallback {
-                path: "TEST/ui".to_owned(),
-                callback_id: "def.dont_show".to_owned(),
-                semantic: false,
-            }],
+            callbacks: vec![callback("TEST/ui", "def.dont_show", false)],
         };
         let rules = ConversionRules {
-            format_version: 1,
+            format_version: 2,
             callbacks: vec![CallbackRule {
                 path: "TEST/ui".to_owned(),
                 callback_id: "def.dont_show".to_owned(),
-                classification: CallbackClass::UserInterfaceOnly,
-                expression: None,
-                built_in_operation: None,
-                custom_decoder: None,
-                minimum_decoder_version: None,
-                rationale: "Presentation only.".to_owned(),
+                callback_slot: None,
+                action: ui_action(),
             }],
+            implementations: Vec::new(),
         };
 
         // when
@@ -453,27 +731,16 @@ mod tests {
     fn conversion_rejects_unknown_callbacks() {
         // given
         let export = XEditExport {
-            contract_version: 1,
-            provenance: ExporterProvenance {
-                source_tag: "xedit-4.1.5f".to_owned(),
-                source_commit: "f5c00f3fa3ee39511185515802647246c807f759".to_owned(),
-                source_archive_sha256: "00".repeat(32),
-                exporter_version: "1".to_owned(),
-                exporter_binary_sha256: "11".repeat(32),
-                exporter_patch_sha256: "22".repeat(32),
-                exporter_build_sha256: "33".repeat(32),
-            },
+            contract_version: 2,
+            provenance: provenance(),
             game: SchemaGame::SkyrimSe,
             records: Vec::new(),
-            callbacks: vec![ExportedCallback {
-                path: "NPC_.DATA".to_owned(),
-                callback_id: "size_decider".to_owned(),
-                semantic: true,
-            }],
+            callbacks: vec![callback("NPC_.DATA", "size_decider", true)],
         };
         let rules = ConversionRules {
-            format_version: 1,
+            format_version: 2,
             callbacks: Vec::new(),
+            implementations: Vec::new(),
         };
 
         // when
@@ -483,22 +750,73 @@ mod tests {
         assert!(matches!(result, Err(SchemaError::UnclassifiedCallbacks(_))));
     }
 
+    /// Verifies implementation rules are path-guarded and require runtime handlers.
+    #[test]
+    fn conversion_expands_guarded_implementation_rules(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let exported = callback("TEST/value", "float.normalizer", true);
+        let digest = hex::encode(Sha256::digest(b"*|TEST/value\n"));
+        let export = XEditExport {
+            contract_version: 2,
+            provenance: provenance(),
+            game: SchemaGame::SkyrimSe,
+            records: Vec::new(),
+            callbacks: vec![exported.clone()],
+        };
+        let operation = BuiltInOperation {
+            id: "normalize.radians".to_owned(),
+            minimum_version: 1,
+            configuration: serde_json::json!({"period": std::f64::consts::TAU}),
+        };
+        let rules = ConversionRules {
+            format_version: 2,
+            callbacks: Vec::new(),
+            implementations: vec![ImplementationRule {
+                implementation_fingerprint: exported.implementation_fingerprint,
+                callback_id: exported.callback_id,
+                matches: vec![ImplementationRuleMatch {
+                    game: SchemaGame::SkyrimSe,
+                    expected_match_count: 1,
+                    expected_paths_sha256: digest,
+                }],
+                action: CallbackRuleAction {
+                    classification: CallbackClass::BuiltIn,
+                    expression: None,
+                    built_in_operation: Some(operation.clone()),
+                    custom_handler: None,
+                    minimum_handler_version: None,
+                    rationale: "Matches xEdit's radians normalizer.".to_owned(),
+                },
+            }],
+        };
+
+        // when
+        let package = convert_xedit_export(export, &rules, b"{}")?;
+
+        // then
+        assert_eq!(
+            package.manifest().required_handlers,
+            vec![HandlerRequirement {
+                id: operation.id.clone(),
+                minimum_version: operation.minimum_version,
+            }]
+        );
+        assert!(matches!(
+            &package.callback_bindings()[0].implementation,
+            CallbackImplementation::BuiltIn { operation: actual } if actual == &operation
+        ));
+        Ok(())
+    }
+
     /// Verifies that custom schema nodes always become decoder requirements.
     #[test]
     fn conversion_collects_custom_node_decoders(
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given
         let export = XEditExport {
-            contract_version: 1,
-            provenance: ExporterProvenance {
-                source_tag: "xedit-4.1.5f".to_owned(),
-                source_commit: "f5c00f3fa3ee39511185515802647246c807f759".to_owned(),
-                source_archive_sha256: "00".repeat(32),
-                exporter_version: "1".to_owned(),
-                exporter_binary_sha256: "11".repeat(32),
-                exporter_patch_sha256: "22".repeat(32),
-                exporter_build_sha256: "33".repeat(32),
-            },
+            contract_version: 2,
+            provenance: provenance(),
             game: SchemaGame::SkyrimSe,
             records: vec![SchemaRecord {
                 signature: crate::SchemaSignature(*b"TEST"),
@@ -515,15 +833,12 @@ mod tests {
                     },
                 },
             }],
-            callbacks: vec![ExportedCallback {
-                path: "TEST/root".to_owned(),
-                callback_id: "decoder.required".to_owned(),
-                semantic: true,
-            }],
+            callbacks: vec![callback("TEST/root", "decoder.required", true)],
         };
         let rules = ConversionRules {
-            format_version: 1,
+            format_version: 2,
             callbacks: Vec::new(),
+            implementations: Vec::new(),
         };
 
         // when
@@ -539,7 +854,7 @@ mod tests {
         );
         assert!(matches!(
             package.callback_bindings()[0].implementation,
-            CallbackImplementation::Custom {
+            CallbackImplementation::PayloadDecoder {
                 ref decoder,
                 minimum_decoder_version: 1,
             } if decoder == "xedit.dtunion"
