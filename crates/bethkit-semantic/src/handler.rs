@@ -10,6 +10,18 @@ use bethkit_schema::{CallbackBinding, CallbackImplementation, ConflictPriority, 
 
 use crate::{FieldValue, OwnedFieldValue, Result, SemanticError};
 
+pub(crate) fn is_validation_binding(binding: &CallbackBinding) -> bool {
+    matches!(
+        &binding.implementation,
+        CallbackImplementation::BuiltIn { operation }
+            if operation
+                .configuration
+                .get("phase")
+                .and_then(serde_json::Value::as_str)
+                == Some("validation")
+    )
+}
+
 /// Context supplied to one semantic callback invocation.
 pub struct HandlerContext<'a> {
     /// Exact callback binding selected by the schema package.
@@ -138,6 +150,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
+        registry.register(Arc::new(InvalidModelInfoValidation));
         registry
     }
 
@@ -427,6 +440,24 @@ impl SemanticHandler for ModelInfoCounts {
             message: "model-info counter update requires a struct value".to_owned(),
         })?;
         Ok(HandlerOutput::Value(update_model_info_counts(value)?))
+    }
+}
+
+struct InvalidModelInfoValidation;
+
+impl SemanticHandler for InvalidModelInfoValidation {
+    fn id(&self) -> &'static str {
+        "validate.invalid_model_info"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, _invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        Ok(HandlerOutput::Text(
+            "SubRecord has invalid format for the Form Version of this record".to_owned(),
+        ))
     }
 }
 
@@ -822,6 +853,46 @@ mod tests {
             ));
         };
         assert!(matches!(&fields[0].value, FieldValue::Array(values) if values.is_empty()));
+        Ok(())
+    }
+
+    /// Preserves xEdit's exact model-info format validation message.
+    #[test]
+    fn invalid_model_info_validation_matches_xedit_message() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/ERROR".to_owned(),
+            callback_id: "def.value_transform".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-invalid-model-info".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "validate.invalid_model_info".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({ "phase": "validation" }),
+                },
+            },
+        };
+        let output = InvalidModelInfoValidation.invoke(HandlerInvocation {
+            context: HandlerContext {
+                binding: &binding,
+                record_signature: Signature(*b"TEST"),
+                form_id: FormId::NULL,
+                form_version: 0,
+                game: SchemaGame::SkyrimSe,
+                configuration: match &binding.implementation {
+                    CallbackImplementation::BuiltIn { operation } => &operation.configuration,
+                    _ => unreachable!("test binding is built-in"),
+                },
+            },
+            value: None,
+        })?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::Text(message)
+                if message
+                    == "SubRecord has invalid format for the Form Version of this record"
+        ));
         Ok(())
     }
 

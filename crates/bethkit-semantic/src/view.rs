@@ -6,14 +6,15 @@ use std::borrow::Cow;
 
 use bethkit_core::{FormId, Record, Signature, SubRecord};
 use bethkit_schema::{
-    ArrayCount, ByteOrder, EvalContext, EvalValue, IntegerType, PrimitiveType, SchemaNode,
-    SchemaNodeKind, SchemaRecord, StringType,
+    ArrayCount, ByteOrder, CallbackImplementation, EvalContext, EvalValue, IntegerType,
+    PrimitiveType, SchemaNode, SchemaNodeKind, SchemaRecord, StringType,
 };
 
 use crate::value::float_from_raw;
 use crate::{
     grammar::interpret, ByteSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, FieldOrigin,
-    FieldValue, NamedValue, Result, SemanticContext, SemanticError, ValidationReport,
+    FieldValue, HandlerOutput, NamedValue, Result, SemanticContext, SemanticError,
+    ValidationReport,
 };
 
 /// One decoded top-level record field.
@@ -286,6 +287,17 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             Some(field.span),
                         ));
                     }
+                    if matches!(
+                        field.origin,
+                        FieldOrigin::Schema | FieldOrigin::CustomDecoder
+                    ) {
+                        self.validate_callback_value(
+                            &field.path,
+                            &field.value,
+                            field.span,
+                            &mut report,
+                        );
+                    }
                 }
             }
             Err(error) => {
@@ -299,6 +311,80 @@ impl<'context, 'record> RecordView<'context, 'record> {
             }
         }
         report
+    }
+
+    fn validate_callback_value(
+        &self,
+        path: &str,
+        value: &FieldValue<'_>,
+        span: ByteSpan,
+        report: &mut ValidationReport,
+    ) {
+        for binding in self
+            .context
+            .registry()
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| {
+                binding.path == path
+                    && binding.callback_id == "def.value_transform"
+                    && crate::handler::is_validation_binding(binding)
+            })
+        {
+            if !matches!(
+                binding.implementation,
+                CallbackImplementation::BuiltIn { .. }
+                    | CallbackImplementation::CustomHandler { .. }
+            ) {
+                continue;
+            }
+            let handler_value = value.to_handler_value();
+            let outcome = self.context.handlers().invoke(
+                binding,
+                self.record.header.signature,
+                self.record.header.form_id,
+                self.record.header.form_version,
+                self.context.registry().package().manifest().game,
+                Some(&handler_value),
+            );
+            let message = match outcome {
+                Ok(HandlerOutput::Text(message)) if !message.is_empty() => Some(message),
+                Ok(HandlerOutput::None | HandlerOutput::Text(_)) => None,
+                Ok(_) => Some("validation callback returned an invalid result".to_owned()),
+                Err(error) => Some(error.to_string()),
+            };
+            if let Some(message) = message {
+                let node = self
+                    .context
+                    .registry()
+                    .get_node(self.record.header.signature, path);
+                report.push(self.diagnostic(
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::CallbackValidation,
+                    message,
+                    node,
+                    Some(span),
+                ));
+            }
+        }
+        self.validate_callback_descendants(value, report);
+    }
+
+    fn validate_callback_descendants(&self, value: &FieldValue<'_>, report: &mut ValidationReport) {
+        match value {
+            FieldValue::Struct(values) => {
+                for value in values {
+                    self.validate_callback_value(&value.path, &value.value, value.span, report);
+                }
+            }
+            FieldValue::Array(values) => {
+                for value in values {
+                    self.validate_callback_descendants(value, report);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn decode_node<'a>(

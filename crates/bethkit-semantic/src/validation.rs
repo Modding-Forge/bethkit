@@ -35,6 +35,8 @@ pub enum DiagnosticCode {
     OverlappingBytes,
     /// A FormID target has an invalid record type.
     InvalidFormIdTarget,
+    /// An xEdit semantic validation callback rejected a value.
+    CallbackValidation,
     /// A subrecord is unknown to the current schema.
     UnknownSubrecord,
 }
