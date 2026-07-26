@@ -144,6 +144,12 @@ pub struct SchemaManifest {
     pub source_archive_sha256: String,
     /// Version of the xEdit graph exporter.
     pub exporter_version: String,
+    /// SHA-256 of the exporter executable.
+    pub exporter_binary_sha256: String,
+    /// SHA-256 of the patch set applied to xEdit.
+    pub exporter_patch_sha256: String,
+    /// Hash identifying the external Delphi build environment.
+    pub exporter_build_sha256: String,
     /// SHA-256 of path-based conversion rules.
     pub conversion_rules_sha256: String,
     /// Minimum compatible Bethkit version.
@@ -158,6 +164,10 @@ pub struct SchemaManifest {
     pub validated_records: u64,
     /// Byte coverage measured by the release pipeline.
     pub byte_coverage: f64,
+    /// Total number of callbacks reported by the exporter.
+    pub callbacks_total: u64,
+    /// Number of callbacks classified by conversion rules.
+    pub callbacks_classified: u64,
     /// Custom decoders required by this package.
     pub required_decoders: Vec<DecoderRequirement>,
 }

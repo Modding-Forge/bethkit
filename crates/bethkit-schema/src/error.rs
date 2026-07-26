@@ -52,6 +52,10 @@ pub enum SchemaError {
     /// An expression is invalid for its current evaluation context.
     #[error("schema expression failed: {0}")]
     Expression(String),
+
+    /// One or more exported semantic callbacks have no checked rule.
+    #[error("unclassified xEdit callbacks: {0}")]
+    UnclassifiedCallbacks(String),
 }
 
 /// Convenience result type for schema operations.

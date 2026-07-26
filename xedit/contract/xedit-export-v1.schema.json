@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://modding-forge.github.io/bethkit/xedit-export-v1.schema.json",
+  "title": "Bethkit xEdit definition export",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "provenance",
+    "game",
+    "records",
+    "callbacks"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": 1
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "game": {
+      "enum": [
+        "skyrim_le",
+        "skyrim_se",
+        "skyrim_vr",
+        "fallout_3",
+        "fallout_nv",
+        "fallout_4",
+        "fallout_4_vr",
+        "fallout_76",
+        "oblivion",
+        "morrowind",
+        "starfield"
+      ]
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "description": "A SchemaRecord encoded according to bethkit-schema 0.4."
+      }
+    },
+    "callbacks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/callback"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_tag",
+        "source_commit",
+        "source_archive_sha256",
+        "exporter_version",
+        "exporter_binary_sha256",
+        "exporter_patch_sha256",
+        "exporter_build_sha256"
+      ],
+      "properties": {
+        "source_tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "source_archive_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "exporter_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exporter_binary_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "exporter_patch_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "exporter_build_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "callback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "callback_id",
+        "semantic"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "callback_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "semantic": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

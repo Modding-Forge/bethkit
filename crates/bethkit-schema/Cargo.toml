@@ -16,3 +16,7 @@ thiserror = { workspace = true }
 [[bin]]
 name = "bethkit-schema-compiler"
 path = "src/bin/compiler.rs"
+
+[[bin]]
+name = "bethkit-xedit-converter"
+path = "src/bin/xedit_converter.rs"

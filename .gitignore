@@ -9,6 +9,7 @@ tests/testdata/*.ba2
 
 # Rust build artefacts
 /target/
+/schemas/generated/
 
 # Planning notes — local only
 planning/

@@ -1,0 +1,68 @@
+name: Schema release
+
+on:
+  workflow_dispatch:
+    inputs:
+      exporter_url:
+        description: URL of the externally built, provenance-enabled exporter
+        required: true
+        type: string
+      exporter_sha256:
+        description: SHA-256 of the exporter executable
+        required: true
+        type: string
+      patch_sha256:
+        description: SHA-256 of the reviewed xEdit patch set
+        required: true
+        type: string
+      build_sha256:
+        description: Hash of the Delphi build environment manifest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-schemas:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Download exporter
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri '${{ inputs.exporter_url }}' `
+            -OutFile '${{ runner.temp }}\bethkit-xedit-exporter.exe'
+
+      - name: Generate and verify all game packages
+        shell: pwsh
+        run: |
+          .\scripts\New-XEditSchemaCatalog.ps1 `
+            -Exporter '${{ runner.temp }}\bethkit-xedit-exporter.exe' `
+            -ExpectedExporterSha256 '${{ inputs.exporter_sha256 }}' `
+            -ExpectedPatchSha256 '${{ inputs.patch_sha256 }}' `
+            -ExpectedBuildSha256 '${{ inputs.build_sha256 }}'
+
+      - name: Test embedded catalog build
+        shell: pwsh
+        run: |
+          $env:BETHKIT_SCHEMA_BUNDLE = (
+            Resolve-Path '.\target\schemas\bethkit.bkschemas'
+          )
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bethkit-schema-catalog
+          path: |
+            target/schemas/*.bkschema
+            target/schemas/bethkit.bkschemas
+            target/schemas/*.json
+          if-no-files-found: error

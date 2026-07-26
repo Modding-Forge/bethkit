@@ -231,6 +231,11 @@ impl SchemaPackage {
                 "approved packages require complete byte coverage".to_owned(),
             ));
         }
+        if self.manifest.callbacks_classified != self.manifest.callbacks_total {
+            return Err(SchemaError::InvalidGraph(
+                "all exported callbacks must be classified".to_owned(),
+            ));
+        }
         if self.records.len() > limits.maximum_records {
             return Err(SchemaError::LimitExceeded(format!(
                 "package has {} records, limit is {}",
@@ -449,6 +454,9 @@ mod tests {
                 source_commit: "f5c00f3fa3ee39511185515802647246c807f759".to_owned(),
                 source_archive_sha256: "00".repeat(32),
                 exporter_version: "0.1.0".to_owned(),
+                exporter_binary_sha256: "22".repeat(32),
+                exporter_patch_sha256: "33".repeat(32),
+                exporter_build_sha256: "44".repeat(32),
                 conversion_rules_sha256: "11".repeat(32),
                 minimum_bethkit_version: "0.4.0".to_owned(),
                 minimum_abi_version: 2,
@@ -456,6 +464,8 @@ mod tests {
                 corpus_sha256: "22".repeat(32),
                 validated_records: 0,
                 byte_coverage: 0.0,
+                callbacks_total: 0,
+                callbacks_classified: 0,
                 required_decoders: Vec::new(),
             },
             vec![SchemaRecord {

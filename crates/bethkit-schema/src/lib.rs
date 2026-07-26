@@ -12,6 +12,7 @@ mod expression;
 mod model;
 mod package;
 mod registry;
+mod xedit;
 
 pub use error::{Result, SchemaError};
 pub use expression::{EvalContext, EvalValue, Expression};
@@ -25,3 +26,7 @@ pub use package::{
     PACKAGE_MAGIC,
 };
 pub use registry::{SchemaCatalog, SchemaRegistry};
+pub use xedit::{
+    convert_xedit_export, CallbackRule, ConversionRules, ExportedCallback, ExporterProvenance,
+    XEditExport,
+};
