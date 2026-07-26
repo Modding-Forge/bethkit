@@ -13,8 +13,8 @@ use bethkit_schema::{
 use crate::value::float_from_raw;
 use crate::{
     grammar::interpret, ByteSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, FieldOrigin,
-    FieldValue, HandlerOutput, NamedValue, Result, SemanticContext, SemanticError,
-    ValidationReport,
+    FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, NamedValue, Result,
+    SemanticContext, SemanticError, ValidationReport, ValueFormat,
 };
 
 /// One decoded top-level record field.
@@ -82,6 +82,22 @@ impl<'context, 'record> RecordView<'context, 'record> {
     /// Returns [`SemanticError::Handler`] when the formatter rejects the value.
     pub fn format_value(&self, path: &str, value: &FieldValue<'_>) -> Result<Option<String>> {
         self.context.format_value(self.record, path, value)
+    }
+
+    /// Formats a decoded value using one explicit xEdit presentation mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the bound formatter rejects
+    /// the value or returns an invalid result.
+    pub fn format_value_as(
+        &self,
+        path: &str,
+        value: &FieldValue<'_>,
+        format: ValueFormat,
+    ) -> Result<Option<String>> {
+        self.context
+            .format_value_as(self.record, path, value, format)
     }
 
     /// Returns whether xEdit allows a decoded value to be removed.
@@ -342,10 +358,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
             let handler_value = value.to_handler_value();
             let outcome = self.context.handlers().invoke(
                 binding,
-                self.record.header.signature,
-                self.record.header.form_id,
-                self.record.header.form_version,
-                self.context.registry().package().manifest().game,
+                HandlerRecordContext::new(
+                    self.record.header.signature,
+                    self.record.header.form_id,
+                    self.record.header.form_version,
+                    self.context.registry().package().manifest().game,
+                ),
+                HandlerPhase::Validation,
                 Some(&handler_value),
             );
             let message = match outcome {

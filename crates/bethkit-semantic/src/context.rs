@@ -8,8 +8,8 @@ use bethkit_core::Record;
 use bethkit_schema::{CallbackImplementation, ConflictPriority, SchemaPackage, SchemaRegistry};
 
 use crate::{
-    DecoderRegistry, FieldValue, HandlerOutput, RecordEditor, RecordView, Result, SemanticError,
-    SemanticHandlerRegistry,
+    DecoderRegistry, FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, RecordEditor,
+    RecordView, Result, SemanticError, SemanticHandlerRegistry, ValueFormat,
 };
 
 /// Runtime context for schema-guided operations on one game mode.
@@ -154,10 +154,8 @@ impl SemanticContext {
             }
             priority = match self.handlers.invoke(
                 binding,
-                record.header.signature,
-                record.header.form_id,
-                record.header.form_version,
-                self.registry.package().manifest().game,
+                self.handler_record(record),
+                HandlerPhase::Conflict,
                 value,
             )? {
                 HandlerOutput::ConflictPriority(priority) => priority,
@@ -187,6 +185,25 @@ impl SemanticContext {
         path: &str,
         value: &FieldValue<'_>,
     ) -> Result<Option<String>> {
+        self.format_value_as(record, path, value, ValueFormat::Display)
+    }
+
+    /// Formats a typed value using one explicit xEdit presentation mode.
+    ///
+    /// The original value is never replaced. `None` means that the path has no
+    /// executable formatter for the selected mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the formatter rejects the value
+    /// or returns a non-text result.
+    pub fn format_value_as(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+        format: ValueFormat,
+    ) -> Result<Option<String>> {
         let handler_value = value.to_handler_value();
         let mut formatted = None;
         for binding in self
@@ -213,10 +230,8 @@ impl SemanticContext {
             formatted = Some(
                 match self.handlers.invoke(
                     binding,
-                    record.header.signature,
-                    record.header.form_id,
-                    record.header.form_version,
-                    self.registry.package().manifest().game,
+                    self.handler_record(record),
+                    format.into(),
                     Some(&handler_value),
                 )? {
                     HandlerOutput::Text(value) => value,
@@ -264,10 +279,8 @@ impl SemanticContext {
             }
             removable = match self.handlers.invoke(
                 binding,
-                record.header.signature,
-                record.header.form_id,
-                record.header.form_version,
-                self.registry.package().manifest().game,
+                self.handler_record(record),
+                HandlerPhase::Removability,
                 Some(&handler_value),
             )? {
                 HandlerOutput::Boolean(value) => value,
@@ -308,10 +321,8 @@ impl SemanticContext {
             }
             value = match self.handlers.invoke(
                 binding,
-                record.header.signature,
-                record.header.form_id,
-                record.header.form_version,
-                self.registry.package().manifest().game,
+                self.handler_record(record),
+                HandlerPhase::DecodeNormalize,
                 Some(&handler_value),
             )? {
                 HandlerOutput::Value(transformed) => transformed.into_record_value(),
@@ -324,5 +335,14 @@ impl SemanticContext {
             };
         }
         Ok(value)
+    }
+
+    fn handler_record(&self, record: &Record) -> HandlerRecordContext {
+        HandlerRecordContext::new(
+            record.header.signature,
+            record.header.form_id,
+            record.header.form_version,
+            self.registry.package().manifest().game,
+        )
     }
 }

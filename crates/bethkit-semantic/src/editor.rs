@@ -10,8 +10,8 @@ use bethkit_schema::{
 
 use crate::value::float_to_raw;
 use crate::{
-    FieldValue, HandlerMutation, HandlerOutput, OwnedFieldValue, Result, SemanticContext,
-    SemanticError, SemanticHandlerRegistry,
+    FieldValue, HandlerMutation, HandlerOutput, HandlerPhase, HandlerRecordContext,
+    OwnedFieldValue, Result, SemanticContext, SemanticError, SemanticHandlerRegistry,
 };
 
 /// Lossless editor for one record.
@@ -317,10 +317,8 @@ impl RecordEditor {
             }
             normalized = match self.handlers.invoke(
                 binding,
-                self.record.signature,
-                self.record.form_id,
-                self.record.form_version,
-                self.registry.package().manifest().game,
+                self.handler_record(),
+                HandlerPhase::DecodeNormalize,
                 Some(&handler_value),
             )? {
                 HandlerOutput::Value(value) => handler_to_owned_value(value, path)?,
@@ -399,10 +397,8 @@ impl RecordEditor {
             let handler_value = self.owned_to_handler_value(node, &updated)?;
             match self.handlers.invoke(
                 binding,
-                self.record.signature,
-                self.record.form_id,
-                self.record.form_version,
-                self.registry.package().manifest().game,
+                self.handler_record(),
+                HandlerPhase::AfterSet,
                 Some(&handler_value),
             )? {
                 HandlerOutput::None => {}
@@ -498,6 +494,15 @@ impl RecordEditor {
             ) => self.owned_to_handler_value(payload, value),
             _ => Ok(owned_leaf_to_handler_value(value)),
         }
+    }
+
+    fn handler_record(&self) -> HandlerRecordContext {
+        HandlerRecordContext::new(
+            self.record.signature,
+            self.record.form_id,
+            self.record.form_version,
+            self.registry.package().manifest().game,
+        )
     }
 
     fn apply_mutations(

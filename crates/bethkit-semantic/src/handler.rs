@@ -22,6 +22,92 @@ pub(crate) fn is_validation_binding(binding: &CallbackBinding) -> bool {
     )
 }
 
+/// Runtime phase in which a semantic callback is invoked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerPhase {
+    /// Typed value decoding and normalization.
+    DecodeNormalize,
+    /// Normal xEdit value presentation.
+    Display,
+    /// Compact xEdit summary presentation.
+    Summary,
+    /// Stable xEdit sort-key presentation.
+    SortKey,
+    /// Editable xEdit text presentation.
+    EditValue,
+    /// Native-value text presentation.
+    NativeValue,
+    /// Validation equivalent to xEdit's `ctCheck`.
+    Validation,
+    /// Transactional callback after a value is changed.
+    AfterSet,
+    /// Dynamic reference or link resolution.
+    ReferenceResolution,
+    /// Dynamic conflict-priority evaluation.
+    Conflict,
+    /// Record identity and indexing metadata.
+    RecordMetadata,
+    /// Dynamic field-removability evaluation.
+    Removability,
+}
+
+/// Public xEdit-compatible presentation mode for a typed value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueFormat {
+    /// Normal tree value text.
+    Display,
+    /// Compact summary text.
+    Summary,
+    /// Deterministic sort key.
+    SortKey,
+    /// Text accepted by an editor control.
+    EditValue,
+    /// Native-value text.
+    NativeValue,
+}
+
+impl From<ValueFormat> for HandlerPhase {
+    fn from(value: ValueFormat) -> Self {
+        match value {
+            ValueFormat::Display => Self::Display,
+            ValueFormat::Summary => Self::Summary,
+            ValueFormat::SortKey => Self::SortKey,
+            ValueFormat::EditValue => Self::EditValue,
+            ValueFormat::NativeValue => Self::NativeValue,
+        }
+    }
+}
+
+/// Main-record metadata shared by callback invocations.
+#[derive(Debug, Clone, Copy)]
+pub struct HandlerRecordContext {
+    /// Main-record signature.
+    pub record_signature: Signature,
+    /// File-local main-record FormID.
+    pub form_id: FormId,
+    /// Main-record form version.
+    pub form_version: u16,
+    /// Game mode selected by the schema package.
+    pub game: SchemaGame,
+}
+
+impl HandlerRecordContext {
+    /// Creates callback record metadata.
+    pub const fn new(
+        record_signature: Signature,
+        form_id: FormId,
+        form_version: u16,
+        game: SchemaGame,
+    ) -> Self {
+        Self {
+            record_signature,
+            form_id,
+            form_version,
+            game,
+        }
+    }
+}
+
 /// Context supplied to one semantic callback invocation.
 pub struct HandlerContext<'a> {
     /// Exact callback binding selected by the schema package.
@@ -93,6 +179,8 @@ pub enum HandlerOutput {
 pub struct HandlerInvocation<'a> {
     /// Record and binding metadata.
     pub context: HandlerContext<'a>,
+    /// Runtime phase selecting the xEdit callback behavior.
+    pub phase: HandlerPhase,
     /// Optional decoded value for value-oriented callback roles.
     pub value: Option<&'a FieldValue<'static>>,
 }
@@ -196,10 +284,8 @@ impl SemanticHandlerRegistry {
     pub fn invoke(
         &self,
         binding: &CallbackBinding,
-        record_signature: Signature,
-        form_id: FormId,
-        form_version: u16,
-        game: SchemaGame,
+        record: HandlerRecordContext,
+        phase: HandlerPhase,
         value: Option<&FieldValue<'static>>,
     ) -> Result<HandlerOutput> {
         let empty_configuration = serde_json::Value::Null;
@@ -228,12 +314,13 @@ impl SemanticHandlerRegistry {
             .invoke(HandlerInvocation {
                 context: HandlerContext {
                     binding,
-                    record_signature,
-                    form_id,
-                    form_version,
-                    game,
+                    record_signature: record.record_signature,
+                    form_id: record.form_id,
+                    form_version: record.form_version,
+                    game: record.game,
                     configuration,
                 },
+                phase,
                 value,
             })
     }
@@ -392,6 +479,15 @@ impl SemanticHandler for ResourceHashFormatter {
             message: "resource-hash formatter requires an integer value".to_owned(),
         })?;
         let hash = resource_hash(value)?;
+        if invocation.phase == HandlerPhase::EditValue {
+            return Ok(HandlerOutput::Text((hash as i64).to_string()));
+        }
+        if !matches!(
+            invocation.phase,
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::SortKey
+        ) {
+            return Ok(HandlerOutput::Text(String::new()));
+        }
         let resolved = match (kind, &self.resolver) {
             ("file", Some(resolver)) => resolver.resolve_file_hash(hash),
             ("folder", Some(resolver)) => resolver.resolve_folder_hash(hash),
@@ -405,7 +501,15 @@ impl SemanticHandler for ResourceHashFormatter {
         };
         let text = resolved
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| format!("{{{hash:016X}}}"));
+            .unwrap_or_else(|| match invocation.phase {
+                HandlerPhase::Display => format!("{{{hash:016X}}}"),
+                HandlerPhase::Summary if hash <= u64::from(u32::MAX) => {
+                    format!("{{{hash:08X}}}")
+                }
+                HandlerPhase::Summary => format!("{{{hash:016X}}}"),
+                HandlerPhase::SortKey => format!("{hash:016X}"),
+                _ => String::new(),
+            });
         Ok(HandlerOutput::Text(text))
     }
 }
@@ -454,7 +558,10 @@ impl SemanticHandler for InvalidModelInfoValidation {
         1
     }
 
-    fn invoke(&self, _invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::Validation {
+            return Ok(HandlerOutput::None);
+        }
         Ok(HandlerOutput::Text(
             "SubRecord has invalid format for the Form Version of this record".to_owned(),
         ))
@@ -781,6 +888,48 @@ mod tests {
         Ok(())
     }
 
+    /// Matches xEdit's summary, sort-key, edit-value, and native-value hash modes.
+    #[test]
+    fn resource_hash_formatter_respects_callback_phase() -> Result<()> {
+        assert_eq!(
+            format_resource_hash_in_phase(
+                None,
+                "file",
+                FieldValue::UInt(0x1234),
+                HandlerPhase::Summary
+            )?,
+            "{00001234}"
+        );
+        assert_eq!(
+            format_resource_hash_in_phase(
+                None,
+                "file",
+                FieldValue::UInt(0x1234),
+                HandlerPhase::SortKey
+            )?,
+            "0000000000001234"
+        );
+        assert_eq!(
+            format_resource_hash_in_phase(
+                None,
+                "file",
+                FieldValue::Int(-1),
+                HandlerPhase::EditValue
+            )?,
+            "-1"
+        );
+        assert_eq!(
+            format_resource_hash_in_phase(
+                None,
+                "file",
+                FieldValue::UInt(0x1234),
+                HandlerPhase::NativeValue
+            )?,
+            ""
+        );
+        Ok(())
+    }
+
     /// Mirrors xEdit's model-info header expansion and dependent count updates.
     #[test]
     fn model_info_after_set_updates_only_defined_header_counts() -> Result<()> {
@@ -884,6 +1033,7 @@ mod tests {
                     _ => unreachable!("test binding is built-in"),
                 },
             },
+            phase: HandlerPhase::Validation,
             value: None,
         })?;
 
@@ -900,6 +1050,15 @@ mod tests {
         resolver: Option<Arc<dyn ResourceHashResolver>>,
         kind: &str,
         value: FieldValue<'static>,
+    ) -> Result<String> {
+        format_resource_hash_in_phase(resolver, kind, value, HandlerPhase::Display)
+    }
+
+    fn format_resource_hash_in_phase(
+        resolver: Option<Arc<dyn ResourceHashResolver>>,
+        kind: &str,
+        value: FieldValue<'static>,
+        phase: HandlerPhase,
     ) -> Result<String> {
         let binding = CallbackBinding {
             path: "TEST/Hash".to_owned(),
@@ -926,6 +1085,7 @@ mod tests {
                     _ => unreachable!("test binding is built-in"),
                 },
             },
+            phase,
             value: Some(&value),
         })?;
         match output {
