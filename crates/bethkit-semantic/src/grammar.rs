@@ -12,6 +12,14 @@ use crate::{Result, SemanticError};
 pub(crate) struct GrammarMatch<'schema> {
     pub(crate) assignments: Vec<Option<&'schema SchemaNode>>,
     pub(crate) declared_signatures: BTreeSet<Signature>,
+    pub(crate) violations: Vec<GrammarViolation>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GrammarViolation {
+    pub(crate) path: String,
+    pub(crate) minimum: u32,
+    pub(crate) actual: u32,
 }
 
 #[derive(Clone)]
@@ -19,6 +27,7 @@ struct MatchState<'schema> {
     cursor: usize,
     assignments: Vec<Option<&'schema SchemaNode>>,
     assigned: usize,
+    violations: Vec<GrammarViolation>,
 }
 
 pub(crate) fn interpret<'schema>(
@@ -33,6 +42,7 @@ pub(crate) fn interpret<'schema>(
         cursor: 0,
         assignments: vec![None; subrecords.len()],
         assigned: 0,
+        violations: Vec::new(),
     };
     let state = match_node(
         root,
@@ -45,6 +55,7 @@ pub(crate) fn interpret<'schema>(
     Ok(GrammarMatch {
         assignments: state.assignments,
         declared_signatures,
+        violations: state.violations,
     })
 }
 
@@ -94,7 +105,7 @@ fn match_node<'schema>(
             Ok(best)
         }
         SchemaNodeKind::Repeat {
-            minimum: _,
+            minimum,
             maximum,
             child,
         } => {
@@ -114,6 +125,13 @@ fn match_node<'schema>(
                 }
                 current = candidate;
                 count += 1;
+            }
+            if count < *minimum {
+                current.violations.push(GrammarViolation {
+                    path: node.path.clone(),
+                    minimum: *minimum,
+                    actual: count,
+                });
             }
             Ok(current)
         }
@@ -281,6 +299,7 @@ mod tests {
         );
         assert!(matched.assignments[2].is_none());
         assert!(!matched.declared_signatures.contains(&Signature(*b"XXXX")));
+        assert!(matched.violations.is_empty());
         Ok(())
     }
 
@@ -327,6 +346,37 @@ mod tests {
             matched.assignments[2].map(|node| node.id),
             Some(SchemaNodeId(2))
         );
+        assert!(matched.violations.is_empty());
+        Ok(())
+    }
+
+    /// Reports an unmet repetition minimum without inventing a match.
+    #[test]
+    fn ordered_match_reports_repetition_minimum(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let root = SchemaNode {
+            id: SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            condition: None,
+            kind: SchemaNodeKind::Repeat {
+                minimum: 2,
+                maximum: Some(3),
+                child: Box::new(subrecord_node(1, *b"AAAA", false)),
+            },
+        };
+        let subrecords = vec![subrecord(*b"AAAA")];
+
+        // when
+        let matched = interpret(&root, Signature(*b"TEST"), 44, &subrecords)?;
+
+        // then
+        assert_eq!(matched.violations.len(), 1);
+        assert_eq!(matched.violations[0].path, "TEST");
+        assert_eq!(matched.violations[0].minimum, 2);
+        assert_eq!(matched.violations[0].actual, 1);
         Ok(())
     }
 }

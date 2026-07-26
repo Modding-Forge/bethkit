@@ -209,6 +209,18 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 ));
             }
         }
+        for violation in &grammar.violations {
+            report.push(self.diagnostic(
+                DiagnosticSeverity::Error,
+                DiagnosticCode::MissingRequired,
+                format!(
+                    "repeat {} requires at least {} entries, found {}",
+                    violation.path, violation.minimum, violation.actual
+                ),
+                None,
+                None,
+            ));
+        }
 
         match self.fields() {
             Ok(fields) => {
@@ -258,15 +270,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
         current: &'a [u8],
         offset: usize,
     ) -> Result<FieldValue<'a>> {
-        if let Some(condition) = &node.condition {
-            let context = EvalContext {
-                payload,
-                form_version: self.record.header.form_version,
-                record_signature: self.record.header.signature.into(),
-            };
-            if condition.evaluate(&context, 1024)? != EvalValue::Bool(true) {
-                return Ok(FieldValue::Absent);
-            }
+        if !self.node_applies(node, payload)? {
+            return Ok(FieldValue::Absent);
         }
 
         let decoded = match &node.kind {
@@ -277,6 +282,19 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 let mut values: Vec<NamedValue<'a>> = Vec::with_capacity(fields.len());
                 let mut cursor: usize = 0;
                 for field in fields {
+                    if !self.node_applies(field, payload)? {
+                        values.push(NamedValue {
+                            node_id: field.id,
+                            path: field.path.clone(),
+                            name: field.name.clone(),
+                            span: ByteSpan {
+                                start: offset + cursor,
+                                end: offset + cursor,
+                            },
+                            value: FieldValue::Absent,
+                        });
+                        continue;
+                    }
                     let remaining: &'a [u8] =
                         current.get(cursor..).ok_or_else(|| SemanticError::Decode {
                             path: field.path.clone(),
@@ -405,12 +423,25 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     })?;
                 self.decode_node(variant, payload, current, offset)
             }
-            SchemaNodeKind::Custom { decoder, .. } => self
-                .context
-                .decoders()
-                .get(decoder)
-                .ok_or_else(|| SemanticError::MissingDecoder(decoder.clone()))?
-                .decode(current),
+            SchemaNodeKind::Custom { decoder, .. } => {
+                let decoded = self
+                    .context
+                    .decoders()
+                    .get(decoder)
+                    .ok_or_else(|| SemanticError::MissingDecoder(decoder.clone()))?
+                    .decode(current)?;
+                if decoded.consumed != current.len() {
+                    return Err(SemanticError::Decode {
+                        path: node.path.clone(),
+                        message: format!(
+                            "custom decoder consumed {} of {} payload bytes",
+                            decoded.consumed,
+                            current.len()
+                        ),
+                    });
+                }
+                Ok(decoded.value)
+            }
             SchemaNodeKind::Compressed { .. } => Err(SemanticError::Decode {
                 path: node.path.clone(),
                 message: "compressed nodes require a registered custom decoder".to_owned(),
@@ -429,6 +460,24 @@ impl<'context, 'record> RecordView<'context, 'record> {
         }?;
         self.context
             .apply_value_callbacks(&node.path, self.record, decoded)
+    }
+
+    fn node_applies(&self, node: &SchemaNode, payload: &[u8]) -> Result<bool> {
+        let Some(condition) = &node.condition else {
+            return Ok(true);
+        };
+        let context = EvalContext {
+            payload,
+            form_version: self.record.header.form_version,
+            record_signature: self.record.header.signature.into(),
+        };
+        match condition.evaluate(&context, 1024)? {
+            EvalValue::Bool(value) => Ok(value),
+            _ => Err(SemanticError::Decode {
+                path: node.path.clone(),
+                message: "field condition did not return a boolean".to_owned(),
+            }),
+        }
     }
 
     fn diagnostic(

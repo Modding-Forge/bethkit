@@ -7,6 +7,14 @@ use std::sync::Arc;
 
 use crate::{FieldValue, OwnedFieldValue, Result, SemanticError};
 
+/// Value and exact byte consumption reported by a custom payload decoder.
+pub struct DecodedPayload<'a> {
+    /// Decoded semantic value.
+    pub value: FieldValue<'a>,
+    /// Number of input bytes consumed by the decoder.
+    pub consumed: usize,
+}
+
 /// Custom implementation for complex xEdit definitions.
 pub trait CustomDecoder: Send + Sync {
     /// Stable identifier referenced by schema packages.
@@ -20,7 +28,7 @@ pub trait CustomDecoder: Send + Sync {
     /// # Errors
     ///
     /// Returns [`SemanticError`] when the payload is malformed.
-    fn decode<'a>(&self, payload: &'a [u8]) -> Result<FieldValue<'a>>;
+    fn decode<'a>(&self, payload: &'a [u8]) -> Result<DecodedPayload<'a>>;
 
     /// Encodes an owned semantic value.
     ///
