@@ -9,21 +9,22 @@ use std::path::{Path, PathBuf};
 use std::{collections::BTreeMap, collections::BTreeSet};
 
 use bethkit_schema::{
-    convert_xedit_export, ConversionRules, ExportedCallback, SchemaGame, SchemaNode,
-    SchemaNodeKind, XEditExport,
+    convert_xedit_export, CallbackClass, CallbackRule, ConversionRules, ExportedCallback,
+    SchemaGame, SchemaNode, SchemaNodeKind, XEditExport,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct CallbackInventory {
     format_version: u32,
     exports: usize,
     records: usize,
     callbacks: Vec<InventoryCallback>,
+    #[serde(default)]
     custom_decoders: Vec<InventoryDecoder>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct InventoryCallback {
     path: String,
     callback_id: String,
@@ -31,7 +32,7 @@ struct InventoryCallback {
     games: Vec<SchemaGame>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct InventoryDecoder {
     path: String,
     decoder: String,
@@ -45,6 +46,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if arguments.first().map(String::as_str) == Some("convert") {
         return convert(&arguments[1..]);
+    }
+    if arguments.first().map(String::as_str) == Some("classify-ui") {
+        return classify_ui(&arguments[1..]);
     }
     convert(&arguments)
 }
@@ -114,6 +118,65 @@ fn write_inventory(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn classify_ui(arguments: &[String]) -> Result<(), Box<dyn Error>> {
+    if arguments.len() != 3 {
+        return Err(usage().into());
+    }
+    let inventory: CallbackInventory = read_json(Path::new(&arguments[0]))?;
+    let rules: ConversionRules = read_json(Path::new(&arguments[1]))?;
+    let merged = merge_ui_rules(&inventory, rules)?;
+    let mut bytes = serde_json::to_vec_pretty(&merged)?;
+    bytes.push(b'\n');
+    fs::write(&arguments[2], bytes)?;
+    Ok(())
+}
+
+fn merge_ui_rules(
+    inventory: &CallbackInventory,
+    rules: ConversionRules,
+) -> Result<ConversionRules, Box<dyn Error>> {
+    if inventory.format_version != 1 || rules.format_version != 1 {
+        return Err("unsupported inventory or rule format version".into());
+    }
+    let mut indexed: BTreeMap<(String, String), CallbackRule> = BTreeMap::new();
+    for rule in rules.callbacks {
+        let key = (rule.path.clone(), rule.callback_id.clone());
+        if indexed.insert(key.clone(), rule).is_some() {
+            return Err(format!("duplicate rule {} at {}", key.1, key.0).into());
+        }
+    }
+    for callback in inventory
+        .callbacks
+        .iter()
+        .filter(|callback| !callback.semantic)
+    {
+        let key = (callback.path.clone(), callback.callback_id.clone());
+        let generated = CallbackRule {
+            path: callback.path.clone(),
+            callback_id: callback.callback_id.clone(),
+            classification: CallbackClass::UserInterfaceOnly,
+            custom_decoder: None,
+            minimum_decoder_version: None,
+            rationale: "xEdit exposes this callback as presentation-only metadata.".to_owned(),
+        };
+        if let Some(existing) = indexed.get(&key) {
+            if existing.classification != CallbackClass::UserInterfaceOnly {
+                return Err(format!(
+                    "existing rule {} at {} conflicts with UI-only metadata",
+                    callback.callback_id, callback.path
+                )
+                .into());
+            }
+            continue;
+        }
+        indexed.insert(key, generated);
+    }
+    Ok(ConversionRules {
+        format_version: rules.format_version,
+        callbacks: indexed.into_values().collect(),
+    })
+}
+
 fn collect_decoders(
     node: &SchemaNode,
     game: SchemaGame,
@@ -176,7 +239,9 @@ fn add_callback(
 
 fn usage() -> &'static str {
     "usage:\n  bethkit-xedit-converter [convert] <export.json> <rules.json> \
-     <output.bkschema>\n  bethkit-xedit-converter inventory <output.json> <export.json>..."
+     <output.bkschema>\n  bethkit-xedit-converter inventory <output.json> <export.json>...\n  \
+     bethkit-xedit-converter classify-ui <inventory.json> <input-rules.json> \
+     <output-rules.json>"
 }
 
 fn read_json<T>(path: &Path) -> Result<T, Box<dyn Error>>
@@ -189,6 +254,48 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies that UI metadata creates exact rules without semantic callbacks.
+    #[test]
+    fn ui_rule_generation_is_strict() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let inventory = CallbackInventory {
+            format_version: 1,
+            exports: 1,
+            records: 1,
+            callbacks: vec![
+                InventoryCallback {
+                    path: "TEST/ui".to_owned(),
+                    callback_id: "def.dont_show".to_owned(),
+                    semantic: false,
+                    games: vec![SchemaGame::SkyrimSe],
+                },
+                InventoryCallback {
+                    path: "TEST/value".to_owned(),
+                    callback_id: "def.after_set".to_owned(),
+                    semantic: true,
+                    games: vec![SchemaGame::SkyrimSe],
+                },
+            ],
+            custom_decoders: Vec::new(),
+        };
+        let rules = ConversionRules {
+            format_version: 1,
+            callbacks: Vec::new(),
+        };
+
+        // when
+        let merged = merge_ui_rules(&inventory, rules)?;
+
+        // then
+        assert_eq!(merged.callbacks.len(), 1);
+        assert_eq!(merged.callbacks[0].path, "TEST/ui");
+        assert_eq!(
+            merged.callbacks[0].classification,
+            CallbackClass::UserInterfaceOnly
+        );
+        Ok(())
+    }
 
     /// Verifies that custom decoder requirements are collected recursively.
     #[test]

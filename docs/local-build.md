@@ -99,8 +99,20 @@ The provenance and definition-graph operations are implemented. Exported
 dynamic callbacks intentionally fail conversion until matching audited rules
 and custom decoders are present, so release-quality schema regeneration remains
 blocked at that gate. The callback inventory also lists every custom decoder
-path and the games that require it. Generate and inspect all eleven candidate
-packages with:
+path and the games that require it. Refresh the exact UI-only rules with:
+
+```powershell
+cargo run -p bethkit-schema --bin bethkit-xedit-converter -- classify-ui `
+  .\target\xedit-definitions\callback-inventory.json `
+  .\xedit\conversion-rules.json `
+  .\xedit\conversion-rules.json
+```
+
+This command only adds exact-path rules for callbacks that xEdit exposes as
+presentation-only metadata. It does not classify semantic callbacks and refuses
+to overwrite a conflicting reviewed rule.
+
+Generate and inspect all eleven candidate packages with:
 
 ```powershell
 .\scripts\New-XEditSchemaCatalog.ps1 `
