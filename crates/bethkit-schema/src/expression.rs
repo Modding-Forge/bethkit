@@ -132,6 +132,15 @@ pub enum Expression {
         /// Right operand.
         right: Box<Expression>,
     },
+    /// Selects one of two equally typed values from a boolean condition.
+    Select {
+        /// Boolean condition.
+        condition: Box<Expression>,
+        /// Result when the condition is true.
+        if_true: Box<Expression>,
+        /// Result when the condition is false.
+        if_false: Box<Expression>,
+    },
 }
 
 impl Expression {
@@ -232,6 +241,17 @@ impl Expression {
                         SchemaError::Expression("signed subtraction overflowed".to_owned())
                     })
             }
+            Self::Select {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                if condition.evaluate_inner(context, remaining)?.as_bool()? {
+                    if_true.evaluate_inner(context, remaining)
+                } else {
+                    if_false.evaluate_inner(context, remaining)
+                }
+            }
         }
     }
 }
@@ -314,6 +334,32 @@ mod tests {
 
         // then
         assert!(matches!(result, Err(SchemaError::Expression(_))));
+        Ok(())
+    }
+
+    /// Verifies bounded conditional selection used by xEdit union deciders.
+    #[test]
+    fn expression_selects_union_variant() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let expression = Expression::Select {
+            condition: Box::new(Expression::LessThan {
+                left: Box::new(Expression::FormVersion),
+                right: Box::new(Expression::Int { value: 44 }),
+            }),
+            if_true: Box::new(Expression::Int { value: 0 }),
+            if_false: Box::new(Expression::Int { value: 1 }),
+        };
+        let context = EvalContext {
+            payload: &[],
+            form_version: 44,
+            record_signature: SchemaSignature(*b"TEST"),
+        };
+
+        // when
+        let result = expression.evaluate(&context, 16)?;
+
+        // then
+        assert_eq!(result, EvalValue::Int(1));
         Ok(())
     }
 }
