@@ -94,7 +94,7 @@ impl SemanticContext {
         &self.handlers
     }
 
-    pub(crate) fn apply_value_callbacks<'a>(
+    pub(crate) fn apply_normalizers<'a>(
         &self,
         path: &str,
         record: &Record,
@@ -105,7 +105,7 @@ impl SemanticContext {
             .package()
             .callback_bindings()
             .iter()
-            .filter(|binding| binding.path == path && is_value_callback(&binding.callback_id))
+            .filter(|binding| binding.path == path && binding.callback_id == "float.normalizer")
         {
             if !matches!(
                 binding.implementation,
@@ -115,6 +115,9 @@ impl SemanticContext {
                 continue;
             }
             let handler_value = value.to_handler_value();
+            if matches!(&handler_value, FieldValue::Float(value) if !value.is_finite()) {
+                continue;
+            }
             value = match self.handlers.invoke(
                 binding,
                 record.header.signature,
@@ -133,11 +136,4 @@ impl SemanticContext {
         }
         Ok(value)
     }
-}
-
-fn is_value_callback(callback_id: &str) -> bool {
-    matches!(
-        callback_id,
-        "def.value_transform" | "float.normalizer" | "string.formatter"
-    )
 }

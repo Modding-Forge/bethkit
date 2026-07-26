@@ -7,6 +7,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::Expression;
 
+/// Static xEdit conflict priority assigned to a schema node.
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictPriority {
+    /// Ignore the node during conflict analysis.
+    Ignore,
+    /// Treat a newly added value as benign.
+    BenignIfAdded,
+    /// Treat differences as benign.
+    Benign,
+    /// Treat differences as an override without a conflict.
+    Override,
+    /// Translate localized content while comparing the node.
+    Translate,
+    /// Apply normal conflict semantics.
+    #[default]
+    Normal,
+    /// Apply normal semantics while ignoring an empty value.
+    NormalIgnoreEmpty,
+    /// Treat differences as critical conflicts.
+    Critical,
+    /// Compare the node using FormID semantics.
+    FormId,
+}
+
 /// Stable identifier for a schema node inside one package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SchemaNodeId(pub u32);
@@ -304,7 +331,7 @@ pub struct StringType {
 }
 
 /// Primitive field type.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PrimitiveType {
     /// Integer value.
@@ -318,6 +345,12 @@ pub enum PrimitiveType {
         width: u8,
         /// Byte order used by the float.
         byte_order: ByteOrder,
+        /// Multiplier applied after raw-value normalization.
+        #[serde(default = "default_float_scale")]
+        scale: f64,
+        /// Decimal places retained by xEdit, or `-1` when rounding is disabled.
+        #[serde(default = "default_float_digits")]
+        digits: i16,
     },
     /// String value.
     String {
@@ -384,11 +417,22 @@ pub struct SchemaNode {
     pub name: String,
     /// Whether the node is required.
     pub required: bool,
+    /// Static conflict priority before any semantic callback override.
+    #[serde(default)]
+    pub conflict_priority: ConflictPriority,
     /// Optional inclusion condition.
     pub condition: Option<Expression>,
     /// Node behavior.
     #[serde(flatten)]
     pub kind: SchemaNodeKind,
+}
+
+const fn default_float_scale() -> f64 {
+    1.0
+}
+
+const fn default_float_digits() -> i16 {
+    -1
 }
 
 /// Supported node kinds in the schema grammar.

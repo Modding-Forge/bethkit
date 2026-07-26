@@ -557,6 +557,23 @@ fn validate_node(
     }
     validate_string(&node.path, limits)?;
     validate_string(&node.name, limits)?;
+    if let SchemaNodeKind::Primitive {
+        primitive: crate::PrimitiveType::Float { scale, digits, .. },
+    } = &node.kind
+    {
+        if !scale.is_finite() || *scale == 0.0 {
+            return Err(SchemaError::InvalidGraph(format!(
+                "float scale must be finite and non-zero at {}",
+                node.path
+            )));
+        }
+        if *digits < -1 {
+            return Err(SchemaError::InvalidGraph(format!(
+                "float digits must be -1 or non-negative at {}",
+                node.path
+            )));
+        }
+    }
 
     let children: Vec<&SchemaNode> = match &node.kind {
         SchemaNodeKind::Sequence { children } => children.iter().collect(),
@@ -628,6 +645,7 @@ mod tests {
                     path: "TEST.DATA".to_owned(),
                     name: "Data".to_owned(),
                     required: true,
+                    conflict_priority: crate::ConflictPriority::Normal,
                     condition: None,
                     kind: SchemaNodeKind::Primitive {
                         primitive: PrimitiveType::Integer {

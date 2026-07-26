@@ -203,3 +203,36 @@ pub enum OwnedFieldValue {
     /// Homogeneous array values.
     Array(Vec<OwnedFieldValue>),
 }
+
+pub(crate) fn float_from_raw(value: f64, scale: f64, digits: i16) -> f64 {
+    round_float_to_digits(value * scale, digits)
+}
+
+pub(crate) fn float_to_raw(value: f64, scale: f64, digits: i16) -> f64 {
+    round_float_to_digits(value, digits) / scale
+}
+
+fn round_float_to_digits(value: f64, digits: i16) -> f64 {
+    if digits < 0 || !value.is_finite() {
+        return value;
+    }
+    let factor = 10.0_f64.powi(-i32::from(digits));
+    (value / factor).round_ties_even() * factor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Matches Delphi's tie-to-even decimal rounding used by `RoundToEx`.
+    #[test]
+    fn float_rounding_uses_ties_to_even() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(float_from_raw(2.5, 1.0, 0), 2.0);
+        assert_eq!(float_from_raw(3.5, 1.0, 0), 4.0);
+        assert!((float_from_raw(1.234_56, 1.0, 4) - 1.234_6).abs() < f64::EPSILON * 2.0);
+        assert_eq!(float_from_raw(f64::INFINITY, 255.0, 4), f64::INFINITY);
+        assert_eq!(float_from_raw(0.5, 255.0, 0), 128.0);
+        assert_eq!(float_to_raw(128.0, 255.0, 0), 128.0 / 255.0);
+        Ok(())
+    }
+}

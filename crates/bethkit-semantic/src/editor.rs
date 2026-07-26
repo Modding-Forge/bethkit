@@ -7,6 +7,7 @@ use bethkit_schema::{
     ByteOrder, CallbackImplementation, IntegerType, PrimitiveType, SchemaNode, SchemaNodeKind,
 };
 
+use crate::value::float_to_raw;
 use crate::{
     FieldValue, HandlerMutation, HandlerOutput, OwnedFieldValue, Result, SemanticContext,
     SemanticError, SemanticHandlerRegistry,
@@ -209,7 +210,16 @@ impl RecordEditor {
     }
 
     fn normalize_value(&self, path: &str, value: &OwnedFieldValue) -> Result<OwnedFieldValue> {
-        let mut normalized = value.clone();
+        let node = self.find_node(path)?;
+        let mut normalized = match (&node.kind, value) {
+            (
+                SchemaNodeKind::Primitive {
+                    primitive: PrimitiveType::Float { scale, digits, .. },
+                },
+                OwnedFieldValue::Float(value),
+            ) if value.is_finite() => OwnedFieldValue::Float(float_to_raw(*value, *scale, *digits)),
+            _ => value.clone(),
+        };
         for binding in self
             .registry
             .package()
@@ -225,6 +235,9 @@ impl RecordEditor {
                 continue;
             }
             let handler_value = owned_to_handler_value(&normalized);
+            if matches!(&handler_value, FieldValue::Float(value) if !value.is_finite()) {
+                continue;
+            }
             normalized = match self.handlers.invoke(
                 binding,
                 self.record.signature,
@@ -485,6 +498,7 @@ fn encode_primitive(
             PrimitiveType::Float {
                 width: 4,
                 byte_order,
+                ..
             },
             OwnedFieldValue::Float(value),
         ) => {
@@ -498,6 +512,7 @@ fn encode_primitive(
             PrimitiveType::Float {
                 width: 8,
                 byte_order,
+                ..
             },
             OwnedFieldValue::Float(value),
         ) => {

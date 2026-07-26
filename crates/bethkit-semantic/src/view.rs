@@ -10,6 +10,7 @@ use bethkit_schema::{
     SchemaNodeKind, SchemaRecord, StringType,
 };
 
+use crate::value::float_from_raw;
 use crate::{
     grammar::interpret, ByteSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, FieldOrigin,
     FieldValue, NamedValue, Result, SemanticContext, SemanticError, ValidationReport,
@@ -458,8 +459,10 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 message: "container node cannot decode a payload directly".to_owned(),
             }),
         }?;
-        self.context
-            .apply_value_callbacks(&node.path, self.record, decoded)
+        let normalized = self
+            .context
+            .apply_normalizers(&node.path, self.record, decoded)?;
+        apply_float_read_semantics(node, normalized)
     }
 
     fn node_applies(&self, node: &SchemaNode, payload: &[u8]) -> Result<bool> {
@@ -533,7 +536,9 @@ fn decode_primitive<'a>(
 ) -> Result<FieldValue<'a>> {
     match primitive {
         PrimitiveType::Integer { integer } => decode_integer(*integer, data, path),
-        PrimitiveType::Float { width, byte_order } => decode_float(*width, *byte_order, data, path),
+        PrimitiveType::Float {
+            width, byte_order, ..
+        } => decode_float(*width, *byte_order, data, path),
         PrimitiveType::String { string } => decode_string(string, data, localized, path),
         PrimitiveType::Bytes { length } => {
             if let Some(expected) = length {
@@ -577,6 +582,25 @@ fn decode_primitive<'a>(
             Ok(FieldValue::Bytes(Cow::Borrowed(data)))
         }
     }
+}
+
+fn apply_float_read_semantics<'a>(
+    node: &SchemaNode,
+    value: FieldValue<'a>,
+) -> Result<FieldValue<'a>> {
+    let SchemaNodeKind::Primitive {
+        primitive: PrimitiveType::Float { scale, digits, .. },
+    } = &node.kind
+    else {
+        return Ok(value);
+    };
+    let FieldValue::Float(value) = value else {
+        return Err(SemanticError::Decode {
+            path: node.path.clone(),
+            message: "float schema node decoded a non-floating-point value".to_owned(),
+        });
+    };
+    Ok(FieldValue::Float(float_from_raw(value, *scale, *digits)))
 }
 
 fn decode_integer<'a>(integer: IntegerType, data: &'a [u8], path: &str) -> Result<FieldValue<'a>> {

@@ -230,7 +230,7 @@ fn collect_signatures(node: &SchemaNode, output: &mut BTreeSet<Signature>) {
 #[cfg(test)]
 mod tests {
     use bethkit_core::SubRecordData;
-    use bethkit_schema::{SchemaNodeId, SchemaSignature};
+    use bethkit_schema::{ConflictPriority, SchemaNodeId, SchemaSignature};
 
     use super::*;
 
@@ -240,6 +240,7 @@ mod tests {
             path: String::from_utf8_lossy(&signature).into_owned(),
             name: "Test".to_owned(),
             required,
+            conflict_priority: ConflictPriority::Normal,
             condition: None,
             kind: SchemaNodeKind::Subrecord {
                 signature: SchemaSignature(signature),
@@ -248,6 +249,7 @@ mod tests {
                     path: format!("{id}/payload"),
                     name: "Payload".to_owned(),
                     required: true,
+                    conflict_priority: ConflictPriority::Normal,
                     condition: None,
                     kind: SchemaNodeKind::Primitive {
                         primitive: bethkit_schema::PrimitiveType::Bytes { length: None },
@@ -274,6 +276,7 @@ mod tests {
             path: "TEST".to_owned(),
             name: "Test".to_owned(),
             required: true,
+            conflict_priority: ConflictPriority::Normal,
             condition: None,
             kind: SchemaNodeKind::Sequence {
                 children: vec![
@@ -312,6 +315,7 @@ mod tests {
             path: "TEST".to_owned(),
             name: "Test".to_owned(),
             required: true,
+            conflict_priority: ConflictPriority::Normal,
             condition: None,
             kind: SchemaNodeKind::Sequence {
                 children: vec![
@@ -320,6 +324,7 @@ mod tests {
                         path: "repeat".to_owned(),
                         name: "Repeat".to_owned(),
                         required: false,
+                        conflict_priority: ConflictPriority::Normal,
                         condition: None,
                         kind: SchemaNodeKind::Repeat {
                             minimum: 0,
@@ -360,6 +365,7 @@ mod tests {
             path: "TEST".to_owned(),
             name: "Test".to_owned(),
             required: true,
+            conflict_priority: ConflictPriority::Normal,
             condition: None,
             kind: SchemaNodeKind::Repeat {
                 minimum: 2,
