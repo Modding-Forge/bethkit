@@ -17,9 +17,9 @@ mod xedit;
 pub use error::{Result, SchemaError};
 pub use expression::{EvalContext, EvalValue, Expression};
 pub use model::{
-    ArrayCount, ByteOrder, CallbackClass, DecoderRequirement, IntegerType, PrimitiveType,
-    SchemaGame, SchemaManifest, SchemaNode, SchemaNodeId, SchemaNodeKind, SchemaRecord,
-    SchemaSignature, StringType, ValidationStatus,
+    ArrayCount, ByteOrder, CallbackBinding, CallbackClass, CallbackImplementation,
+    DecoderRequirement, IntegerType, PrimitiveType, SchemaGame, SchemaManifest, SchemaNode,
+    SchemaNodeId, SchemaNodeKind, SchemaRecord, SchemaSignature, StringType, ValidationStatus,
 };
 pub use package::{
     encode_bundle, SchemaLoadLimits, SchemaPackage, BUNDLE_MAGIC, PACKAGE_FORMAT_VERSION,

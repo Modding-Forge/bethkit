@@ -199,6 +199,42 @@ pub enum CallbackClass {
     UserInterfaceOnly,
 }
 
+/// Executable representation of one classified xEdit callback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CallbackImplementation {
+    /// Callback behavior represented by a bounded expression.
+    Declarative {
+        /// Expression evaluated by the semantic runtime.
+        expression: Expression,
+    },
+    /// Callback behavior implemented by a stable built-in operation.
+    BuiltIn {
+        /// Stable operation identifier.
+        operation: String,
+    },
+    /// Callback behavior implemented by a registered custom handler.
+    Custom {
+        /// Stable custom decoder identifier.
+        decoder: String,
+        /// Minimum compatible decoder version.
+        minimum_decoder_version: u32,
+    },
+    /// Callback affects presentation only and is not executed at runtime.
+    UserInterfaceOnly,
+}
+
+/// Exact schema-path binding for one classified xEdit callback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallbackBinding {
+    /// Exact stable schema path.
+    pub path: String,
+    /// Stable exporter callback role.
+    pub callback_id: String,
+    /// Executable callback representation.
+    pub implementation: CallbackImplementation,
+}
+
 /// Byte order used by a primitive numeric field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

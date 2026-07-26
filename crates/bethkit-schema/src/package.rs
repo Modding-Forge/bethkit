@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Result, SchemaError, SchemaGame, SchemaManifest, SchemaNode, SchemaNodeId, SchemaNodeKind,
-    SchemaRecord, SchemaSignature, ValidationStatus,
+    CallbackBinding, CallbackImplementation, Result, SchemaError, SchemaGame, SchemaManifest,
+    SchemaNode, SchemaNodeId, SchemaNodeKind, SchemaRecord, SchemaSignature, ValidationStatus,
 };
 
 /// Magic bytes at the beginning of one `.bkschema` package.
@@ -58,6 +58,8 @@ impl Default for SchemaLoadLimits {
 struct PackagePayload {
     manifest: SchemaManifest,
     records: Vec<SchemaRecord>,
+    #[serde(default)]
+    callback_bindings: Vec<CallbackBinding>,
 }
 
 /// A validated, owned schema package for one game mode.
@@ -65,6 +67,7 @@ struct PackagePayload {
 pub struct SchemaPackage {
     manifest: SchemaManifest,
     records: Vec<SchemaRecord>,
+    callback_bindings: Vec<CallbackBinding>,
     payload_sha256: [u8; 32],
 }
 
@@ -76,9 +79,25 @@ impl SchemaPackage {
     /// Returns [`SchemaError::InvalidGraph`] when schema identifiers,
     /// paths, decoder requirements, or validation metadata are invalid.
     pub fn new(manifest: SchemaManifest, records: Vec<SchemaRecord>) -> Result<Self> {
+        Self::new_with_callbacks(manifest, records, Vec::new())
+    }
+
+    /// Creates and validates a package with executable callback bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::InvalidGraph`] when schema identifiers, paths,
+    /// callback bindings, decoder requirements, or validation metadata are
+    /// invalid.
+    pub fn new_with_callbacks(
+        manifest: SchemaManifest,
+        records: Vec<SchemaRecord>,
+        callback_bindings: Vec<CallbackBinding>,
+    ) -> Result<Self> {
         let mut package = Self {
             manifest,
             records,
+            callback_bindings,
             payload_sha256: [0; 32],
         };
         package.validate(&SchemaLoadLimits::default())?;
@@ -160,6 +179,7 @@ impl SchemaPackage {
         let package = Self {
             manifest: payload.manifest,
             records: payload.records,
+            callback_bindings: payload.callback_bindings,
             payload_sha256: actual_hash,
         };
         package.validate(limits)?;
@@ -198,6 +218,11 @@ impl SchemaPackage {
         &self.records
     }
 
+    /// Returns all exact-path callback bindings in deterministic order.
+    pub fn callback_bindings(&self) -> &[CallbackBinding] {
+        &self.callback_bindings
+    }
+
     /// Returns the package payload digest.
     pub fn payload_sha256(&self) -> [u8; 32] {
         self.payload_sha256
@@ -207,6 +232,7 @@ impl SchemaPackage {
         let payload = PackagePayload {
             manifest: self.manifest.clone(),
             records: self.records.clone(),
+            callback_bindings: self.callback_bindings.clone(),
         };
         let mut encoded: Vec<u8> = Vec::new();
         ciborium::ser::into_writer(&payload, &mut encoded)
@@ -235,6 +261,14 @@ impl SchemaPackage {
             return Err(SchemaError::InvalidGraph(
                 "all exported callbacks must be classified".to_owned(),
             ));
+        }
+        let callback_count: u64 = u64::try_from(self.callback_bindings.len())
+            .map_err(|_| SchemaError::LimitExceeded("callback count exceeds u64".to_owned()))?;
+        if callback_count != self.manifest.callbacks_total {
+            return Err(SchemaError::InvalidGraph(format!(
+                "package has {callback_count} callback bindings but manifest declares {}",
+                self.manifest.callbacks_total
+            )));
         }
         if self.records.len() > limits.maximum_records {
             return Err(SchemaError::LimitExceeded(format!(
@@ -273,8 +307,68 @@ impl SchemaPackage {
             }
             validate_string(&decoder.id, limits)?;
         }
+        validate_callback_bindings(
+            &self.callback_bindings,
+            &self.manifest.required_decoders,
+            limits,
+        )?;
         Ok(())
     }
+}
+
+fn validate_callback_bindings(
+    bindings: &[CallbackBinding],
+    decoders: &[crate::DecoderRequirement],
+    limits: &SchemaLoadLimits,
+) -> Result<()> {
+    let mut keys: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for binding in bindings {
+        validate_string(&binding.path, limits)?;
+        validate_string(&binding.callback_id, limits)?;
+        if binding.path.trim().is_empty() || binding.callback_id.trim().is_empty() {
+            return Err(SchemaError::InvalidGraph(
+                "callback path and identifier must not be empty".to_owned(),
+            ));
+        }
+        if !keys.insert((&binding.path, &binding.callback_id)) {
+            return Err(SchemaError::InvalidGraph(format!(
+                "duplicate callback binding {} at {}",
+                binding.callback_id, binding.path
+            )));
+        }
+        match &binding.implementation {
+            CallbackImplementation::Declarative { .. }
+            | CallbackImplementation::UserInterfaceOnly => {}
+            CallbackImplementation::BuiltIn { operation } => {
+                validate_string(operation, limits)?;
+                if operation.trim().is_empty() {
+                    return Err(SchemaError::InvalidGraph(
+                        "built-in callback operation must not be empty".to_owned(),
+                    ));
+                }
+            }
+            CallbackImplementation::Custom {
+                decoder,
+                minimum_decoder_version,
+            } => {
+                validate_string(decoder, limits)?;
+                if decoder.trim().is_empty() || *minimum_decoder_version == 0 {
+                    return Err(SchemaError::InvalidGraph(
+                        "custom callback decoder and version must be valid".to_owned(),
+                    ));
+                }
+                if !decoders.iter().any(|requirement| {
+                    requirement.id == *decoder
+                        && requirement.minimum_version >= *minimum_decoder_version
+                }) {
+                    return Err(SchemaError::InvalidGraph(format!(
+                        "custom callback decoder {decoder} is missing from manifest requirements"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Encodes packages into one deterministic catalog bundle.

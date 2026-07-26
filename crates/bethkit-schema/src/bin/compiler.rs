@@ -53,11 +53,17 @@ fn parse_json_package(path: &Path) -> Result<SchemaPackage, Box<dyn std::error::
     struct JsonPackage {
         manifest: bethkit_schema::SchemaManifest,
         records: Vec<bethkit_schema::SchemaRecord>,
+        #[serde(default)]
+        callback_bindings: Vec<bethkit_schema::CallbackBinding>,
     }
 
     let bytes: Vec<u8> = fs::read(path)?;
     let package: JsonPackage = serde_json::from_slice(&bytes)?;
-    Ok(SchemaPackage::new(package.manifest, package.records)?)
+    Ok(SchemaPackage::new_with_callbacks(
+        package.manifest,
+        package.records,
+        package.callback_bindings,
+    )?)
 }
 
 fn usage() -> &'static str {

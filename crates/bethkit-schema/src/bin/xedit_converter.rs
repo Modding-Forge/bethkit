@@ -155,6 +155,8 @@ fn merge_ui_rules(
             path: callback.path.clone(),
             callback_id: callback.callback_id.clone(),
             classification: CallbackClass::UserInterfaceOnly,
+            expression: None,
+            built_in_operation: None,
             custom_decoder: None,
             minimum_decoder_version: None,
             rationale: "xEdit exposes this callback as presentation-only metadata.".to_owned(),

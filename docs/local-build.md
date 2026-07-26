@@ -112,6 +112,11 @@ This command only adds exact-path rules for callbacks that xEdit exposes as
 presentation-only metadata. It does not classify semantic callbacks and refuses
 to overwrite a conflicting reviewed rule.
 
+Every classified callback is embedded in the resulting package as an exact-path
+binding to a bounded expression, stable built-in operation, versioned custom
+handler, or UI-only marker. Package validation rejects manifest counts that do
+not match these concrete bindings.
+
 Generate and inspect all eleven candidate packages with:
 
 ```powershell
