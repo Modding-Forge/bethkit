@@ -574,6 +574,38 @@ fn validate_node(
             )));
         }
     }
+    if let SchemaNodeKind::Primitive {
+        primitive: crate::PrimitiveType::String { string },
+    } = &node.kind
+    {
+        validate_string(&string.encoding, limits)?;
+        if string.encoding.is_empty() {
+            return Err(SchemaError::InvalidGraph(format!(
+                "string encoding must not be empty at {}",
+                node.path
+            )));
+        }
+        if let Some(prefix) = string.length_prefix {
+            if !matches!(prefix.width, 1 | 2 | 4) {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "string length prefix width must be 1, 2, or 4 at {}",
+                    node.path
+                )));
+            }
+            if prefix.offset < prefix.width {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "string length prefix offset precedes its value at {}",
+                    node.path
+                )));
+            }
+            if string.fixed_length.is_some() {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "string cannot have both fixed length and a length prefix at {}",
+                    node.path
+                )));
+            }
+        }
+    }
 
     let children: Vec<&SchemaNode> = match &node.kind {
         SchemaNodeKind::Sequence { children } => children.iter().collect(),

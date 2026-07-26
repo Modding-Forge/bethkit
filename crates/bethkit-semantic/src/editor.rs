@@ -195,7 +195,7 @@ impl RecordEditor {
     fn encode_node(&self, node: &SchemaNode, value: &OwnedFieldValue) -> Result<Vec<u8>> {
         match &node.kind {
             SchemaNodeKind::Primitive { primitive } => {
-                encode_primitive(primitive, value, &node.path)
+                encode_primitive(primitive, value, self.localized, &node.path)
             }
             SchemaNodeKind::Custom { decoder, .. } => self
                 .decoders
@@ -487,6 +487,7 @@ fn find_node_by_path<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaN
 fn encode_primitive(
     primitive: &PrimitiveType,
     value: &OwnedFieldValue,
+    localized: bool,
     path: &str,
 ) -> Result<Vec<u8>> {
     match (primitive, value) {
@@ -524,9 +525,22 @@ fn encode_primitive(
             };
             Ok(bytes.to_vec())
         }
+        (PrimitiveType::String { string }, OwnedFieldValue::UInt(value))
+            if is_localized_string(string) && localized =>
+        {
+            let id: u32 = u32::try_from(*value)
+                .map_err(|_| encode_error(path, "localized string ID exceeds u32"))?;
+            Ok(id.to_le_bytes().to_vec())
+        }
         (PrimitiveType::String { string }, OwnedFieldValue::String(value)) => {
-            let mut bytes: Vec<u8> = match string.encoding.as_str() {
-                "utf8" | "localized" => value.as_bytes().to_vec(),
+            if is_localized_string(string) && localized {
+                return Err(encode_error(
+                    path,
+                    "localized plugin string requires a string-table ID",
+                ));
+            }
+            let bytes: Vec<u8> = match text_encoding(string) {
+                "utf8" => value.as_bytes().to_vec(),
                 "windows_1252" => {
                     let (bytes, _, had_errors) = encoding_rs::WINDOWS_1252.encode(value);
                     if had_errors {
@@ -544,16 +558,7 @@ fn encode_primitive(
                     ));
                 }
             };
-            if string.zero_terminated {
-                bytes.push(0);
-            }
-            if let Some(length) = string.fixed_length {
-                if bytes.len() > length as usize {
-                    return Err(encode_error(path, "string exceeds fixed length"));
-                }
-                bytes.resize(length as usize, 0);
-            }
-            Ok(bytes)
+            finish_string_encoding(string, bytes, path)
         }
         (PrimitiveType::Bytes { length }, OwnedFieldValue::Bytes(value)) => {
             if length.is_some_and(|length| value.len() != length as usize) {
@@ -578,6 +583,64 @@ fn encode_primitive(
         }
         _ => Err(encode_error(path, "value type does not match schema type")),
     }
+}
+
+fn is_localized_string(string: &bethkit_schema::StringType) -> bool {
+    string.localized || string.encoding == "localized"
+}
+
+fn text_encoding(string: &bethkit_schema::StringType) -> &str {
+    if string.encoding == "localized" {
+        "windows_1252"
+    } else {
+        &string.encoding
+    }
+}
+
+fn finish_string_encoding(
+    string: &bethkit_schema::StringType,
+    mut body: Vec<u8>,
+    path: &str,
+) -> Result<Vec<u8>> {
+    if string.zero_terminated {
+        body.push(0);
+    }
+    if let Some(length) = string.fixed_length {
+        if body.len() > length as usize {
+            return Err(encode_error(path, "string exceeds fixed length"));
+        }
+        body.resize(length as usize, 0);
+    }
+    let mut output: Vec<u8> = if let Some(prefix) = string.length_prefix {
+        let length: u64 = body.len() as u64;
+        let mut output: Vec<u8> = vec![0; prefix.offset as usize];
+        match prefix.width {
+            1 if length <= u8::MAX as u64 => output[0] = length as u8,
+            2 if length <= u16::MAX as u64 => {
+                output[..2].copy_from_slice(&(length as u16).to_le_bytes());
+            }
+            4 if length <= u32::MAX as u64 => {
+                output[..4].copy_from_slice(&(length as u32).to_le_bytes());
+            }
+            1 | 2 | 4 => {
+                return Err(encode_error(path, "string exceeds length prefix width"));
+            }
+            width => {
+                return Err(encode_error(
+                    path,
+                    format!("unsupported string length prefix width {width}"),
+                ));
+            }
+        }
+        output.extend_from_slice(&body);
+        output
+    } else {
+        body
+    };
+    if let Some(terminator) = string.trailing_terminator {
+        output.push(terminator);
+    }
+    Ok(output)
 }
 
 fn encode_integer(integer: IntegerType, value: u64, path: &str) -> Result<Vec<u8>> {
@@ -613,8 +676,11 @@ mod tests {
         PrimitiveType::String {
             string: StringType {
                 encoding: "windows_1252".to_owned(),
+                localized: false,
                 zero_terminated,
                 fixed_length: None,
+                length_prefix: None,
+                trailing_terminator: None,
             },
         }
     }
@@ -624,6 +690,7 @@ mod tests {
         let bytes = encode_primitive(
             &windows_1252_string(true),
             &OwnedFieldValue::String("Grüße".to_owned()),
+            false,
             "TEST",
         )
         .expect("Windows-1252 string should encode");
@@ -636,10 +703,62 @@ mod tests {
         let error = encode_primitive(
             &windows_1252_string(false),
             &OwnedFieldValue::String("Dragon 🐉".to_owned()),
+            false,
             "TEST",
         )
         .expect_err("unrepresentable character should fail");
 
         assert!(error.to_string().contains("cannot represent"));
+    }
+
+    #[test]
+    fn length_prefixed_strings_include_padding_and_structural_terminator() {
+        let primitive = PrimitiveType::String {
+            string: StringType {
+                encoding: "utf8".to_owned(),
+                localized: false,
+                zero_terminated: false,
+                fixed_length: None,
+                length_prefix: Some(bethkit_schema::StringLengthPrefix {
+                    width: 1,
+                    offset: 2,
+                }),
+                trailing_terminator: Some(b'|'),
+            },
+        };
+
+        let bytes = encode_primitive(
+            &primitive,
+            &OwnedFieldValue::String("abc".to_owned()),
+            false,
+            "TEST",
+        )
+        .expect("length-prefixed string should encode");
+
+        assert_eq!(bytes, b"\x03\0abc|");
+    }
+
+    #[test]
+    fn localized_strings_encode_as_table_ids() {
+        let primitive = PrimitiveType::String {
+            string: StringType {
+                encoding: "windows_1252".to_owned(),
+                localized: true,
+                zero_terminated: true,
+                fixed_length: None,
+                length_prefix: None,
+                trailing_terminator: Some(b'|'),
+            },
+        };
+
+        let bytes = encode_primitive(
+            &primitive,
+            &OwnedFieldValue::UInt(0x1234_5678),
+            true,
+            "TEST",
+        )
+        .expect("localized string ID should encode");
+
+        assert_eq!(bytes, 0x1234_5678_u32.to_le_bytes());
     }
 }

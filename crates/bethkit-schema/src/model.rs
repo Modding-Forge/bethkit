@@ -324,10 +324,28 @@ pub struct IntegerType {
 pub struct StringType {
     /// Encoding identifier such as `utf8`, `windows_1252`, or `localized`.
     pub encoding: String,
+    /// Whether localized plugins replace the text bytes with a four-byte string-table ID.
+    #[serde(default)]
+    pub localized: bool,
     /// Whether a zero byte terminates the value.
     pub zero_terminated: bool,
     /// Fixed byte length when the string is not variable-sized.
     pub fixed_length: Option<u32>,
+    /// Optional unsigned little-endian byte-length prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length_prefix: Option<StringLengthPrefix>,
+    /// Optional structural terminator byte following the complete string representation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trailing_terminator: Option<u8>,
+}
+
+/// Length prefix stored before a variable-sized string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StringLengthPrefix {
+    /// Width of the unsigned little-endian length value in bytes.
+    pub width: u8,
+    /// Byte offset from the start of the field to the first string byte.
+    pub offset: u8,
 }
 
 /// Primitive field type.

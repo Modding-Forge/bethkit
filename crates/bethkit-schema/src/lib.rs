@@ -19,7 +19,7 @@ pub use model::{
     ArrayCount, BuiltInOperation, ByteOrder, CallbackBinding, CallbackClass,
     CallbackImplementation, ConflictPriority, DecoderRequirement, HandlerRequirement, IntegerType,
     PrimitiveType, SchemaGame, SchemaManifest, SchemaNode, SchemaNodeId, SchemaNodeKind,
-    SchemaRecord, SchemaSignature, StringType, ValidationStatus,
+    SchemaRecord, SchemaSignature, StringLengthPrefix, StringType, ValidationStatus,
 };
 pub use package::{
     encode_bundle, SchemaLoadLimits, SchemaPackage, BUNDLE_MAGIC, PACKAGE_FORMAT_VERSION,

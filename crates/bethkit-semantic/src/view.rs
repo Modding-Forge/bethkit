@@ -313,9 +313,19 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             path: field.path.clone(),
                             message: "struct cursor exceeded payload".to_owned(),
                         })?;
+                    let consumed: usize = node_data_size(field, remaining, self.localized)?;
+                    let field_data: &'a [u8] =
+                        remaining
+                            .get(..consumed)
+                            .ok_or_else(|| SemanticError::Decode {
+                                path: field.path.clone(),
+                                message: format!(
+                                    "field needs {consumed} bytes, only {} remain",
+                                    remaining.len()
+                                ),
+                            })?;
                     let value: FieldValue<'a> =
-                        self.decode_node(field, payload, remaining, offset + cursor)?;
-                    let consumed: usize = fixed_node_size(field).unwrap_or(remaining.len());
+                        self.decode_node(field, payload, field_data, offset + cursor)?;
                     values.push(NamedValue {
                         node_id: field.id,
                         path: field.path.clone(),
@@ -737,7 +747,7 @@ fn decode_string<'a>(
     localized: bool,
     path: &str,
 ) -> Result<FieldValue<'a>> {
-    if string.encoding == "localized" && localized {
+    if is_localized_string(string) && localized {
         if data.len() != 4 {
             return Err(decode_length_error(path, 4, data.len()));
         }
@@ -747,22 +757,18 @@ fn decode_string<'a>(
         );
         return Ok(FieldValue::UInt(u64::from(id)));
     }
-    if let Some(length) = string.fixed_length {
-        if data.len() != length as usize {
-            return Err(decode_length_error(path, length as usize, data.len()));
-        }
-    }
+    let bytes: &'a [u8] = string_body(string, data, path)?;
     let bytes: &'a [u8] = if string.zero_terminated {
-        let end: usize = data
+        let end: usize = bytes
             .iter()
             .position(|byte| *byte == 0)
-            .unwrap_or(data.len());
-        &data[..end]
+            .unwrap_or(bytes.len());
+        &bytes[..end]
     } else {
-        data
+        bytes
     };
-    let value: Cow<'a, str> = match string.encoding.as_str() {
-        "utf8" | "localized" => {
+    let value: Cow<'a, str> = match text_encoding(string) {
+        "utf8" => {
             Cow::Borrowed(
                 std::str::from_utf8(bytes).map_err(|error| SemanticError::Decode {
                     path: path.to_owned(),
@@ -790,12 +796,143 @@ fn decode_string<'a>(
     Ok(FieldValue::String(value))
 }
 
+fn is_localized_string(string: &StringType) -> bool {
+    string.localized || string.encoding == "localized"
+}
+
+fn text_encoding(string: &StringType) -> &str {
+    if string.encoding == "localized" {
+        "windows_1252"
+    } else {
+        &string.encoding
+    }
+}
+
+fn string_body<'a>(string: &StringType, data: &'a [u8], path: &str) -> Result<&'a [u8]> {
+    let representation: &'a [u8] = if let Some(terminator) = string.trailing_terminator {
+        let (&actual, body) = data.split_last().ok_or_else(|| SemanticError::Decode {
+            path: path.to_owned(),
+            message: "string is missing its structural terminator".to_owned(),
+        })?;
+        if actual != terminator {
+            return Err(SemanticError::Decode {
+                path: path.to_owned(),
+                message: format!(
+                    "expected structural terminator 0x{terminator:02X}, got 0x{actual:02X}"
+                ),
+            });
+        }
+        body
+    } else {
+        data
+    };
+    if let Some(prefix) = string.length_prefix {
+        if representation.len() < prefix.offset as usize {
+            return Err(decode_length_error(
+                path,
+                prefix.offset as usize,
+                representation.len(),
+            ));
+        }
+        let length: usize = read_string_length(prefix.width, representation, path)?;
+        let end: usize = (prefix.offset as usize)
+            .checked_add(length)
+            .ok_or_else(|| SemanticError::Decode {
+                path: path.to_owned(),
+                message: "string length overflowed".to_owned(),
+            })?;
+        if end != representation.len() {
+            return Err(decode_length_error(path, end, representation.len()));
+        }
+        return Ok(&representation[prefix.offset as usize..end]);
+    }
+    if let Some(length) = string.fixed_length {
+        if representation.len() != length as usize {
+            return Err(decode_length_error(
+                path,
+                length as usize,
+                representation.len(),
+            ));
+        }
+    }
+    Ok(representation)
+}
+
+fn read_string_length(width: u8, data: &[u8], path: &str) -> Result<usize> {
+    let length: u32 = match width {
+        1 if !data.is_empty() => u32::from(data[0]),
+        2 if data.len() >= 2 => u32::from(u16::from_le_bytes([data[0], data[1]])),
+        4 if data.len() >= 4 => {
+            u32::from_le_bytes(data[..4].try_into().expect("prefix length was checked"))
+        }
+        1 | 2 | 4 => return Err(decode_length_error(path, width as usize, data.len())),
+        _ => {
+            return Err(SemanticError::Decode {
+                path: path.to_owned(),
+                message: format!("unsupported string length prefix width {width}"),
+            });
+        }
+    };
+    usize::try_from(length).map_err(|_| SemanticError::Decode {
+        path: path.to_owned(),
+        message: "string length exceeds platform size".to_owned(),
+    })
+}
+
+fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usize> {
+    if let SchemaNodeKind::Primitive {
+        primitive: PrimitiveType::String { string },
+    } = &node.kind
+    {
+        if is_localized_string(string) && localized {
+            return Ok(4);
+        }
+        let trailing: usize = usize::from(string.trailing_terminator.is_some());
+        if let Some(prefix) = string.length_prefix {
+            let length: usize = read_string_length(prefix.width, data, &node.path)?;
+            return (prefix.offset as usize)
+                .checked_add(length)
+                .and_then(|value| value.checked_add(trailing))
+                .ok_or_else(|| SemanticError::Decode {
+                    path: node.path.clone(),
+                    message: "string size overflowed".to_owned(),
+                });
+        }
+        if let Some(length) = string.fixed_length {
+            return (length as usize)
+                .checked_add(trailing)
+                .ok_or_else(|| SemanticError::Decode {
+                    path: node.path.clone(),
+                    message: "string size overflowed".to_owned(),
+                });
+        }
+        if string.zero_terminated {
+            let body_length: usize = data
+                .iter()
+                .position(|byte| *byte == 0)
+                .map_or(data.len(), |index| index + 1);
+            return body_length
+                .checked_add(trailing)
+                .ok_or_else(|| SemanticError::Decode {
+                    path: node.path.clone(),
+                    message: "string size overflowed".to_owned(),
+                });
+        }
+    }
+    Ok(fixed_node_size(node).unwrap_or(data.len()))
+}
+
 fn fixed_node_size(node: &SchemaNode) -> Option<usize> {
     match &node.kind {
         SchemaNodeKind::Primitive { primitive } => match primitive {
             PrimitiveType::Integer { integer } => Some(integer.width as usize),
             PrimitiveType::Float { width, .. } => Some(*width as usize),
-            PrimitiveType::String { string } => string.fixed_length.map(|value| value as usize),
+            PrimitiveType::String { string } if !is_localized_string(string) => {
+                string.fixed_length.and_then(|value| {
+                    (value as usize).checked_add(usize::from(string.trailing_terminator.is_some()))
+                })
+            }
+            PrimitiveType::String { .. } => None,
             PrimitiveType::Bytes { length } => length.map(|value| value as usize),
             PrimitiveType::FormId { .. } => Some(4),
             PrimitiveType::Enumeration { integer, .. } | PrimitiveType::Flags { integer, .. } => {
@@ -832,8 +969,11 @@ mod tests {
     fn windows_1252_strings_decode_without_losing_non_ascii_bytes() {
         let string = StringType {
             encoding: "windows_1252".to_owned(),
+            localized: false,
             zero_terminated: true,
             fixed_length: None,
+            length_prefix: None,
+            trailing_terminator: None,
         };
 
         let value = decode_string(&string, b"Gr\xfc\xdfe\0ignored", false, "TEST")
@@ -849,8 +989,11 @@ mod tests {
     fn windows_1252_strings_preserve_control_bytes() {
         let string = StringType {
             encoding: "windows_1252".to_owned(),
+            localized: false,
             zero_terminated: false,
             fixed_length: None,
+            length_prefix: None,
+            trailing_terminator: None,
         };
 
         let value =
@@ -859,6 +1002,50 @@ mod tests {
         match value {
             FieldValue::String(value) => assert_eq!(value, "\u{81}"),
             other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn length_prefixed_strings_decode_padding_and_structural_terminator() {
+        let string = StringType {
+            encoding: "utf8".to_owned(),
+            localized: false,
+            zero_terminated: false,
+            fixed_length: None,
+            length_prefix: Some(bethkit_schema::StringLengthPrefix {
+                width: 1,
+                offset: 2,
+            }),
+            trailing_terminator: Some(b'|'),
+        };
+
+        let value = decode_string(&string, b"\x03\0abc|", false, "TEST")
+            .expect("length-prefixed string should decode");
+
+        match value {
+            FieldValue::String(value) => assert_eq!(value, "abc"),
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn localized_strings_decode_exact_table_ids() {
+        let string = StringType {
+            encoding: "windows_1252".to_owned(),
+            localized: true,
+            zero_terminated: true,
+            fixed_length: None,
+            length_prefix: None,
+            trailing_terminator: Some(b'|'),
+        };
+
+        let bytes = 0x1234_5678_u32.to_le_bytes();
+        let value = decode_string(&string, &bytes, true, "TEST")
+            .expect("localized string ID should decode");
+
+        match value {
+            FieldValue::UInt(value) => assert_eq!(value, 0x1234_5678),
+            other => panic!("expected string-table ID, got {other:?}"),
         }
     }
 }
