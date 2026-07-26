@@ -32,13 +32,16 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bethkit_schema::{SchemaCatalog, SchemaPackage};
-use bethkit_semantic::{DecoderRegistry, FieldValue, SemanticContext};
+use bethkit_semantic::{
+    DecoderRegistry, FieldValue, OwnedFieldValue, RecordEditor, SemanticContext,
+};
 
 use crate::record::BethkitRecord;
 use crate::types::{
     game_to_core, BethkitEnumVal, BethkitFieldValueKind, BethkitFlagsVal, BethkitGame,
     BethkitTypedFormId,
 };
+use crate::writer::BethkitWritableRecord;
 use crate::{cstr_to_str, ffi_try, null_check, set_last_error, BethkitSlice};
 
 /// A decoded field value stored as a `#[repr(C)]` tagged union.
@@ -153,6 +156,9 @@ pub struct BethkitSchemaPackage(Arc<SchemaPackage>);
 /// Owned semantic runtime context.
 pub struct BethkitSemanticContext(SemanticContext);
 
+/// Owned lossless semantic record editor.
+pub struct BethkitRecordEditor(Option<RecordEditor>);
+
 /// Loads the release-time embedded schema catalog.
 ///
 /// Returns null and sets the last error when this library was built without
@@ -251,6 +257,193 @@ pub extern "C" fn bethkit_semantic_context_free(context: *mut BethkitSemanticCon
         // SAFETY: context was produced by Box::into_raw in this module.
         drop(unsafe { Box::from_raw(context) });
     }
+}
+
+/// Creates a lossless semantic editor for `record`.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_new(
+    context: *const BethkitSemanticContext,
+    record: *const BethkitRecord,
+    localized: bool,
+) -> *mut BethkitRecordEditor {
+    null_check!(
+        context,
+        "bethkit_record_editor_new/context",
+        std::ptr::null_mut()
+    );
+    null_check!(
+        record,
+        "bethkit_record_editor_new/record",
+        std::ptr::null_mut()
+    );
+    // SAFETY: both handles were checked for null and remain borrowed.
+    let context = unsafe { &*context };
+    let record = unsafe { &*record };
+    let editor = ffi_try!(context.0.edit(&record.0, localized), std::ptr::null_mut());
+    Box::into_raw(Box::new(BethkitRecordEditor(Some(editor))))
+}
+
+/// Frees an owned record editor. Passing null is a no-op.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_free(editor: *mut BethkitRecordEditor) {
+    if !editor.is_null() {
+        // SAFETY: editor was produced by Box::into_raw in this module.
+        drop(unsafe { Box::from_raw(editor) });
+    }
+}
+
+/// Sets one signed integer field occurrence.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_set_i64(
+    editor: *mut BethkitRecordEditor,
+    path: *const c_char,
+    occurrence: usize,
+    value: i64,
+) -> i32 {
+    edit_set(editor, path, occurrence, &OwnedFieldValue::Int(value))
+}
+
+/// Sets one unsigned integer field occurrence.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_set_u64(
+    editor: *mut BethkitRecordEditor,
+    path: *const c_char,
+    occurrence: usize,
+    value: u64,
+) -> i32 {
+    edit_set(editor, path, occurrence, &OwnedFieldValue::UInt(value))
+}
+
+/// Sets one floating-point field occurrence.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_set_f64(
+    editor: *mut BethkitRecordEditor,
+    path: *const c_char,
+    occurrence: usize,
+    value: f64,
+) -> i32 {
+    edit_set(editor, path, occurrence, &OwnedFieldValue::Float(value))
+}
+
+/// Sets one FormID field occurrence.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_set_form_id(
+    editor: *mut BethkitRecordEditor,
+    path: *const c_char,
+    occurrence: usize,
+    value: u32,
+) -> i32 {
+    edit_set(
+        editor,
+        path,
+        occurrence,
+        &OwnedFieldValue::FormId(bethkit_core::FormId(value)),
+    )
+}
+
+/// Sets one UTF-8 string field occurrence.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_set_string(
+    editor: *mut BethkitRecordEditor,
+    path: *const c_char,
+    occurrence: usize,
+    value: *const c_char,
+) -> i32 {
+    let value = match cstr_to_str(value, "bethkit_record_editor_set_string/value") {
+        Some(value) => value,
+        None => return -1,
+    };
+    edit_set(
+        editor,
+        path,
+        occurrence,
+        &OwnedFieldValue::String(value.to_owned()),
+    )
+}
+
+/// Sets one raw-byte field occurrence.
+///
+/// `value` must point to `length` readable bytes.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_set_bytes(
+    editor: *mut BethkitRecordEditor,
+    path: *const c_char,
+    occurrence: usize,
+    value: *const u8,
+    length: usize,
+) -> i32 {
+    null_check!(value, "bethkit_record_editor_set_bytes/value", -1);
+    // SAFETY: value is non-null and readable for length bytes by contract.
+    let bytes = unsafe { std::slice::from_raw_parts(value, length) };
+    edit_set(
+        editor,
+        path,
+        occurrence,
+        &OwnedFieldValue::Bytes(bytes.to_vec()),
+    )
+}
+
+/// Removes one top-level field occurrence.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_remove(
+    editor: *mut BethkitRecordEditor,
+    path: *const c_char,
+    occurrence: usize,
+) -> i32 {
+    null_check!(editor, "bethkit_record_editor_remove", -1);
+    let path = match cstr_to_str(path, "bethkit_record_editor_remove/path") {
+        Some(path) => path,
+        None => return -1,
+    };
+    // SAFETY: editor was checked for null and remains exclusively borrowed.
+    let editor = unsafe { &mut *editor };
+    let Some(inner) = editor.0.as_mut() else {
+        set_last_error("record editor was already consumed");
+        return -1;
+    };
+    ffi_try!(inner.remove(path, occurrence), -1);
+    0
+}
+
+/// Consumes an editor and returns an owned writable record.
+///
+/// The returned record must be freed with `bethkit_writable_record_free` or
+/// transferred to a writable group.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_finish(
+    editor: *mut BethkitRecordEditor,
+) -> *mut BethkitWritableRecord {
+    null_check!(editor, "bethkit_record_editor_finish", std::ptr::null_mut());
+    // SAFETY: editor was checked for null and remains exclusively borrowed.
+    let editor = unsafe { &mut *editor };
+    let Some(inner) = editor.0.take() else {
+        set_last_error("record editor was already consumed");
+        return std::ptr::null_mut();
+    };
+    Box::into_raw(Box::new(BethkitWritableRecord(
+        inner.into_writable_record(),
+    )))
+}
+
+fn edit_set(
+    editor: *mut BethkitRecordEditor,
+    path: *const c_char,
+    occurrence: usize,
+    value: &OwnedFieldValue,
+) -> i32 {
+    null_check!(editor, "bethkit_record_editor_set", -1);
+    let path = match cstr_to_str(path, "bethkit_record_editor_set/path") {
+        Some(path) => path,
+        None => return -1,
+    };
+    // SAFETY: editor was checked for null and remains exclusively borrowed.
+    let editor = unsafe { &mut *editor };
+    let Some(inner) = editor.0.as_mut() else {
+        set_last_error("record editor was already consumed");
+        return -1;
+    };
+    ffi_try!(inner.set(path, occurrence, value), -1);
+    0
 }
 
 /// Creates a schema-guided snapshot of all decoded fields in `record`.

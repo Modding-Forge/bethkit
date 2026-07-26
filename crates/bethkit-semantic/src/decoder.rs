@@ -31,7 +31,7 @@ pub trait CustomDecoder: Send + Sync {
 }
 
 /// Versioned custom-decoder registry.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DecoderRegistry {
     decoders: BTreeMap<String, Arc<dyn CustomDecoder>>,
 }

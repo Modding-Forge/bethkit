@@ -8,15 +8,16 @@ use bethkit_schema::{ByteOrder, IntegerType, PrimitiveType, SchemaNode, SchemaNo
 use crate::{OwnedFieldValue, Result, SemanticContext, SemanticError};
 
 /// Lossless editor for one record.
-pub struct RecordEditor<'context> {
-    context: &'context SemanticContext,
+pub struct RecordEditor {
+    registry: bethkit_schema::SchemaRegistry,
+    decoders: crate::DecoderRegistry,
     record: WritableRecord,
     localized: bool,
 }
 
-impl<'context> RecordEditor<'context> {
+impl RecordEditor {
     pub(crate) fn new(
-        context: &'context SemanticContext,
+        context: &SemanticContext,
         record: &Record,
         plugin_localized: bool,
     ) -> Result<Self> {
@@ -34,7 +35,8 @@ impl<'context> RecordEditor<'context> {
             })
             .collect();
         Ok(Self {
-            context,
+            registry: context.registry().clone(),
+            decoders: context.decoders().clone(),
             record: WritableRecord {
                 signature: record.header.signature,
                 flags: record.header.flags,
@@ -153,8 +155,7 @@ impl<'context> RecordEditor<'context> {
 
     fn find_node(&self, path: &str) -> Result<&SchemaNode> {
         let schema = self
-            .context
-            .registry()
+            .registry
             .get(self.record.signature)
             .ok_or_else(|| SemanticError::MissingRecordSchema(self.record.signature.to_string()))?;
         find_node_by_path(&schema.root, path)
@@ -167,8 +168,7 @@ impl<'context> RecordEditor<'context> {
                 encode_primitive(primitive, value, &node.path)
             }
             SchemaNodeKind::Custom { decoder, .. } => self
-                .context
-                .decoders()
+                .decoders
                 .get(decoder)
                 .ok_or_else(|| SemanticError::MissingDecoder(decoder.clone()))?
                 .encode(value),

@@ -294,6 +294,11 @@ typedef struct BethkitPluginCache BethkitPluginCache;
 typedef struct BethkitPluginWriter BethkitPluginWriter;
 
 /**
+ * Owned lossless semantic record editor.
+ */
+typedef struct BethkitRecordEditor BethkitRecordEditor;
+
+/**
  * An owned, schema-guided snapshot of all decoded fields from a record.
  *
  * Created by [`bethkit_record_view_new`].  Must be freed with
@@ -1515,6 +1520,84 @@ struct BethkitSemanticContext *bethkit_semantic_context_new(const struct Bethkit
  * Frees an owned semantic context. Passing null is a no-op.
  */
 void bethkit_semantic_context_free(struct BethkitSemanticContext *context);
+
+/**
+ * Creates a lossless semantic editor for `record`.
+ */
+struct BethkitRecordEditor *bethkit_record_editor_new(const struct BethkitSemanticContext *context,
+                                                      const BethkitRecord *record,
+                                                      bool localized);
+
+/**
+ * Frees an owned record editor. Passing null is a no-op.
+ */
+void bethkit_record_editor_free(struct BethkitRecordEditor *editor);
+
+/**
+ * Sets one signed integer field occurrence.
+ */
+int32_t bethkit_record_editor_set_i64(struct BethkitRecordEditor *editor,
+                                      const char *path,
+                                      uintptr_t occurrence,
+                                      int64_t value);
+
+/**
+ * Sets one unsigned integer field occurrence.
+ */
+int32_t bethkit_record_editor_set_u64(struct BethkitRecordEditor *editor,
+                                      const char *path,
+                                      uintptr_t occurrence,
+                                      uint64_t value);
+
+/**
+ * Sets one floating-point field occurrence.
+ */
+int32_t bethkit_record_editor_set_f64(struct BethkitRecordEditor *editor,
+                                      const char *path,
+                                      uintptr_t occurrence,
+                                      double value);
+
+/**
+ * Sets one FormID field occurrence.
+ */
+int32_t bethkit_record_editor_set_form_id(struct BethkitRecordEditor *editor,
+                                          const char *path,
+                                          uintptr_t occurrence,
+                                          uint32_t value);
+
+/**
+ * Sets one UTF-8 string field occurrence.
+ */
+int32_t bethkit_record_editor_set_string(struct BethkitRecordEditor *editor,
+                                         const char *path,
+                                         uintptr_t occurrence,
+                                         const char *value);
+
+/**
+ * Sets one raw-byte field occurrence.
+ *
+ * `value` must point to `length` readable bytes.
+ */
+int32_t bethkit_record_editor_set_bytes(struct BethkitRecordEditor *editor,
+                                        const char *path,
+                                        uintptr_t occurrence,
+                                        const uint8_t *value,
+                                        uintptr_t length);
+
+/**
+ * Removes one top-level field occurrence.
+ */
+int32_t bethkit_record_editor_remove(struct BethkitRecordEditor *editor,
+                                     const char *path,
+                                     uintptr_t occurrence);
+
+/**
+ * Consumes an editor and returns an owned writable record.
+ *
+ * The returned record must be freed with `bethkit_writable_record_free` or
+ * transferred to a writable group.
+ */
+struct BethkitWritableRecord *bethkit_record_editor_finish(struct BethkitRecordEditor *editor);
 
 /**
  * Creates a schema-guided snapshot of all decoded fields in `record`.

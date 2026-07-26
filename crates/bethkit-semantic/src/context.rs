@@ -52,11 +52,7 @@ impl SemanticContext {
     ///
     /// Returns [`crate::SemanticError`] when the record subrecords cannot be
     /// parsed or its schema is unavailable.
-    pub fn edit<'context>(
-        &'context self,
-        record: &Record,
-        plugin_localized: bool,
-    ) -> Result<RecordEditor<'context>> {
+    pub fn edit(&self, record: &Record, plugin_localized: bool) -> Result<RecordEditor> {
         RecordEditor::new(self, record, plugin_localized)
     }
 

@@ -17,6 +17,7 @@ use crate::{
 include!(concat!(env!("OUT_DIR"), "/embedded_catalog.rs"));
 
 /// Record-signature index over one owned schema package.
+#[derive(Clone)]
 pub struct SchemaRegistry {
     package: Arc<SchemaPackage>,
     record_indices: BTreeMap<SchemaSignature, usize>,

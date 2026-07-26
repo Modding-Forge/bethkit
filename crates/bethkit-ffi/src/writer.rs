@@ -49,7 +49,7 @@ pub struct BethkitWritableGroup(WritableGroup);
 ///
 /// Created by [`bethkit_writable_record_new`].  Ownership is transferred to
 /// the parent group when passed to [`bethkit_writable_group_add_record`].
-pub struct BethkitWritableRecord(WritableRecord);
+pub struct BethkitWritableRecord(pub(crate) WritableRecord);
 
 /// Creates a new plugin writer for `game` at the given form version.
 ///
