@@ -7,11 +7,19 @@ use std::path::{Path, PathBuf};
 fn main() {
     println!("cargo:rerun-if-env-changed=BETHKIT_SCHEMA_BUNDLE");
 
+    let manifest_dir: PathBuf = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is provided by Cargo"),
+    );
+    let repository_bundle: PathBuf = manifest_dir.join("../../schemas/embedded/bethkit.bkschemas");
+    println!("cargo:rerun-if-changed={}", repository_bundle.display());
+
     let out_dir: PathBuf =
         PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is provided by Cargo"));
     let generated: PathBuf = out_dir.join("embedded_catalog.rs");
 
-    let source: Option<PathBuf> = env::var_os("BETHKIT_SCHEMA_BUNDLE").map(PathBuf::from);
+    let source: Option<PathBuf> = env::var_os("BETHKIT_SCHEMA_BUNDLE")
+        .map(PathBuf::from)
+        .or_else(|| repository_bundle.is_file().then_some(repository_bundle));
     match source {
         Some(path) => embed_bundle(&path, &out_dir, &generated),
         None => {

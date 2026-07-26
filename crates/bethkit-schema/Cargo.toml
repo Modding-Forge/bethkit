@@ -12,11 +12,3 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-
-[[bin]]
-name = "bethkit-schema-compiler"
-path = "src/bin/compiler.rs"
-
-[[bin]]
-name = "bethkit-xedit-converter"
-path = "src/bin/xedit_converter.rs"
