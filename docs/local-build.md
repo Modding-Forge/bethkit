@@ -98,7 +98,9 @@ Use those values to export every game twice and create a callback inventory:
 The provenance and definition-graph operations are implemented. Exported
 dynamic callbacks intentionally fail conversion until matching audited rules
 and custom decoders are present, so release-quality schema regeneration remains
-blocked at that gate. Generate and inspect all eleven candidate packages with:
+blocked at that gate. The callback inventory also lists every custom decoder
+path and the games that require it. Generate and inspect all eleven candidate
+packages with:
 
 ```powershell
 .\scripts\New-XEditSchemaCatalog.ps1 `

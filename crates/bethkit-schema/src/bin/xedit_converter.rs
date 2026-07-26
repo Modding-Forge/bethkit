@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::{collections::BTreeMap, collections::BTreeSet};
 
 use bethkit_schema::{
-    convert_xedit_export, ConversionRules, ExportedCallback, SchemaGame, XEditExport,
+    convert_xedit_export, ConversionRules, ExportedCallback, SchemaGame, SchemaNode,
+    SchemaNodeKind, XEditExport,
 };
 use serde::Serialize;
 
@@ -19,6 +20,7 @@ struct CallbackInventory {
     exports: usize,
     records: usize,
     callbacks: Vec<InventoryCallback>,
+    custom_decoders: Vec<InventoryDecoder>,
 }
 
 #[derive(Serialize)]
@@ -26,6 +28,13 @@ struct InventoryCallback {
     path: String,
     callback_id: String,
     semantic: bool,
+    games: Vec<SchemaGame>,
+}
+
+#[derive(Serialize)]
+struct InventoryDecoder {
+    path: String,
+    decoder: String,
     games: Vec<SchemaGame>,
 }
 
@@ -61,12 +70,16 @@ fn write_inventory(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     }
     let output_path = PathBuf::from(&arguments[0]);
     let mut indexed: BTreeMap<(String, String), (bool, BTreeSet<SchemaGame>)> = BTreeMap::new();
+    let mut decoders: BTreeMap<(String, String), BTreeSet<SchemaGame>> = BTreeMap::new();
     let mut record_count: usize = 0;
     for input in &arguments[1..] {
         let export: XEditExport = read_json(Path::new(input))?;
         record_count = record_count
             .checked_add(export.records.len())
             .ok_or("record count overflow")?;
+        for record in &export.records {
+            collect_decoders(&record.root, export.game, &mut decoders);
+        }
         for callback in export.callbacks {
             add_callback(&mut indexed, export.game, callback)?;
         }
@@ -82,14 +95,63 @@ fn write_inventory(arguments: &[String]) -> Result<(), Box<dyn Error>> {
             },
         )
         .collect();
+    let custom_decoders = decoders
+        .into_iter()
+        .map(|((path, decoder), games)| InventoryDecoder {
+            path,
+            decoder,
+            games: games.into_iter().collect(),
+        })
+        .collect();
     let inventory = CallbackInventory {
         format_version: 1,
         exports: arguments.len() - 1,
         records: record_count,
         callbacks,
+        custom_decoders,
     };
     fs::write(output_path, serde_json::to_vec_pretty(&inventory)?)?;
     Ok(())
+}
+
+fn collect_decoders(
+    node: &SchemaNode,
+    game: SchemaGame,
+    indexed: &mut BTreeMap<(String, String), BTreeSet<SchemaGame>>,
+) {
+    match &node.kind {
+        SchemaNodeKind::Sequence { children } => {
+            for child in children {
+                collect_decoders(child, game, indexed);
+            }
+        }
+        SchemaNodeKind::Choice { alternatives } => {
+            for alternative in alternatives {
+                collect_decoders(alternative, game, indexed);
+            }
+        }
+        SchemaNodeKind::Repeat { child, .. }
+        | SchemaNodeKind::Subrecord { payload: child, .. }
+        | SchemaNodeKind::Array { element: child, .. }
+        | SchemaNodeKind::Compressed { child, .. } => collect_decoders(child, game, indexed),
+        SchemaNodeKind::Struct { fields } => {
+            for field in fields {
+                collect_decoders(field, game, indexed);
+            }
+        }
+        SchemaNodeKind::Union { variants, .. } => {
+            for variant in variants {
+                collect_decoders(variant, game, indexed);
+            }
+        }
+        SchemaNodeKind::Custom { decoder, .. } => {
+            indexed
+                .entry((node.path.clone(), decoder.clone()))
+                .or_default()
+                .insert(game);
+        }
+        SchemaNodeKind::Primitive { .. } | SchemaNodeKind::Reference { .. } => {}
+    }
 }
 
 fn add_callback(
@@ -127,6 +189,48 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies that custom decoder requirements are collected recursively.
+    #[test]
+    fn decoder_inventory_collects_nested_nodes(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let custom = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(1),
+            path: "TEST/value".to_owned(),
+            name: "Value".to_owned(),
+            required: true,
+            condition: None,
+            kind: SchemaNodeKind::Custom {
+                decoder: "xedit.test".to_owned(),
+                configuration: serde_json::json!({}),
+            },
+        };
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![custom],
+            },
+        };
+        let mut indexed = BTreeMap::new();
+
+        // when
+        collect_decoders(&root, SchemaGame::SkyrimSe, &mut indexed);
+
+        // then
+        let games = indexed
+            .get(&("TEST/value".to_owned(), "xedit.test".to_owned()))
+            .ok_or("custom decoder was not indexed")?;
+        assert_eq!(
+            games.iter().copied().collect::<Vec<_>>(),
+            vec![SchemaGame::SkyrimSe]
+        );
+        Ok(())
+    }
 
     /// Verifies deterministic aggregation of one callback across games.
     #[test]
