@@ -761,20 +761,33 @@ fn decode_string<'a>(
     } else {
         data
     };
-    if string.encoding != "utf8" && string.encoding != "localized" {
-        return Err(SemanticError::Decode {
-            path: path.to_owned(),
-            message: format!(
-                "string encoding {} requires a custom decoder",
-                string.encoding
-            ),
-        });
-    }
-    let value: &'a str = std::str::from_utf8(bytes).map_err(|error| SemanticError::Decode {
-        path: path.to_owned(),
-        message: error.to_string(),
-    })?;
-    Ok(FieldValue::String(Cow::Borrowed(value)))
+    let value: Cow<'a, str> = match string.encoding.as_str() {
+        "utf8" | "localized" => {
+            Cow::Borrowed(
+                std::str::from_utf8(bytes).map_err(|error| SemanticError::Decode {
+                    path: path.to_owned(),
+                    message: error.to_string(),
+                })?,
+            )
+        }
+        "windows_1252" => {
+            let (value, had_errors) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes);
+            if had_errors {
+                return Err(SemanticError::Decode {
+                    path: path.to_owned(),
+                    message: "invalid Windows-1252 byte sequence".to_owned(),
+                });
+            }
+            value
+        }
+        encoding => {
+            return Err(SemanticError::Decode {
+                path: path.to_owned(),
+                message: format!("string encoding {encoding} requires a custom decoder"),
+            });
+        }
+    };
+    Ok(FieldValue::String(value))
 }
 
 fn fixed_node_size(node: &SchemaNode) -> Option<usize> {
@@ -808,5 +821,44 @@ fn decode_length_error(path: &str, expected: usize, actual: usize) -> SemanticEr
     SemanticError::Decode {
         path: path.to_owned(),
         message: format!("expected {expected} bytes, got {actual}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_1252_strings_decode_without_losing_non_ascii_bytes() {
+        let string = StringType {
+            encoding: "windows_1252".to_owned(),
+            zero_terminated: true,
+            fixed_length: None,
+        };
+
+        let value = decode_string(&string, b"Gr\xfc\xdfe\0ignored", false, "TEST")
+            .expect("Windows-1252 string should decode");
+
+        match value {
+            FieldValue::String(value) => assert_eq!(value, "Grüße"),
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn windows_1252_strings_preserve_control_bytes() {
+        let string = StringType {
+            encoding: "windows_1252".to_owned(),
+            zero_terminated: false,
+            fixed_length: None,
+        };
+
+        let value =
+            decode_string(&string, b"\x81", false, "TEST").expect("control byte should decode");
+
+        match value {
+            FieldValue::String(value) => assert_eq!(value, "\u{81}"),
+            other => panic!("expected string, got {other:?}"),
+        }
     }
 }

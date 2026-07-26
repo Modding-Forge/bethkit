@@ -525,13 +525,25 @@ fn encode_primitive(
             Ok(bytes.to_vec())
         }
         (PrimitiveType::String { string }, OwnedFieldValue::String(value)) => {
-            if string.encoding != "utf8" && string.encoding != "localized" {
-                return Err(encode_error(
-                    path,
-                    format!("unsupported string encoding {}", string.encoding),
-                ));
-            }
-            let mut bytes: Vec<u8> = value.as_bytes().to_vec();
+            let mut bytes: Vec<u8> = match string.encoding.as_str() {
+                "utf8" | "localized" => value.as_bytes().to_vec(),
+                "windows_1252" => {
+                    let (bytes, _, had_errors) = encoding_rs::WINDOWS_1252.encode(value);
+                    if had_errors {
+                        return Err(encode_error(
+                            path,
+                            "string contains characters that Windows-1252 cannot represent",
+                        ));
+                    }
+                    bytes.into_owned()
+                }
+                encoding => {
+                    return Err(encode_error(
+                        path,
+                        format!("unsupported string encoding {encoding}"),
+                    ));
+                }
+            };
             if string.zero_terminated {
                 bytes.push(0);
             }
@@ -588,5 +600,46 @@ fn encode_error(path: &str, message: impl Into<String>) -> SemanticError {
     SemanticError::Encode {
         path: path.to_owned(),
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bethkit_schema::StringType;
+
+    use super::*;
+
+    fn windows_1252_string(zero_terminated: bool) -> PrimitiveType {
+        PrimitiveType::String {
+            string: StringType {
+                encoding: "windows_1252".to_owned(),
+                zero_terminated,
+                fixed_length: None,
+            },
+        }
+    }
+
+    #[test]
+    fn windows_1252_strings_encode_exact_bytes() {
+        let bytes = encode_primitive(
+            &windows_1252_string(true),
+            &OwnedFieldValue::String("Grüße".to_owned()),
+            "TEST",
+        )
+        .expect("Windows-1252 string should encode");
+
+        assert_eq!(bytes, b"Gr\xfc\xdfe\0");
+    }
+
+    #[test]
+    fn windows_1252_strings_reject_unrepresentable_characters() {
+        let error = encode_primitive(
+            &windows_1252_string(false),
+            &OwnedFieldValue::String("Dragon 🐉".to_owned()),
+            "TEST",
+        )
+        .expect_err("unrepresentable character should fail");
+
+        assert!(error.to_string().contains("cannot represent"));
     }
 }
