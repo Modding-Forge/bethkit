@@ -16,13 +16,16 @@ param(
     [string] $Configuration = 'Release',
 
     [ValidateSet('Win32', 'Win64')]
-    [string] $Platform = 'Win32'
+    [string] $Platform = 'Win32',
+
+    [switch] $UseExistingIdeBuild
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 $lockPath = Join-Path $root 'xedit-source.lock'
 $patchDirectory = Join-Path $root 'xedit\patches'
+$exporterSourceDirectory = Join-Path $root 'xedit\exporter'
 $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
 
 function Invoke-Git {
@@ -101,6 +104,13 @@ if ($actualCommit -ne [string] $lock.commit) {
     throw "xEdit worktree is at $actualCommit, expected $($lock.commit)"
 }
 
+Invoke-Git -Repository $WorktreeDirectory.FullName -Arguments @(
+    'submodule',
+    'update',
+    '--init',
+    '--recursive'
+) | Out-Null
+
 $patches = @(
     Get-ChildItem -LiteralPath $patchDirectory -Filter '*.patch' |
         Sort-Object Name
@@ -109,12 +119,21 @@ if ($patches.Count -eq 0) {
     throw "No xEdit patches found in $patchDirectory"
 }
 
+$exporterSources = @(
+    Get-ChildItem -LiteralPath $exporterSourceDirectory -Filter '*.pas' |
+        Sort-Object Name
+)
+if ($exporterSources.Count -eq 0) {
+    throw "No xEdit exporter sources found in $exporterSourceDirectory"
+}
+
+$patchInputs = @($patches) + @($exporterSources)
 $patchDescriptor = (
-    $patches | ForEach-Object {
+    $patchInputs | ForEach-Object {
         $hash = (
             Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
         ).Hash.ToLowerInvariant()
-        "$($_.Name)=$hash"
+        "$($_.FullName.Substring($root.Path.Length + 1))=$hash"
     }
 ) -join "`n"
 $patchSha256 = Get-TextSha256 -Text ($patchDescriptor + "`n")
@@ -162,6 +181,12 @@ if ($appliedPatchSha256 -ne $patchSha256) {
         "$patchSha256`n",
         [System.Text.UTF8Encoding]::new($false)
     )
+}
+
+foreach ($exporterSource in $exporterSources) {
+    Copy-Item -LiteralPath $exporterSource.FullName -Destination (
+        Join-Path $WorktreeDirectory.FullName "xDump\$($exporterSource.Name)"
+    ) -Force
 }
 
 $dccName = if ($Platform -eq 'Win64') { 'dcc64.exe' } else { 'dcc32.exe' }
@@ -218,28 +243,40 @@ else {
     [datetime]::MinValue
 }
 
-$command = (
-    'call "{0}" && msbuild "{1}" /t:Build ' +
-    '/p:Config={2} /p:Platform={3} /v:minimal'
-) -f $rsvarsPath, $projectPath, $Configuration, $Platform
-$buildOutput = & cmd.exe /d /c $command 2>&1
-$buildExitCode = $LASTEXITCODE
-$buildText = $buildOutput -join "`n"
-if ($buildText -match 'does not support command line compiling') {
+if (-not $UseExistingIdeBuild) {
+    $command = (
+        'call "{0}" && msbuild "{1}" /t:Build ' +
+        '/p:Config={2} /p:Platform={3} /v:minimal'
+    ) -f $rsvarsPath, $projectPath, $Configuration, $Platform
+    $buildOutput = & cmd.exe /d /c $command 2>&1
+    $buildExitCode = $LASTEXITCODE
+    $buildText = $buildOutput -join "`n"
+    if ($buildText -match 'does not support command line compiling') {
+        throw (
+            'The installed Delphi license does not permit command-line ' +
+            'builds. Open xDump.dproj in the Delphi IDE, select Release and ' +
+            'Win32, build the stamped worktree, then rerun this script with ' +
+            "-UseExistingIdeBuild.`n$buildText"
+        )
+    }
+    if ($buildExitCode -ne 0) {
+        throw "Delphi build failed with exit code ${buildExitCode}:`n$buildText"
+    }
+    if (-not (Test-Path -LiteralPath $expectedExecutable -PathType Leaf)) {
+        throw "Delphi reported success but did not create $expectedExecutable"
+    }
+    if (
+        (Get-Item -LiteralPath $expectedExecutable).LastWriteTimeUtc -le
+        $previousWriteTime
+    ) {
+        throw "Delphi reported success but did not update $expectedExecutable"
+    }
+}
+elseif (-not (Test-Path -LiteralPath $expectedExecutable -PathType Leaf)) {
     throw (
-        'The installed Delphi license does not permit command-line builds. ' +
-        'Open xDump.dproj in the Delphi IDE and build the stamped worktree, ' +
-        "or use a Professional/Enterprise license.`n$buildText"
+        "-UseExistingIdeBuild requires an IDE-built executable at " +
+        $expectedExecutable
     )
-}
-if ($buildExitCode -ne 0) {
-    throw "Delphi build failed with exit code ${buildExitCode}:`n$buildText"
-}
-if (-not (Test-Path -LiteralPath $expectedExecutable -PathType Leaf)) {
-    throw "Delphi reported success but did not create $expectedExecutable"
-}
-if ((Get-Item -LiteralPath $expectedExecutable).LastWriteTimeUtc -le $previousWriteTime) {
-    throw "Delphi reported success but did not update $expectedExecutable"
 }
 
 $artifactDirectory = Join-Path $root 'target\xedit-exporter'

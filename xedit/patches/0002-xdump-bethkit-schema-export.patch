@@ -1,0 +1,279 @@
+diff --git a/xDump.dpr b/xDump.dpr
+index b87fb9d0..6e9c988a 100644
+--- a/xDump.dpr
++++ b/xDump.dpr
+@@ -54,7 +54,8 @@ uses
+   wbDefinitionsTES4Saves in 'Core\wbDefinitionsTES4Saves.pas',
+   wbDefinitionsTES5 in 'Core\wbDefinitionsTES5.pas',
+   wbDefinitionsTES5Saves in 'Core\wbDefinitionsTES5Saves.pas',
+-  wbDefinitionsSF1 in 'Core\wbDefinitionsSF1.pas';
++  wbDefinitionsSF1 in 'Core\wbDefinitionsSF1.pas',
++  BethkitSchemaExport in 'xDump\BethkitSchemaExport.pas';
+ 
+ {$R *.res}
+ {$MAXSTACKSIZE 2097152}
+@@ -99,6 +100,54 @@ begin
+       Exit(True);
+ end;
+ 
++function BethkitTryGetArgumentValue(
++  const aArgument: string;
++  out aValue: string
++): Boolean;
++var
++  lIndex: Integer;
++begin
++  Result := False;
++  aValue := '';
++  for lIndex := 1 to Pred(ParamCount) do
++    if SameText(ParamStr(lIndex), aArgument) then begin
++      aValue := ParamStr(Succ(lIndex));
++      Exit(True);
++    end;
++end;
++
++function BethkitTryGameMode(
++  const aGame: string;
++  out aGameMode: TwbGameMode
++): Boolean;
++begin
++  Result := True;
++  if SameText(aGame, 'skyrim_le') then
++    aGameMode := gmTES5
++  else if SameText(aGame, 'skyrim_se') then
++    aGameMode := gmSSE
++  else if SameText(aGame, 'skyrim_vr') then
++    aGameMode := gmTES5VR
++  else if SameText(aGame, 'fallout_3') then
++    aGameMode := gmFO3
++  else if SameText(aGame, 'fallout_nv') then
++    aGameMode := gmFNV
++  else if SameText(aGame, 'fallout_4') then
++    aGameMode := gmFO4
++  else if SameText(aGame, 'fallout_4_vr') then
++    aGameMode := gmFO4VR
++  else if SameText(aGame, 'fallout_76') then
++    aGameMode := gmFO76
++  else if SameText(aGame, 'oblivion') then
++    aGameMode := gmTES4
++  else if SameText(aGame, 'morrowind') then
++    aGameMode := gmTES3
++  else if SameText(aGame, 'starfield') then
++    aGameMode := gmSF1
++  else
++    Result := False;
++end;
++
+ procedure BethkitWriteProvenance;
+ var
+   lExecutableHash: string;
+@@ -974,6 +1023,9 @@ var
+   tms             : TwbSetOfMode;
+   Found           : Boolean;
+   b               : TBytes;
++  BethkitExportRequested: Boolean;
++  BethkitGame: string;
++  BethkitOutputPath: string;
+ begin
+   {$IF CompilerVersion >= 24}
+   FormatSettings.DecimalSeparator := '.';
+@@ -984,6 +1036,13 @@ begin
+     BethkitWriteProvenance;
+     Exit;
+   end;
++  BethkitExportRequested := BethkitHasExactArgument('--bethkit-export');
++  if BethkitExportRequested then begin
++    if not BethkitTryGetArgumentValue('--game', BethkitGame) then
++      raise Exception.Create('--bethkit-export requires --game');
++    if not BethkitTryGetArgumentValue('--output', BethkitOutputPath) then
++      raise Exception.Create('--bethkit-export requires --output');
++  end;
+   _wbProgressCallback := ReportProgress;
+   wbDontSave := True;
+   wbAllowInternalEdit := False;
+@@ -996,16 +1055,19 @@ begin
+     try
+       t := ExtractFileName(ParamStr(0)).ToLowerInvariant;
+ 
+-      Found := False;
+-      for ts := Low(TwbToolSource) to High(TwbToolSource) do begin
+-        s := GetEnumName(TypeInfo(TwbToolSource), Ord(ts) );
+-        Delete(s, 1, 2);
+-        if FindCmdLineSwitch(s) then begin
+-          wbToolSource := ts;
+-          Found := True;
+-          Break;
++      Found := BethkitExportRequested;
++      if Found then
++        wbToolSource := tsPlugins
++      else
++        for ts := Low(TwbToolSource) to High(TwbToolSource) do begin
++          s := GetEnumName(TypeInfo(TwbToolSource), Ord(ts) );
++          Delete(s, 1, 2);
++          if FindCmdLineSwitch(s) then begin
++            wbToolSource := ts;
++            Found := True;
++            Break;
++          end;
+         end;
+-      end;
+       if not Found then
+         for ts := Low(TwbToolSource) to High(TwbToolSource) do begin
+           s := GetEnumName(TypeInfo(TwbToolSource), Ord(ts) ).ToLowerInvariant;
+@@ -1019,16 +1081,19 @@ begin
+       if not Found then
+         wbToolSource := tsPlugins;
+ 
+-      Found := False;
+-      for tm := Low(TwbToolMode) to High(TwbToolMode) do begin
+-        s := GetEnumName(TypeInfo(TwbToolMode), Ord(tm) );
+-        Delete(s, 1, 2);
+-        if FindCmdLineSwitch(s) then begin
+-          wbToolMode := tm;
+-          Found := True;
+-          Break;
++      Found := BethkitExportRequested;
++      if Found then
++        wbToolMode := tmExport
++      else
++        for tm := Low(TwbToolMode) to High(TwbToolMode) do begin
++          s := GetEnumName(TypeInfo(TwbToolMode), Ord(tm) );
++          Delete(s, 1, 2);
++          if FindCmdLineSwitch(s) then begin
++            wbToolMode := tm;
++            Found := True;
++            Break;
++          end;
+         end;
+-      end;
+       if not Found then
+         for tm := Low(TwbToolMode) to High(TwbToolMode) do begin
+           s := GetEnumName(TypeInfo(TwbToolMode), Ord(tm) ).ToLowerInvariant;
+@@ -1044,16 +1109,23 @@ begin
+         Exit;
+       end;
+ 
+-      Found := False;
+-      for gm := Low(TwbGameMode) to High(TwbGameMode) do begin
+-        s := GetEnumName(TypeInfo(TwbGameMode), Ord(gm) );
+-        Delete(s, 1, 2);
+-        if FindCmdLineSwitch(s) then begin
+-          wbGameMode := gm;
+-          Found := True;
+-          Break;
++      Found := BethkitExportRequested;
++      if Found then begin
++        if not BethkitTryGameMode(BethkitGame, wbGameMode) then begin
++          WriteLn(ErrOutput, 'Unsupported Bethkit game: ', BethkitGame);
++          ExitCode := 1;
++          Exit;
++        end;
++      end else
++        for gm := Low(TwbGameMode) to High(TwbGameMode) do begin
++          s := GetEnumName(TypeInfo(TwbGameMode), Ord(gm) );
++          Delete(s, 1, 2);
++          if FindCmdLineSwitch(s) then begin
++            wbGameMode := gm;
++            Found := True;
++            Break;
++          end;
+         end;
+-      end;
+       if not Found then
+         for gm := Low(TwbGameMode) to High(TwbGameMode) do begin
+           s := GetEnumName(TypeInfo(TwbGameMode), Ord(gm) ).ToLowerInvariant;
+@@ -1204,6 +1276,10 @@ begin
+         WriteLn(ErrOutput, 'Application name must contain FNV, FO3, FO4, FO4VR, FO76, SSE, TES4, TES5 or TES5VR to select game.');
+         Exit;
+       end;
++      if BethkitExportRequested then begin
++        Include(tms, tmExport);
++        Include(tss, tsPlugins);
++      end;
+ 
+       if wbGameName2 = '' then
+         wbGameName2 := wbGameName;
+@@ -1490,14 +1566,22 @@ begin
+         if FileExists(wbDataPath + s) then
+           s := wbDataPath + s;
+ 
+-      if (wbToolMode in [tmDump]) and (ParamCount >= 1) and not FileExists(s) then begin
++      if not BethkitExportRequested and
++         (wbToolMode in [tmDump]) and
++         (ParamCount >= 1) and
++         not FileExists(s)
++      then begin
+         if s[1] in SwitchChars then
+           WriteLn(ErrOutput, 'No inputfile was specified. Please check the command line parameters.')
+         else
+           WriteLn(ErrOutput, 'Can''t find the file "',s,'". Please check the command line parameters.');
+         WriteLn;
+         NeedsSyntaxInfo := True;
+-      end else if (wbToolMode in [tmExport]) and (ParamCount >=1) and not isFormatValid(s) then begin
++      end else if not BethkitExportRequested and
++                  (wbToolMode in [tmExport]) and
++                  (ParamCount >=1) and
++                  not isFormatValid(s)
++      then begin
+         if s[1] in SwitchChars then
+           WriteLn(ErrOutput, 'No format was specified. Please check the command line parameters.')
+         else
+@@ -1525,7 +1609,12 @@ begin
+             WriteLn(ErrOutput, 'CoSave are not supported yet "',s,'". Please check the command line parameters.');
+         end;
+ 
+-      if NeedsSyntaxInfo or (ParamCount < 1) or FindCmdLineSwitch('?') or FindCmdLineSwitch('help') then begin
++      if not BethkitExportRequested and (
++        NeedsSyntaxInfo or
++        (ParamCount < 1) or
++        FindCmdLineSwitch('?') or
++        FindCmdLineSwitch('help')
++      ) then begin
+         WriteLn(ErrOutput, 'Syntax:  '+wbAppName+'Dump [options] inputfile');
+         WriteLn(ErrOutput, '  or     '+wbAppName+'Export [options] format');
+         WriteLn(ErrOutput);
+@@ -1782,19 +1871,25 @@ begin
+             ReportDefs;
+         end;
+       end else if wbToolMode in [tmExport] then begin
+-        for Pass := epRead to epRemaining do begin
+-          ProfileHeader(StrToTExportFormat(s), Pass);
+-          ProfileArray(StrToTExportFormat(s), Pass);
+-          ProfileChapters(StrToTExportFormat(s), Pass);
+-        end;
++        if BethkitExportRequested then
++          BethkitWriteSchemaExport(BethkitGame, BethkitOutputPath)
++        else begin
++          for Pass := epRead to epRemaining do begin
++            ProfileHeader(StrToTExportFormat(s), Pass);
++            ProfileArray(StrToTExportFormat(s), Pass);
++            ProfileChapters(StrToTExportFormat(s), Pass);
++          end;
+ 
+-        wbDefProfiles.SaveToFile(wbAppName+wbToolName+wbSourceName+'.txt');
++          wbDefProfiles.SaveToFile(wbAppName+wbToolName+wbSourceName+'.txt');
++        end;
+       end;
+ 
+       ReportProgress('All Done.');
+     except
+-      on e: Exception do
++      on e: Exception do begin
++        ExitCode := 1;
+         ReportProgress('Unexpected Error: <'+e.ClassName+': '+e.Message+'>');
++      end;
+     end;
+   finally
+     if DebugHook <> 0 then begin
+diff --git a/xDump.dproj b/xDump.dproj
+index 981405a6..5bf72eed 100644
+--- a/xDump.dproj
++++ b/xDump.dproj
+@@ -110,6 +110,7 @@
+         <DCCReference Include="Core\wbDefinitionsTES5.pas"/>
+         <DCCReference Include="Core\wbDefinitionsTES5Saves.pas"/>
+         <DCCReference Include="Core\wbDefinitionsSF1.pas"/>
++        <DCCReference Include="xDump\BethkitSchemaExport.pas"/>
+         <BuildConfiguration Include="Base">
+             <Key>Base</Key>
+         </BuildConfiguration>

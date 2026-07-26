@@ -6,9 +6,14 @@ game-mode initialization and serialize the resulting interface graph; it must
 not parse Pascal source files.
 
 `0001-xdump-bethkit-provenance.patch` implements the provenance operation.
-The definition-graph operation is still outstanding, so public schema releases
-remain blocked until it is implemented, reviewed, and passes the eleven-game
-differential corpus.
+`0002-xdump-bethkit-schema-export.patch` wires the graph operation into `xDump`;
+its reviewable MPL implementation lives in `../exporter`. Static xEdit nodes
+are translated directly, while dynamic or not-yet-proven mappings become
+explicit custom-decoder callbacks. Patches `0003` and `0004` expose binary
+terminators, unused payloads, array termination, and every stored callback role
+without parsing Pascal sources. Public schema releases remain blocked until all
+emitted callbacks are classified, the required decoders exist, and the
+eleven-game differential corpus passes.
 
 The patch must add two command-line operations:
 

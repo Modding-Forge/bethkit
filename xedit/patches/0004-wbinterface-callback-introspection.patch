@@ -1,0 +1,166 @@
+diff --git a/Core/wbInterface.pas b/Core/wbInterface.pas
+--- a/Core/wbInterface.pas
++++ b/Core/wbInterface.pas
+@@ -704,6 +704,13 @@ const
+ type
+   IwbDef = interface;
+ 
++  TwbBethkitCallbackInfo = record
++    Id: string;
++    Semantic: Boolean;
++  end;
++
++  TwbBethkitCallbackInfos = TArray<TwbBethkitCallbackInfo>;
++
+   TwbDefs = array of IwbDef;
+   TwbDefPath = array of record
+     Def   : IwbDef;
+@@ -721,6 +728,7 @@ type
+     ['{C7739FBD-3B58-48A2-9DD0-8057D3496892}']
+     function GetDefType: TwbDefType;
+     function GetDefTypeName: string;
++    function GetBethkitCallbacks: TwbBethkitCallbackInfos;
+     function CanAssign(const aElement: IwbElement; aIndex: Integer; const aDef: IwbDef): Boolean;
+     function Assign(const aTarget: IwbElement; aIndex: Integer; const aSource: IwbElement; aOnlySK: Boolean): IwbElement;
+     function GetAssignTemplates(const aContainer: IwbContainerElementRef; aIndex: Integer): TwbDefs;
+@@ -5649,6 +5657,7 @@ type
+     {---IwbDef---}
+     function GetDefType: TwbDefType; virtual; abstract;
+     function GetDefTypeName: string; virtual; abstract;
++    function GetBethkitCallbacks: TwbBethkitCallbackInfos;
+     function CanAssign(const aElement: IwbElement; aIndex: Integer; const aDef: IwbDef): Boolean; virtual;
+     function Assign(const aTarget: IwbElement; aIndex: Integer; const aSource: IwbElement; aOnlySK: Boolean): IwbElement; virtual;
+     function GetAssignTemplates(const aContainer: IwbContainerElementRef; aIndex: Integer): TwbDefs; virtual;
+@@ -9961,6 +9970,132 @@ begin
+   Result := Assigned(defGetCP);
+ end;
+ 
++function TwbDef.GetBethkitCallbacks: TwbBethkitCallbackInfos;
++  procedure Add(const aId: string; aSemantic: Boolean);
++  var
++    lIndex: Integer;
++  begin
++    lIndex := Length(Result);
++    SetLength(Result, Succ(lIndex));
++    Result[lIndex].Id := aId;
++    Result[lIndex].Semantic := aSemantic;
++  end;
++begin
++  Result := nil;
++  if Assigned(defGetCP) then
++    Add('def.conflict_priority', True);
++
++  if Self is TwbNamedDef then
++    with TwbNamedDef(Self) do begin
++      if Assigned(ndAfterLoad) then
++        Add('def.after_load', True);
++      if Assigned(ndAfterSet) then
++        Add('def.after_set', True);
++      if Assigned(ndToStr) then
++        Add('def.value_transform', True);
++      if Assigned(ndDontShow) then
++        Add('def.dont_show', False);
++      if Assigned(ndIsRemoveable) then
++        Add('def.is_removeable', True);
++      if Assigned(ndSummaryLinksToCallback) then
++        Add('def.summary_links_to', False);
++    end;
++
++  if Self is TwbMainRecordDef then
++    with TwbMainRecordDef(Self) do begin
++      if Assigned(recAddInfoCallback) then
++        Add('record.additional_info', False);
++      if Assigned(recGetFormIDCallback) then
++        Add('record.form_id', True);
++      if Assigned(recIdentityCallback) then
++        Add('record.identity', True);
++      if Assigned(recGetEditorIDCallback) then
++        Add('record.get_editor_id', True);
++      if Assigned(recSetEditorIDCallback) then
++        Add('record.set_editor_id', True);
++      if Assigned(recGetGridCellCallback) then
++        Add('record.grid_cell', True);
++      if Assigned(recBuildIndexKeys) then
++        Add('record.index_keys', True);
++    end;
++
++  if Self is TwbValueDef then
++    with TwbValueDef(Self) do begin
++      if Assigned(vdLinksToCallback) then
++        Add('value.links_to', True);
++      if Assigned(vdSetToDefault) then
++        Add('value.set_default', True);
++    end;
++
++  if Self is TwbBaseStringDef then
++    with TwbBaseStringDef(Self) do
++      if Assigned(bsdFormater) then
++        Add('string.formatter', True);
++
++  if Self is TwbSubRecordArrayDef then
++    with TwbSubRecordArrayDef(Self) do
++      if Assigned(sraIsSorted) then
++        Add('subrecord_array.is_sorted', True);
++
++  if Self is TwbSubRecordUnionDef then
++    with TwbSubRecordUnionDef(Self) do
++      if Assigned(sruDecider) then
++        Add('subrecord_union.select', True);
++
++  if Self is TwbUnionDef then
++    with TwbUnionDef(Self) do
++      if Assigned(udDecider) then
++        Add('union.select', True);
++
++  if Self is TwbArrayDef then
++    with TwbArrayDef(Self) do begin
++      if Assigned(arCountCallback) then
++        Add('array.count', True);
++      if Assigned(arShouldInclude) then
++        Add('array.should_include', True);
++    end;
++
++  if Self is TwbStructDef then
++    with TwbStructDef(Self) do
++      if Assigned(stSizeCallback) then
++        Add('struct.size', True);
++
++  if Self is TwbStructCDef then
++    with TwbStructCDef(Self) do begin
++      if Assigned(scSizeCallback) then
++        Add('struct.compressed_size', True);
++      if Assigned(scGetChapterType) then
++        Add('struct.chapter_type', True);
++      if Assigned(scGetChapterTypeName) then
++        Add('struct.chapter_type_name', False);
++      if Assigned(scGetChapterName) then
++        Add('struct.chapter_name', False);
++    end;
++
++  if Self is TwbIntegerDef then
++    with TwbIntegerDef(Self) do
++      if Assigned(inOverlayCallback) then
++        Add('integer.overlay', True);
++
++  if Self is TwbFloatDef then
++    with TwbFloatDef(Self) do
++      if Assigned(fdNormalizer) then
++        Add('float.normalizer', True);
++
++  if Self is TwbIntegerDefFormaterUnion then
++    with TwbIntegerDefFormaterUnion(Self) do
++      if Assigned(idfuDecider) then
++        Add('integer_formatter.select', True);
++
++  if Self is TwbFlagsDef then
++    with TwbFlagsDef(Self) do begin
++      if flgHasDontShows then
++        Add('flags.dont_show', False);
++      if flgHasGetCPs then
++        Add('flags.conflict_priority', True);
++    end;
++end;
++
+ function TwbDef.GetDefFlags: TwbDefFlags;
+ begin
+   Result := defFlags;

@@ -69,9 +69,19 @@ Build and provenance-check the exporter with:
 .\scripts\Build-XEditExporter.ps1
 ```
 
-The provenance operation is implemented. Definition-graph export is still
-under development, so complete schema regeneration remains deliberately
-blocked. Once that patch is complete, generate all eleven packages with:
+With Community Edition, the command above first prepares and stamps the
+worktree, then stops at the license check. Open
+`target\xedit-source\xDump.dproj` in Delphi, select **Release** and **Win32**,
+build the project, and finish artifact verification with:
+
+```powershell
+.\scripts\Build-XEditExporter.ps1 -UseExistingIdeBuild
+```
+
+The provenance and definition-graph operations are implemented. Exported
+dynamic callbacks intentionally fail conversion until matching audited rules
+and custom decoders are present, so release-quality schema regeneration remains
+blocked at that gate. Generate and inspect all eleven candidate packages with:
 
 ```powershell
 .\scripts\New-XEditSchemaCatalog.ps1 `

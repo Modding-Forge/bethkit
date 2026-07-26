@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CallbackClass, DecoderRequirement, Result, SchemaError, SchemaGame, SchemaManifest,
-    SchemaPackage, SchemaRecord, ValidationStatus, PACKAGE_FORMAT_VERSION,
+    CallbackClass, DecoderRequirement, Result, SchemaError, SchemaGame, SchemaManifest, SchemaNode,
+    SchemaNodeKind, SchemaPackage, SchemaRecord, ValidationStatus, PACKAGE_FORMAT_VERSION,
 };
 
 /// Provenance emitted by the externally built xEdit exporter.
@@ -116,6 +116,9 @@ pub fn convert_xedit_export(
 
     let mut missing: Vec<String> = Vec::new();
     let mut decoders: BTreeMap<String, u32> = BTreeMap::new();
+    for record in &export.records {
+        collect_schema_decoders(&record.root, &mut decoders);
+    }
     for callback in &export.callbacks {
         let Some(rule) = indexed.get(&(callback.path.as_str(), callback.callback_id.as_str()))
         else {
@@ -171,6 +174,41 @@ pub fn convert_xedit_export(
         },
         export.records,
     )
+}
+
+fn collect_schema_decoders(node: &SchemaNode, decoders: &mut BTreeMap<String, u32>) {
+    match &node.kind {
+        SchemaNodeKind::Sequence { children } => {
+            for child in children {
+                collect_schema_decoders(child, decoders);
+            }
+        }
+        SchemaNodeKind::Choice { alternatives } => {
+            for alternative in alternatives {
+                collect_schema_decoders(alternative, decoders);
+            }
+        }
+        SchemaNodeKind::Repeat { child, .. }
+        | SchemaNodeKind::Subrecord { payload: child, .. }
+        | SchemaNodeKind::Compressed { child, .. }
+        | SchemaNodeKind::Array { element: child, .. } => {
+            collect_schema_decoders(child, decoders);
+        }
+        SchemaNodeKind::Struct { fields } => {
+            for field in fields {
+                collect_schema_decoders(field, decoders);
+            }
+        }
+        SchemaNodeKind::Union { variants, .. } => {
+            for variant in variants {
+                collect_schema_decoders(variant, decoders);
+            }
+        }
+        SchemaNodeKind::Custom { decoder, .. } => {
+            decoders.entry(decoder.clone()).or_insert(1);
+        }
+        SchemaNodeKind::Primitive { .. } | SchemaNodeKind::Reference { .. } => {}
+    }
 }
 
 fn check_version(version: u32) -> Result<()> {
@@ -246,5 +284,57 @@ mod tests {
 
         // then
         assert!(matches!(result, Err(SchemaError::UnclassifiedCallbacks(_))));
+    }
+
+    /// Verifies that custom schema nodes always become decoder requirements.
+    #[test]
+    fn conversion_collects_custom_node_decoders() {
+        // given
+        let export = XEditExport {
+            contract_version: 1,
+            provenance: ExporterProvenance {
+                source_tag: "xedit-4.1.5f".to_owned(),
+                source_commit: "f5c00f3fa3ee39511185515802647246c807f759".to_owned(),
+                source_archive_sha256: "00".repeat(32),
+                exporter_version: "1".to_owned(),
+                exporter_binary_sha256: "11".repeat(32),
+                exporter_patch_sha256: "22".repeat(32),
+                exporter_build_sha256: "33".repeat(32),
+            },
+            game: SchemaGame::SkyrimSe,
+            records: vec![SchemaRecord {
+                signature: crate::SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: SchemaNode {
+                    id: crate::SchemaNodeId(0),
+                    path: "TEST/root".to_owned(),
+                    name: "Root".to_owned(),
+                    required: true,
+                    condition: None,
+                    kind: SchemaNodeKind::Custom {
+                        decoder: "xedit.dtunion".to_owned(),
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            }],
+            callbacks: Vec::new(),
+        };
+        let rules = ConversionRules {
+            format_version: 1,
+            callbacks: Vec::new(),
+        };
+
+        // when
+        let package =
+            convert_xedit_export(export, &rules, b"{}").expect("custom node export should convert");
+
+        // then
+        assert_eq!(
+            package.manifest().required_decoders,
+            vec![DecoderRequirement {
+                id: "xedit.dtunion".to_owned(),
+                minimum_version: 1,
+            }]
+        );
     }
 }
