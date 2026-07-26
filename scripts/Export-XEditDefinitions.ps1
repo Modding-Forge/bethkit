@@ -84,8 +84,17 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Callback inventory validation failed'
 }
 
+$rules = Join-Path $root 'xedit\conversion-rules.json'
+$audit = Join-Path $OutputDirectory.FullName 'callback-audit.json'
+& $cargo run --locked -p bethkit-schema --bin bethkit-xedit-converter -- `
+    audit $inventory $rules $audit
+if ($LASTEXITCODE -ne 0) {
+    throw 'Callback classification audit failed'
+}
+
 [pscustomobject] @{
     output_directory = $OutputDirectory.FullName
     callback_inventory = $inventory
+    callback_audit = $audit
     games = $games.Count
 }

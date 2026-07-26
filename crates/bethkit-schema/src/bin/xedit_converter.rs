@@ -39,6 +39,33 @@ struct InventoryDecoder {
     games: Vec<SchemaGame>,
 }
 
+#[derive(Serialize)]
+struct CallbackAudit {
+    format_version: u32,
+    callback_definitions: usize,
+    callback_game_bindings: usize,
+    explicit_rule_bindings: usize,
+    derived_custom_bindings: usize,
+    unclassified_bindings: usize,
+    completely_classified_definitions: usize,
+    unclassified: Vec<UnclassifiedCallback>,
+    unused_rules: Vec<UnusedRule>,
+}
+
+#[derive(Serialize)]
+struct UnclassifiedCallback {
+    path: String,
+    callback_id: String,
+    game: SchemaGame,
+    semantic: bool,
+}
+
+#[derive(Serialize)]
+struct UnusedRule {
+    path: String,
+    callback_id: String,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<String> = env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("inventory") {
@@ -49,6 +76,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if arguments.first().map(String::as_str) == Some("classify-ui") {
         return classify_ui(&arguments[1..]);
+    }
+    if arguments.first().map(String::as_str) == Some("audit") {
+        return audit(&arguments[1..]);
     }
     convert(&arguments)
 }
@@ -129,6 +159,101 @@ fn classify_ui(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     bytes.push(b'\n');
     fs::write(&arguments[2], bytes)?;
     Ok(())
+}
+
+fn audit(arguments: &[String]) -> Result<(), Box<dyn Error>> {
+    if arguments.len() != 3 {
+        return Err(usage().into());
+    }
+    let inventory: CallbackInventory = read_json(Path::new(&arguments[0]))?;
+    let rules: ConversionRules = read_json(Path::new(&arguments[1]))?;
+    let report = audit_rules(&inventory, &rules)?;
+    let mut bytes = serde_json::to_vec_pretty(&report)?;
+    bytes.push(b'\n');
+    fs::write(&arguments[2], bytes)?;
+    Ok(())
+}
+
+fn audit_rules(
+    inventory: &CallbackInventory,
+    rules: &ConversionRules,
+) -> Result<CallbackAudit, Box<dyn Error>> {
+    if inventory.format_version != 1 || rules.format_version != 1 {
+        return Err("unsupported inventory or rule format version".into());
+    }
+    let mut rule_keys: BTreeSet<(String, String)> = BTreeSet::new();
+    for rule in &rules.callbacks {
+        let key = (rule.path.clone(), rule.callback_id.clone());
+        if !rule_keys.insert(key.clone()) {
+            return Err(format!("duplicate rule {} at {}", key.1, key.0).into());
+        }
+    }
+    let callback_keys: BTreeSet<(String, String)> = inventory
+        .callbacks
+        .iter()
+        .map(|callback| (callback.path.clone(), callback.callback_id.clone()))
+        .collect();
+    let mut custom_games: BTreeMap<String, BTreeSet<SchemaGame>> = BTreeMap::new();
+    for decoder in &inventory.custom_decoders {
+        custom_games
+            .entry(decoder.path.clone())
+            .or_default()
+            .extend(decoder.games.iter().copied());
+    }
+
+    let mut callback_game_bindings: usize = 0;
+    let mut explicit_rule_bindings: usize = 0;
+    let mut derived_custom_bindings: usize = 0;
+    let mut completely_classified_definitions: usize = 0;
+    let mut unclassified: Vec<UnclassifiedCallback> = Vec::new();
+    for callback in &inventory.callbacks {
+        let key = (callback.path.clone(), callback.callback_id.clone());
+        let explicit = rule_keys.contains(&key);
+        let mut definition_complete = true;
+        for game in &callback.games {
+            callback_game_bindings += 1;
+            if explicit {
+                explicit_rule_bindings += 1;
+                continue;
+            }
+            if callback.semantic
+                && custom_games
+                    .get(&callback.path)
+                    .is_some_and(|games| games.contains(game))
+            {
+                derived_custom_bindings += 1;
+                continue;
+            }
+            definition_complete = false;
+            unclassified.push(UnclassifiedCallback {
+                path: callback.path.clone(),
+                callback_id: callback.callback_id.clone(),
+                game: *game,
+                semantic: callback.semantic,
+            });
+        }
+        if definition_complete {
+            completely_classified_definitions += 1;
+        }
+    }
+    let unused_rules = rule_keys
+        .difference(&callback_keys)
+        .map(|(path, callback_id)| UnusedRule {
+            path: path.clone(),
+            callback_id: callback_id.clone(),
+        })
+        .collect();
+    Ok(CallbackAudit {
+        format_version: 1,
+        callback_definitions: inventory.callbacks.len(),
+        callback_game_bindings,
+        explicit_rule_bindings,
+        derived_custom_bindings,
+        unclassified_bindings: unclassified.len(),
+        completely_classified_definitions,
+        unclassified,
+        unused_rules,
+    })
 }
 
 fn merge_ui_rules(
@@ -243,7 +368,8 @@ fn usage() -> &'static str {
     "usage:\n  bethkit-xedit-converter [convert] <export.json> <rules.json> \
      <output.bkschema>\n  bethkit-xedit-converter inventory <output.json> <export.json>...\n  \
      bethkit-xedit-converter classify-ui <inventory.json> <input-rules.json> \
-     <output-rules.json>"
+     <output-rules.json>\n  bethkit-xedit-converter audit <inventory.json> <rules.json> \
+     <output-report.json>"
 }
 
 fn read_json<T>(path: &Path) -> Result<T, Box<dyn Error>>
@@ -256,6 +382,62 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies per-game audit accounting for rules, custom nodes, and gaps.
+    #[test]
+    fn callback_audit_reports_each_game_binding(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let inventory = CallbackInventory {
+            format_version: 1,
+            exports: 2,
+            records: 1,
+            callbacks: vec![
+                InventoryCallback {
+                    path: "TEST/ui".to_owned(),
+                    callback_id: "def.dont_show".to_owned(),
+                    semantic: false,
+                    games: vec![SchemaGame::SkyrimLe, SchemaGame::SkyrimSe],
+                },
+                InventoryCallback {
+                    path: "TEST/custom".to_owned(),
+                    callback_id: "decoder.required".to_owned(),
+                    semantic: true,
+                    games: vec![SchemaGame::SkyrimLe, SchemaGame::SkyrimSe],
+                },
+            ],
+            custom_decoders: vec![InventoryDecoder {
+                path: "TEST/custom".to_owned(),
+                decoder: "xedit.test".to_owned(),
+                games: vec![SchemaGame::SkyrimSe],
+            }],
+        };
+        let rules = ConversionRules {
+            format_version: 1,
+            callbacks: vec![CallbackRule {
+                path: "TEST/ui".to_owned(),
+                callback_id: "def.dont_show".to_owned(),
+                classification: CallbackClass::UserInterfaceOnly,
+                expression: None,
+                built_in_operation: None,
+                custom_decoder: None,
+                minimum_decoder_version: None,
+                rationale: "Presentation only.".to_owned(),
+            }],
+        };
+
+        // when
+        let audit = audit_rules(&inventory, &rules)?;
+
+        // then
+        assert_eq!(audit.callback_game_bindings, 4);
+        assert_eq!(audit.explicit_rule_bindings, 2);
+        assert_eq!(audit.derived_custom_bindings, 1);
+        assert_eq!(audit.unclassified_bindings, 1);
+        assert_eq!(audit.completely_classified_definitions, 1);
+        assert_eq!(audit.unclassified[0].game, SchemaGame::SkyrimLe);
+        Ok(())
+    }
 
     /// Verifies that UI metadata creates exact rules without semantic callbacks.
     #[test]

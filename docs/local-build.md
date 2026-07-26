@@ -98,6 +98,10 @@ Use those values to export every game twice and create a callback inventory:
   -ExpectedBuildSha256 <build hash>
 ```
 
+The export helper also writes `callback-audit.json`. It accounts for every
+callback/game binding as an explicit rule, a binding derived from a Custom
+schema node, or an unclassified release blocker.
+
 The provenance and definition-graph operations are implemented. Exported
 dynamic callbacks intentionally fail conversion until matching audited rules
 and custom decoders are present, so release-quality schema regeneration remains
