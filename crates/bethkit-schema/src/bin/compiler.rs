@@ -42,7 +42,7 @@ fn compile_bundle(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>
     let output: PathBuf = PathBuf::from(arguments.last().expect("argument count was checked"));
     let packages: Vec<SchemaPackage> = arguments[..arguments.len() - 1]
         .iter()
-        .map(|argument| parse_json_package(Path::new(argument)))
+        .map(|argument| SchemaPackage::open(Path::new(argument)))
         .collect::<Result<Vec<_>, _>>()?;
     fs::write(output, encode_bundle(&packages)?)?;
     Ok(())
@@ -70,6 +70,6 @@ fn usage() -> &'static str {
     concat!(
         "usage:\n",
         "  bethkit-schema-compiler compile <input.json> <output.bkschema>\n",
-        "  bethkit-schema-compiler bundle <input.json>... <output.bkschemas>",
+        "  bethkit-schema-compiler bundle <input.bkschema>... <output.bkschemas>",
     )
 }
