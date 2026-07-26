@@ -11,17 +11,19 @@ its reviewable MPL implementation lives in `../exporter`. Static xEdit nodes
 are translated directly, while dynamic or not-yet-proven mappings become
 explicit custom-decoder callbacks. Patches `0003` and `0004` expose binary
 terminators, unused payloads, array termination, and every stored callback role
-without parsing Pascal sources. Public schema releases remain blocked until all
-emitted callbacks are classified, the required decoders exist, and the
-eleven-game differential corpus passes.
+without parsing Pascal sources. The exporter resolves semantic callback invoke
+addresses through the detailed Delphi MAP produced by the same build. Public
+schema releases remain blocked until all emitted callbacks are classified, the
+required decoders and handlers exist, and the eleven-game differential corpus
+passes.
 
 The patch must add two command-line operations:
 
 - `--bethkit-provenance`, which writes one JSON object to standard output.
-- `--bethkit-export --game <mode> --output <path>`, which writes contract v1.
+- `--bethkit-export --game <mode> --output <path>`, which writes contract v2.
 
 The required JSON shape is defined in
-`../contract/xedit-export-v1.schema.json`.
+`../contract/xedit-export-v2.schema.json`.
 
 Use `../../scripts/Build-XEditExporter.ps1` to create a detached worktree at
 the pinned revision, apply this patch series, stamp the patch and Delphi build

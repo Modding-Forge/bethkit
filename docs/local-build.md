@@ -87,20 +87,23 @@ verification with:
 .\scripts\Build-XEditExporter.ps1 -UseExistingIdeBuild
 ```
 
-The verification command prints the executable, patch-set, and build hashes.
-Use those values to export every game twice and create a callback inventory:
+The verification command prints the executable, detailed MAP, patch-set, and
+build hashes. Use those values to export every game twice and create a callback
+inventory:
 
 ```powershell
 .\scripts\Export-XEditDefinitions.ps1 `
   -Exporter .\target\xedit-exporter\bethkit-xedit-exporter.exe `
   -ExpectedExporterSha256 <exporter hash> `
+  -ExpectedMapSha256 <MAP hash> `
   -ExpectedPatchSha256 <patch-set hash> `
   -ExpectedBuildSha256 <build hash>
 ```
 
-The export helper also writes `callback-audit.json`. It accounts for every
-callback/game binding as an explicit rule, a binding derived from a Custom
-schema node, or an unclassified release blocker.
+The export helper also writes `callback-audit.json`. It groups callbacks by
+their resolved Delphi implementation fingerprint and accounts for every
+callback/game binding as an exact UI rule, an implementation rule, a binding
+derived from a Custom schema node, or an unclassified release blocker.
 
 The provenance and definition-graph operations are implemented. Exported
 dynamic callbacks intentionally fail conversion until matching audited rules
@@ -119,10 +122,12 @@ This command only adds exact-path rules for callbacks that xEdit exposes as
 presentation-only metadata. It does not classify semantic callbacks and refuses
 to overwrite a conflicting reviewed rule.
 
-Every classified callback is embedded in the resulting package as an exact-path
-binding to a bounded expression, stable built-in operation, versioned custom
-handler, or UI-only marker. Package validation rejects manifest counts that do
-not match these concrete bindings.
+Every classified callback is expanded into an exact-path package binding to a
+bounded expression, stable built-in operation, versioned semantic handler,
+payload decoder, or UI-only marker. Semantic implementation rules are guarded
+by an expected per-game match count and path-set SHA-256. Package validation
+rejects manifest counts or runtime requirements that do not match the concrete
+bindings.
 
 Generate and inspect all eleven candidate packages with:
 
@@ -130,6 +135,7 @@ Generate and inspect all eleven candidate packages with:
 .\scripts\New-XEditSchemaCatalog.ps1 `
   -Exporter C:\path\to\bethkit-xedit-exporter.exe `
   -ExpectedExporterSha256 <64-hex-digest> `
+  -ExpectedMapSha256 <64-hex-digest> `
   -ExpectedPatchSha256 <64-hex-digest> `
   -ExpectedBuildSha256 <64-hex-digest>
 ```

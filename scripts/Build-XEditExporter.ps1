@@ -265,7 +265,7 @@ $buildInfo = @"
   BETHKIT_XEDIT_SOURCE_COMMIT = '$($lock.commit)';
   BETHKIT_XEDIT_SOURCE_ARCHIVE_SHA256 =
     '$($lock.archive_sha256)';
-  BETHKIT_EXPORTER_VERSION = '1';
+  BETHKIT_EXPORTER_VERSION = '2';
   BETHKIT_EXPORTER_PATCH_SHA256 =
     '$patchSha256';
   BETHKIT_EXPORTER_BUILD_SHA256 =
@@ -279,6 +279,7 @@ $buildInfo = @"
 
 $projectPath = Join-Path $WorktreeDirectory.FullName 'xDump.dproj'
 $expectedExecutable = Join-Path $WorktreeDirectory.FullName 'Build\xDump.exe'
+$expectedMap = Join-Path $WorktreeDirectory.FullName 'Build\xDump.map'
 if ($PrepareOnly) {
     $ideProjectPath = Join-Path (
         $WorktreeDirectory.FullName
@@ -313,6 +314,20 @@ if ($PrepareOnly) {
         $null -eq $projectGuidNode
     ) {
         throw 'Could not find the configurable xDump project properties'
+    }
+    $mapNodes = @($ideProject.SelectNodes('//msb:DCC_MapFile', $namespace))
+    if ($mapNodes.Count -eq 0) {
+        $mapNode = $ideProject.CreateElement(
+            'DCC_MapFile',
+            'http://schemas.microsoft.com/developer/msbuild/2003'
+        )
+        $mapNode.InnerText = '3'
+        $properties.AppendChild($mapNode) | Out-Null
+    }
+    else {
+        foreach ($mapNode in $mapNodes) {
+            $mapNode.InnerText = '3'
+        }
     }
     $configNode.InnerText = $Configuration
     $platformNode.InnerText = $Platform
@@ -356,6 +371,7 @@ if ($PrepareOnly) {
         prepared = $true
         project = $ideProjectPath
         expected_executable = $expectedExecutable
+        expected_map = $expectedMap
         exporter_patch_sha256 = $patchSha256
         exporter_build_sha256 = $buildSha256
         source_commit = $actualCommit
@@ -392,6 +408,9 @@ if (-not $UseExistingIdeBuild) {
     if (-not (Test-Path -LiteralPath $expectedExecutable -PathType Leaf)) {
         throw "Delphi reported success but did not create $expectedExecutable"
     }
+    if (-not (Test-Path -LiteralPath $expectedMap -PathType Leaf)) {
+        throw "Delphi reported success but did not create $expectedMap"
+    }
     if (
         (Get-Item -LiteralPath $expectedExecutable).LastWriteTimeUtc -le
         $previousWriteTime
@@ -405,14 +424,22 @@ elseif (-not (Test-Path -LiteralPath $expectedExecutable -PathType Leaf)) {
         $expectedExecutable
     )
 }
+elseif (-not (Test-Path -LiteralPath $expectedMap -PathType Leaf)) {
+    throw "-UseExistingIdeBuild requires a detailed MAP file at $expectedMap"
+}
 
 $artifactDirectory = Join-Path $root 'target\xedit-exporter'
 New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
 $artifactPath = Join-Path $artifactDirectory 'bethkit-xedit-exporter.exe'
+$artifactMapPath = Join-Path $artifactDirectory 'bethkit-xedit-exporter.map'
 Copy-Item -LiteralPath $expectedExecutable -Destination $artifactPath -Force
+Copy-Item -LiteralPath $expectedMap -Destination $artifactMapPath -Force
 
 $binarySha256 = (
     Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256
+).Hash.ToLowerInvariant()
+$mapSha256 = (
+    Get-FileHash -LiteralPath $artifactMapPath -Algorithm SHA256
 ).Hash.ToLowerInvariant()
 $provenance = & $artifactPath --bethkit-provenance | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) {
@@ -420,6 +447,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 if ($provenance.exporter_binary_sha256 -ne $binarySha256) {
     throw 'The exporter reported a different binary SHA-256'
+}
+if ($provenance.exporter_map_sha256 -ne $mapSha256) {
+    throw 'The exporter reported a different MAP SHA-256'
 }
 if ($provenance.exporter_patch_sha256 -ne $patchSha256) {
     throw 'The exporter reported a different patch SHA-256'
@@ -430,7 +460,9 @@ if ($provenance.exporter_build_sha256 -ne $buildSha256) {
 
 [pscustomobject] @{
     exporter = $artifactPath
+    exporter_map = $artifactMapPath
     exporter_binary_sha256 = $binarySha256
+    exporter_map_sha256 = $mapSha256
     exporter_patch_sha256 = $patchSha256
     exporter_build_sha256 = $buildSha256
     source_commit = $actualCommit

@@ -11,6 +11,14 @@ on:
         description: SHA-256 of the exporter executable
         required: true
         type: string
+      exporter_map_url:
+        description: URL of the detailed Delphi MAP paired with the exporter
+        required: true
+        type: string
+      exporter_map_sha256:
+        description: SHA-256 of the detailed Delphi MAP
+        required: true
+        type: string
       patch_sha256:
         description: SHA-256 of the reviewed xEdit patch set
         required: true
@@ -39,6 +47,9 @@ jobs:
           Invoke-WebRequest `
             -Uri '${{ inputs.exporter_url }}' `
             -OutFile '${{ runner.temp }}\bethkit-xedit-exporter.exe'
+          Invoke-WebRequest `
+            -Uri '${{ inputs.exporter_map_url }}' `
+            -OutFile '${{ runner.temp }}\bethkit-xedit-exporter.map'
 
       - name: Generate and verify all game packages
         shell: pwsh
@@ -46,6 +57,7 @@ jobs:
           .\scripts\New-XEditSchemaCatalog.ps1 `
             -Exporter '${{ runner.temp }}\bethkit-xedit-exporter.exe' `
             -ExpectedExporterSha256 '${{ inputs.exporter_sha256 }}' `
+            -ExpectedMapSha256 '${{ inputs.exporter_map_sha256 }}' `
             -ExpectedPatchSha256 '${{ inputs.patch_sha256 }}' `
             -ExpectedBuildSha256 '${{ inputs.build_sha256 }}'
 

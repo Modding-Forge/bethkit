@@ -1,13 +1,16 @@
 diff --git a/Core/wbInterface.pas b/Core/wbInterface.pas
+index 2a298a2a..522b7117 100644
 --- a/Core/wbInterface.pas
 +++ b/Core/wbInterface.pas
-@@ -704,6 +704,13 @@ const
+@@ -704,6 +704,15 @@ const
  type
    IwbDef = interface;
  
 +  TwbBethkitCallbackInfo = record
 +    Id: string;
 +    Semantic: Boolean;
++    ImplementationAddress: NativeUInt;
++    Slot: Integer;
 +  end;
 +
 +  TwbBethkitCallbackInfos = TArray<TwbBethkitCallbackInfo>;
@@ -15,7 +18,7 @@ diff --git a/Core/wbInterface.pas b/Core/wbInterface.pas
    TwbDefs = array of IwbDef;
    TwbDefPath = array of record
      Def   : IwbDef;
-@@ -721,6 +728,7 @@ type
+@@ -721,6 +730,7 @@ type
      ['{C7739FBD-3B58-48A2-9DD0-8057D3496892}']
      function GetDefType: TwbDefType;
      function GetDefTypeName: string;
@@ -23,7 +26,7 @@ diff --git a/Core/wbInterface.pas b/Core/wbInterface.pas
      function CanAssign(const aElement: IwbElement; aIndex: Integer; const aDef: IwbDef): Boolean;
      function Assign(const aTarget: IwbElement; aIndex: Integer; const aSource: IwbElement; aOnlySK: Boolean): IwbElement;
      function GetAssignTemplates(const aContainer: IwbContainerElementRef; aIndex: Integer): TwbDefs;
-@@ -5649,6 +5657,7 @@ type
+@@ -5641,6 +5651,7 @@ type
      {---IwbDef---}
      function GetDefType: TwbDefType; virtual; abstract;
      function GetDefTypeName: string; virtual; abstract;
@@ -31,12 +34,32 @@ diff --git a/Core/wbInterface.pas b/Core/wbInterface.pas
      function CanAssign(const aElement: IwbElement; aIndex: Integer; const aDef: IwbDef): Boolean; virtual;
      function Assign(const aTarget: IwbElement; aIndex: Integer; const aSource: IwbElement; aOnlySK: Boolean): IwbElement; virtual;
      function GetAssignTemplates(const aContainer: IwbContainerElementRef; aIndex: Integer): TwbDefs; virtual;
-@@ -9961,6 +9970,132 @@ begin
+@@ -9950,6 +9961,246 @@ begin
    Result := Assigned(defGetCP);
  end;
  
++function wbBethkitCallbackAddress(const aCallback): NativeUInt;
++type
++  TBethkitPointerArray = array[0..3] of Pointer;
++  PBethkitPointerArray = ^TBethkitPointerArray;
++var
++  lInterface: Pointer;
++  lVTable: Pointer;
++begin
++  lInterface := PPointer(@aCallback)^;
++  if not Assigned(lInterface) then
++    Exit(0);
++  lVTable := PPointer(lInterface)^;
++  Result := NativeUInt(PBethkitPointerArray(lVTable)^[3]);
++end;
++
 +function TwbDef.GetBethkitCallbacks: TwbBethkitCallbackInfos;
-+  procedure Add(const aId: string; aSemantic: Boolean);
++  procedure Add(
++    const aId: string;
++    aSemantic: Boolean;
++    aImplementationAddress: NativeUInt;
++    aSlot: Integer = -1
++  );
 +  var
 +    lIndex: Integer;
 +  begin
@@ -44,120 +67,214 @@ diff --git a/Core/wbInterface.pas b/Core/wbInterface.pas
 +    SetLength(Result, Succ(lIndex));
 +    Result[lIndex].Id := aId;
 +    Result[lIndex].Semantic := aSemantic;
++    Result[lIndex].ImplementationAddress := aImplementationAddress;
++    Result[lIndex].Slot := aSlot;
 +  end;
++var
++  lIndex: Integer;
 +begin
 +  Result := nil;
 +  if Assigned(defGetCP) then
-+    Add('def.conflict_priority', True);
++    Add(
++      'def.conflict_priority',
++      True,
++      wbBethkitCallbackAddress(defGetCP)
++    );
 +
 +  if Self is TwbNamedDef then
 +    with TwbNamedDef(Self) do begin
 +      if Assigned(ndAfterLoad) then
-+        Add('def.after_load', True);
++        Add('def.after_load', True, wbBethkitCallbackAddress(ndAfterLoad));
 +      if Assigned(ndAfterSet) then
-+        Add('def.after_set', True);
++        Add('def.after_set', True, wbBethkitCallbackAddress(ndAfterSet));
 +      if Assigned(ndToStr) then
-+        Add('def.value_transform', True);
++        Add('def.value_transform', True, wbBethkitCallbackAddress(ndToStr));
 +      if Assigned(ndDontShow) then
-+        Add('def.dont_show', False);
++        Add('def.dont_show', False, wbBethkitCallbackAddress(ndDontShow));
 +      if Assigned(ndIsRemoveable) then
-+        Add('def.is_removeable', True);
++        Add(
++          'def.is_removeable',
++          True,
++          wbBethkitCallbackAddress(ndIsRemoveable)
++        );
 +      if Assigned(ndSummaryLinksToCallback) then
-+        Add('def.summary_links_to', False);
++        Add(
++          'def.summary_links_to',
++          False,
++          wbBethkitCallbackAddress(ndSummaryLinksToCallback)
++        );
 +    end;
 +
 +  if Self is TwbMainRecordDef then
 +    with TwbMainRecordDef(Self) do begin
 +      if Assigned(recAddInfoCallback) then
-+        Add('record.additional_info', False);
++        Add(
++          'record.additional_info',
++          False,
++          wbBethkitCallbackAddress(recAddInfoCallback)
++        );
 +      if Assigned(recGetFormIDCallback) then
-+        Add('record.form_id', True);
++        Add(
++          'record.form_id',
++          True,
++          wbBethkitCallbackAddress(recGetFormIDCallback)
++        );
 +      if Assigned(recIdentityCallback) then
-+        Add('record.identity', True);
++        Add(
++          'record.identity',
++          True,
++          wbBethkitCallbackAddress(recIdentityCallback)
++        );
 +      if Assigned(recGetEditorIDCallback) then
-+        Add('record.get_editor_id', True);
++        Add(
++          'record.get_editor_id',
++          True,
++          wbBethkitCallbackAddress(recGetEditorIDCallback)
++        );
 +      if Assigned(recSetEditorIDCallback) then
-+        Add('record.set_editor_id', True);
++        Add(
++          'record.set_editor_id',
++          True,
++          wbBethkitCallbackAddress(recSetEditorIDCallback)
++        );
 +      if Assigned(recGetGridCellCallback) then
-+        Add('record.grid_cell', True);
++        Add(
++          'record.grid_cell',
++          True,
++          wbBethkitCallbackAddress(recGetGridCellCallback)
++        );
 +      if Assigned(recBuildIndexKeys) then
-+        Add('record.index_keys', True);
++        Add(
++          'record.index_keys',
++          True,
++          wbBethkitCallbackAddress(recBuildIndexKeys)
++        );
 +    end;
 +
 +  if Self is TwbValueDef then
 +    with TwbValueDef(Self) do begin
 +      if Assigned(vdLinksToCallback) then
-+        Add('value.links_to', True);
++        Add('value.links_to', True, wbBethkitCallbackAddress(vdLinksToCallback));
 +      if Assigned(vdSetToDefault) then
-+        Add('value.set_default', True);
++        Add('value.set_default', True, wbBethkitCallbackAddress(vdSetToDefault));
 +    end;
 +
 +  if Self is TwbBaseStringDef then
 +    with TwbBaseStringDef(Self) do
 +      if Assigned(bsdFormater) then
-+        Add('string.formatter', True);
++        Add('string.formatter', True, wbBethkitCallbackAddress(bsdFormater));
 +
 +  if Self is TwbSubRecordArrayDef then
 +    with TwbSubRecordArrayDef(Self) do
 +      if Assigned(sraIsSorted) then
-+        Add('subrecord_array.is_sorted', True);
++        Add(
++          'subrecord_array.is_sorted',
++          True,
++          wbBethkitCallbackAddress(sraIsSorted)
++        );
 +
 +  if Self is TwbSubRecordUnionDef then
 +    with TwbSubRecordUnionDef(Self) do
 +      if Assigned(sruDecider) then
-+        Add('subrecord_union.select', True);
++        Add(
++          'subrecord_union.select',
++          True,
++          wbBethkitCallbackAddress(sruDecider)
++        );
 +
 +  if Self is TwbUnionDef then
 +    with TwbUnionDef(Self) do
 +      if Assigned(udDecider) then
-+        Add('union.select', True);
++        Add('union.select', True, wbBethkitCallbackAddress(udDecider));
 +
 +  if Self is TwbArrayDef then
 +    with TwbArrayDef(Self) do begin
 +      if Assigned(arCountCallback) then
-+        Add('array.count', True);
++        Add('array.count', True, wbBethkitCallbackAddress(arCountCallback));
 +      if Assigned(arShouldInclude) then
-+        Add('array.should_include', True);
++        Add(
++          'array.should_include',
++          True,
++          wbBethkitCallbackAddress(arShouldInclude)
++        );
 +    end;
 +
 +  if Self is TwbStructDef then
 +    with TwbStructDef(Self) do
 +      if Assigned(stSizeCallback) then
-+        Add('struct.size', True);
++        Add('struct.size', True, wbBethkitCallbackAddress(stSizeCallback));
 +
 +  if Self is TwbStructCDef then
 +    with TwbStructCDef(Self) do begin
 +      if Assigned(scSizeCallback) then
-+        Add('struct.compressed_size', True);
++        Add(
++          'struct.compressed_size',
++          True,
++          wbBethkitCallbackAddress(scSizeCallback)
++        );
 +      if Assigned(scGetChapterType) then
-+        Add('struct.chapter_type', True);
++        Add(
++          'struct.chapter_type',
++          True,
++          wbBethkitCallbackAddress(scGetChapterType)
++        );
 +      if Assigned(scGetChapterTypeName) then
-+        Add('struct.chapter_type_name', False);
++        Add(
++          'struct.chapter_type_name',
++          False,
++          wbBethkitCallbackAddress(scGetChapterTypeName)
++        );
 +      if Assigned(scGetChapterName) then
-+        Add('struct.chapter_name', False);
++        Add(
++          'struct.chapter_name',
++          False,
++          wbBethkitCallbackAddress(scGetChapterName)
++        );
 +    end;
 +
 +  if Self is TwbIntegerDef then
 +    with TwbIntegerDef(Self) do
 +      if Assigned(inOverlayCallback) then
-+        Add('integer.overlay', True);
++        Add(
++          'integer.overlay',
++          True,
++          wbBethkitCallbackAddress(inOverlayCallback)
++        );
 +
 +  if Self is TwbFloatDef then
 +    with TwbFloatDef(Self) do
 +      if Assigned(fdNormalizer) then
-+        Add('float.normalizer', True);
++        Add('float.normalizer', True, wbBethkitCallbackAddress(fdNormalizer));
 +
 +  if Self is TwbIntegerDefFormaterUnion then
 +    with TwbIntegerDefFormaterUnion(Self) do
 +      if Assigned(idfuDecider) then
-+        Add('integer_formatter.select', True);
++        Add(
++          'integer_formatter.select',
++          True,
++          wbBethkitCallbackAddress(idfuDecider)
++        );
 +
 +  if Self is TwbFlagsDef then
 +    with TwbFlagsDef(Self) do begin
 +      if flgHasDontShows then
-+        Add('flags.dont_show', False);
++        for lIndex := Low(flgDontShows) to High(flgDontShows) do
++          if Assigned(flgDontShows[lIndex]) then
++            Add(
++              'flags.dont_show',
++              False,
++              wbBethkitCallbackAddress(flgDontShows[lIndex]),
++              lIndex
++            );
 +      if flgHasGetCPs then
-+        Add('flags.conflict_priority', True);
++        for lIndex := Low(flgGetCPs) to High(flgGetCPs) do
++          if Assigned(flgGetCPs[lIndex]) then
++            Add(
++              'flags.conflict_priority',
++              True,
++              wbBethkitCallbackAddress(flgGetCPs[lIndex]),
++              lIndex
++            );
 +    end;
 +end;
 +

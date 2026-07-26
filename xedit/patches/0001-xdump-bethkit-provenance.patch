@@ -1,5 +1,5 @@
 diff --git a/xDump.dpr b/xDump.dpr
-index c6a55a2e..b87fb9d0 100644
+index c6a55a2e..3aaf3565 100644
 --- a/xDump.dpr
 +++ b/xDump.dpr
 @@ -25,6 +25,7 @@ uses
@@ -19,7 +19,7 @@ index c6a55a2e..b87fb9d0 100644
  {$SetPEFlags IMAGE_FILE_LARGE_ADDRESS_AWARE}
  
  var
-@@ -86,6 +89,35 @@ begin
+@@ -86,6 +89,43 @@ begin
      WriteLn(ErrOutput, FormatDateTime('<hh:nn:ss.zzz>', Now - StartTime), ' ', aStatus);
  end;
  
@@ -36,9 +36,16 @@ index c6a55a2e..b87fb9d0 100644
 +procedure BethkitWriteProvenance;
 +var
 +  lExecutableHash: string;
++  lMapHash: string;
 +begin
 +  lExecutableHash := LowerCase(
 +    THashSHA2.GetHashStringFromFile(ParamStr(0), THashSHA2.TSHA2Version.SHA256)
++  );
++  lMapHash := LowerCase(
++    THashSHA2.GetHashStringFromFile(
++      ChangeFileExt(ParamStr(0), '.map'),
++      THashSHA2.TSHA2Version.SHA256
++    )
 +  );
 +  WriteLn(
 +    '{"source_tag":"', BETHKIT_XEDIT_SOURCE_TAG,
@@ -46,6 +53,7 @@ index c6a55a2e..b87fb9d0 100644
 +    '","source_archive_sha256":"', BETHKIT_XEDIT_SOURCE_ARCHIVE_SHA256,
 +    '","exporter_version":"', BETHKIT_EXPORTER_VERSION,
 +    '","exporter_binary_sha256":"', lExecutableHash,
++    '","exporter_map_sha256":"', lMapHash,
 +    '","exporter_patch_sha256":"', BETHKIT_EXPORTER_PATCH_SHA256,
 +    '","exporter_build_sha256":"', BETHKIT_EXPORTER_BUILD_SHA256,
 +    '"}'
@@ -55,7 +63,7 @@ index c6a55a2e..b87fb9d0 100644
  type
    TExportFormat = (efUESPWiki, efRaw);
    TwbDefProfile = string;
-@@ -948,6 +980,10 @@ begin
+@@ -948,6 +988,10 @@ begin
    {$ELSE}
    SysUtils.DecimalSeparator := '.';
    {$IFEND}
@@ -68,7 +76,7 @@ index c6a55a2e..b87fb9d0 100644
    wbAllowInternalEdit := False;
 diff --git a/xDump/BethkitBuildInfo.inc b/xDump/BethkitBuildInfo.inc
 new file mode 100644
-index 00000000..0e6cba80
+index 00000000..bb03a59b
 --- /dev/null
 +++ b/xDump/BethkitBuildInfo.inc
 @@ -0,0 +1,9 @@
@@ -76,7 +84,7 @@ index 00000000..0e6cba80
 +  BETHKIT_XEDIT_SOURCE_COMMIT = 'f5c00f3fa3ee39511185515802647246c807f759';
 +  BETHKIT_XEDIT_SOURCE_ARCHIVE_SHA256 =
 +    '8c89ff9822375cdd0b5183ecb0cda04ae6529a9e8bda7ea78426a43bac13d3e8';
-+  BETHKIT_EXPORTER_VERSION = '1';
++  BETHKIT_EXPORTER_VERSION = '2';
 +  BETHKIT_EXPORTER_PATCH_SHA256 =
 +    '0000000000000000000000000000000000000000000000000000000000000000';
 +  BETHKIT_EXPORTER_BUILD_SHA256 =

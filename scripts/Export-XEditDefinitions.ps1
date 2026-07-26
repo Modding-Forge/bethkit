@@ -9,6 +9,10 @@ param(
 
     [Parameter(Mandatory)]
     [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string] $ExpectedMapSha256,
+
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
     [string] $ExpectedPatchSha256,
 
     [Parameter(Mandatory)]
@@ -35,6 +39,7 @@ if (-not (Test-Path -LiteralPath $cargo -PathType Leaf)) {
 & (Join-Path $PSScriptRoot 'Test-XEditExporter.ps1') `
     -Exporter $Exporter `
     -ExpectedExporterSha256 $ExpectedExporterSha256 `
+    -ExpectedMapSha256 $ExpectedMapSha256 `
     -ExpectedPatchSha256 $ExpectedPatchSha256 `
     -ExpectedBuildSha256 $ExpectedBuildSha256 | Out-Null
 

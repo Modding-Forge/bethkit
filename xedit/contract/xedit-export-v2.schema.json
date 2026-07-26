@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://modding-forge.github.io/bethkit/xedit-export-v1.schema.json",
+  "$id": "https://modding-forge.github.io/bethkit/xedit-export-v2.schema.json",
   "title": "Bethkit xEdit definition export",
   "type": "object",
   "additionalProperties": false,
@@ -13,7 +13,7 @@
   ],
   "properties": {
     "contract_version": {
-      "const": 1
+      "const": 2
     },
     "provenance": {
       "$ref": "#/$defs/provenance"
@@ -61,6 +61,7 @@
         "source_archive_sha256",
         "exporter_version",
         "exporter_binary_sha256",
+        "exporter_map_sha256",
         "exporter_patch_sha256",
         "exporter_build_sha256"
       ],
@@ -83,6 +84,9 @@
         "exporter_binary_sha256": {
           "$ref": "#/$defs/sha256"
         },
+        "exporter_map_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
         "exporter_patch_sha256": {
           "$ref": "#/$defs/sha256"
         },
@@ -97,6 +101,11 @@
       "required": [
         "path",
         "callback_id",
+        "callback_slot",
+        "implementation_fingerprint",
+        "implementation_symbol",
+        "implementation_unit",
+        "implementation_source_line",
         "semantic"
       ],
       "properties": {
@@ -107,6 +116,29 @@
         "callback_id": {
           "type": "string",
           "minLength": 1
+        },
+        "callback_slot": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "implementation_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "implementation_symbol": {
+          "type": "string"
+        },
+        "implementation_unit": {
+          "type": "string"
+        },
+        "implementation_source_line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "semantic": {
           "type": "boolean"

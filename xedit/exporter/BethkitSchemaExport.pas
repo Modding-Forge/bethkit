@@ -19,16 +19,32 @@ uses
   SysUtils,
   System.Hash,
   TypInfo,
+  Windows,
   wbInterface;
 
 const
 {$I BethkitBuildInfo.inc}
 
 type
+  TBethkitMapResolver = class
+  private
+    FSymbols: TStringList;
+    function AddressKey(aAddress: NativeUInt): string;
+  public
+    constructor Create(const aMapPath: string);
+    destructor Destroy; override;
+    function Resolve(
+      aAddress: NativeUInt;
+      out aFingerprint, aSymbol, aUnitName: string
+    ): Boolean;
+    procedure SelfTest;
+  end;
+
   TBethkitSchemaWriter = class
   private
     FCallbacks: TStringList;
     FEncoding: TEncoding;
+    FMapResolver: TBethkitMapResolver;
     FNextNodeId: Cardinal;
     FWriter: TStreamWriter;
     function JsonString(const aValue: string): string;
@@ -39,8 +55,8 @@ type
       aIndex: Integer
     ): string;
     procedure AddCallback(
-      const aPath, aCallbackId: string;
-      aSemantic: Boolean
+      const aPath: string;
+      const aCallback: TwbBethkitCallbackInfo
     );
     procedure InspectCallbacks(const aDef: IwbDef; const aPath: string);
     procedure WriteArray(const aDef: IwbArrayDef; const aPath: string);
@@ -86,6 +102,131 @@ type
     destructor Destroy; override;
     procedure WriteExport(const aGame: string);
   end;
+
+function TBethkitMapResolver.AddressKey(aAddress: NativeUInt): string;
+var
+  lBase: NativeUInt;
+begin
+  lBase := NativeUInt(GetModuleHandle(nil));
+  if aAddress < lBase + $1000 then
+    raise Exception.CreateFmt(
+      'Callback address %.8x precedes the executable code segment',
+      [aAddress]
+    );
+  Result := IntToHex(aAddress - lBase - $1000, 8);
+end;
+
+constructor TBethkitMapResolver.Create(const aMapPath: string);
+var
+  lAddress: UInt64;
+  lAddressText: string;
+  lInPublicsByValue: Boolean;
+  lIndex: Integer;
+  lLine: string;
+  lLines: TStringList;
+  lSymbol: string;
+begin
+  inherited Create;
+  if not FileExists(aMapPath) then
+    raise Exception.Create('Detailed Delphi MAP file not found: ' + aMapPath);
+
+  FSymbols := TStringList.Create;
+  FSymbols.NameValueSeparator := '=';
+  FSymbols.Sorted := True;
+  FSymbols.Duplicates := dupIgnore;
+  lLines := TStringList.Create;
+  try
+    lLines.LoadFromFile(aMapPath, TEncoding.UTF8);
+    lInPublicsByValue := False;
+    for lIndex := 0 to Pred(lLines.Count) do begin
+      lLine := Trim(lLines[lIndex]);
+      if Pos('Address', lLine) = 1 then begin
+        lInPublicsByValue := Pos('Publics by Value', lLine) > 0;
+        Continue;
+      end;
+      if not lInPublicsByValue then
+        Continue;
+      if Pos('Program entry point', lLine) = 1 then
+        Break;
+      if (Length(lLine) < 15) or (Copy(lLine, 1, 5) <> '0001:') then
+        Continue;
+      lAddressText := Copy(lLine, 6, 8);
+      if not TryStrToUInt64('$' + lAddressText, lAddress) then
+        Continue;
+      lSymbol := Trim(Copy(lLine, 15, MaxInt));
+      if lSymbol <> '' then
+        FSymbols.Values[UpperCase(lAddressText)] := lSymbol;
+    end;
+  finally
+    lLines.Free;
+  end;
+  if FSymbols.Count = 0 then
+    raise Exception.Create(
+      'Detailed Delphi MAP file contains no value-sorted symbols'
+    );
+end;
+
+destructor TBethkitMapResolver.Destroy;
+begin
+  FSymbols.Free;
+  inherited;
+end;
+
+function TBethkitMapResolver.Resolve(
+  aAddress: NativeUInt;
+  out aFingerprint, aSymbol, aUnitName: string
+): Boolean;
+var
+  lSeparator: Integer;
+  lSource: string;
+begin
+  aFingerprint := '';
+  aSymbol := '';
+  aUnitName := '';
+  if aAddress = 0 then
+    Exit(False);
+
+  aSymbol := FSymbols.Values[AddressKey(aAddress)];
+  Result := aSymbol <> '';
+  if not Result then
+    Exit;
+
+  lSeparator := Pos('.', aSymbol);
+  if lSeparator > 1 then
+    aUnitName := Copy(aSymbol, 1, Pred(lSeparator));
+  lSource :=
+    BETHKIT_XEDIT_SOURCE_COMMIT + '|' +
+    BETHKIT_EXPORTER_BUILD_SHA256 + '|' +
+    AddressKey(aAddress) + '|' +
+    aSymbol;
+  aFingerprint := LowerCase(
+    THashSHA2.GetHashString(
+      lSource,
+      THashSHA2.TSHA2Version.SHA256
+    )
+  );
+end;
+
+procedure TBethkitMapResolver.SelfTest;
+var
+  lFingerprint: string;
+  lSymbol: string;
+  lUnitName: string;
+begin
+  if not Resolve(
+    NativeUInt(@BethkitWriteSchemaExport),
+    lFingerprint,
+    lSymbol,
+    lUnitName
+  ) then
+    raise Exception.Create(
+      'Detailed Delphi MAP file cannot resolve the exporter self-test symbol'
+    );
+  if Pos('BethkitWriteSchemaExport', lSymbol) = 0 then
+    raise Exception.Create(
+      'Detailed Delphi MAP file resolved the wrong exporter self-test symbol'
+    );
+end;
 
 function TBethkitSchemaWriter.JsonString(const aValue: string): string;
 var
@@ -142,20 +283,54 @@ begin
 end;
 
 procedure TBethkitSchemaWriter.AddCallback(
-  const aPath, aCallbackId: string;
-  aSemantic: Boolean
+  const aPath: string;
+  const aCallback: TwbBethkitCallbackInfo
 );
 var
+  lFingerprint: string;
+  lSymbol: string;
+  lUnitName: string;
   lValue: string;
 begin
+  if not FMapResolver.Resolve(
+    aCallback.ImplementationAddress,
+    lFingerprint,
+    lSymbol,
+    lUnitName
+  ) then begin
+    if aCallback.Semantic then
+      raise Exception.CreateFmt(
+        'Cannot resolve semantic callback %s at %s (address %.8x)',
+        [aCallback.Id, aPath, aCallback.ImplementationAddress]
+      );
+    lSymbol := '';
+    lUnitName := '';
+    lFingerprint := LowerCase(
+      THashSHA2.GetHashString(
+        'ui|' + aCallback.Id,
+        THashSHA2.TSHA2Version.SHA256
+      )
+    );
+  end;
   lValue :=
     '{"path":' + JsonString(aPath) +
-    ',"callback_id":' + JsonString(aCallbackId) +
-    ',"semantic":';
-  if aSemantic then
+    ',"callback_id":' + JsonString(aCallback.Id) +
+    ',"callback_slot":';
+  if aCallback.Slot >= 0 then
+    lValue := lValue + IntToStr(aCallback.Slot)
+  else
+    lValue := lValue + 'null';
+  lValue := lValue + ',"semantic":';
+  if aCallback.Semantic then
     lValue := lValue + 'true'
   else
     lValue := lValue + 'false';
+  lValue :=
+    lValue +
+    ',"implementation_fingerprint":' + JsonString(lFingerprint) +
+    ',"implementation_symbol":' + JsonString(lSymbol) +
+    ',"implementation_unit":' + JsonString(lUnitName) +
+    ',"implementation_source_line":null';
   FCallbacks.Add(lValue + '}');
 end;
 
@@ -169,11 +344,7 @@ var
 begin
   lCallbacks := aDef.GetBethkitCallbacks;
   for lIndex := Low(lCallbacks) to High(lCallbacks) do
-    AddCallback(
-      aPath,
-      lCallbacks[lIndex].Id,
-      lCallbacks[lIndex].Semantic
-    );
+    AddCallback(aPath, lCallbacks[lIndex]);
 end;
 
 procedure TBethkitSchemaWriter.WriteArray(
@@ -624,6 +795,10 @@ begin
   FCallbacks.Duplicates := dupIgnore;
   FNextNodeId := 0;
   FEncoding := TUTF8Encoding.Create(False);
+  FMapResolver := TBethkitMapResolver.Create(
+    ChangeFileExt(ParamStr(0), '.map')
+  );
+  FMapResolver.SelfTest;
   FWriter := TStreamWriter.Create(aOutputPath, False, FEncoding);
   FWriter.NewLine := #10;
 end;
@@ -631,6 +806,7 @@ end;
 destructor TBethkitSchemaWriter.Destroy;
 begin
   FWriter.Free;
+  FMapResolver.Free;
   FEncoding.Free;
   FCallbacks.Free;
   inherited;
@@ -640,13 +816,20 @@ procedure TBethkitSchemaWriter.WriteExport(const aGame: string);
 var
   lExecutableHash: string;
   lIndex: Integer;
+  lMapHash: string;
 begin
   wbInitRecords;
   lExecutableHash := LowerCase(
     THashSHA2.GetHashStringFromFile(ParamStr(0), THashSHA2.TSHA2Version.SHA256)
   );
+  lMapHash := LowerCase(
+    THashSHA2.GetHashStringFromFile(
+      ChangeFileExt(ParamStr(0), '.map'),
+      THashSHA2.TSHA2Version.SHA256
+    )
+  );
 
-  FWriter.Write('{"contract_version":1,"provenance":{');
+  FWriter.Write('{"contract_version":2,"provenance":{');
   FWriter.Write('"source_tag":' + JsonString(BETHKIT_XEDIT_SOURCE_TAG));
   FWriter.Write(
     ',"source_commit":' + JsonString(BETHKIT_XEDIT_SOURCE_COMMIT)
@@ -660,6 +843,9 @@ begin
   );
   FWriter.Write(
     ',"exporter_binary_sha256":' + JsonString(lExecutableHash)
+  );
+  FWriter.Write(
+    ',"exporter_map_sha256":' + JsonString(lMapHash)
   );
   FWriter.Write(
     ',"exporter_patch_sha256":' +
