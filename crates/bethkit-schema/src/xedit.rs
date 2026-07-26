@@ -125,23 +125,38 @@ pub fn convert_xedit_export(
 
     let mut missing: Vec<String> = Vec::new();
     let mut decoders: BTreeMap<String, u32> = BTreeMap::new();
+    let mut schema_decoders: BTreeMap<String, String> = BTreeMap::new();
     let mut callback_bindings: Vec<CallbackBinding> = Vec::with_capacity(export.callbacks.len());
     for record in &export.records {
-        collect_schema_decoders(&record.root, &mut decoders);
+        collect_schema_decoders(&record.root, &mut decoders, &mut schema_decoders)?;
     }
     for callback in &export.callbacks {
-        let Some(rule) = indexed.get(&(callback.path.as_str(), callback.callback_id.as_str()))
-        else {
-            missing.push(format!("{}@{}", callback.callback_id, callback.path));
+        let rule = indexed.get(&(callback.path.as_str(), callback.callback_id.as_str()));
+        if let Some(rule) = rule {
+            if callback.semantic && rule.classification == CallbackClass::UserInterfaceOnly {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "semantic callback {} at {} cannot be classified as UI-only",
+                    callback.callback_id, callback.path
+                )));
+            }
+            callback_bindings.push(build_callback_binding(rule, callback, &mut decoders)?);
             continue;
-        };
-        if callback.semantic && rule.classification == CallbackClass::UserInterfaceOnly {
-            return Err(SchemaError::InvalidGraph(format!(
-                "semantic callback {} at {} cannot be classified as UI-only",
-                callback.callback_id, callback.path
-            )));
         }
-        callback_bindings.push(build_callback_binding(rule, callback, &mut decoders)?);
+        if callback.semantic {
+            if let Some(decoder) = schema_decoders.get(&callback.path) {
+                decoders.entry(decoder.clone()).or_insert(1);
+                callback_bindings.push(CallbackBinding {
+                    path: callback.path.clone(),
+                    callback_id: callback.callback_id.clone(),
+                    implementation: CallbackImplementation::Custom {
+                        decoder: decoder.clone(),
+                        minimum_decoder_version: 1,
+                    },
+                });
+                continue;
+            }
+        }
+        missing.push(format!("{}@{}", callback.callback_id, callback.path));
     }
     if !missing.is_empty() {
         missing.sort();
@@ -190,39 +205,50 @@ pub fn convert_xedit_export(
     )
 }
 
-fn collect_schema_decoders(node: &SchemaNode, decoders: &mut BTreeMap<String, u32>) {
+fn collect_schema_decoders(
+    node: &SchemaNode,
+    decoders: &mut BTreeMap<String, u32>,
+    paths: &mut BTreeMap<String, String>,
+) -> Result<()> {
     match &node.kind {
         SchemaNodeKind::Sequence { children } => {
             for child in children {
-                collect_schema_decoders(child, decoders);
+                collect_schema_decoders(child, decoders, paths)?;
             }
         }
         SchemaNodeKind::Choice { alternatives } => {
             for alternative in alternatives {
-                collect_schema_decoders(alternative, decoders);
+                collect_schema_decoders(alternative, decoders, paths)?;
             }
         }
         SchemaNodeKind::Repeat { child, .. }
         | SchemaNodeKind::Subrecord { payload: child, .. }
         | SchemaNodeKind::Compressed { child, .. }
         | SchemaNodeKind::Array { element: child, .. } => {
-            collect_schema_decoders(child, decoders);
+            collect_schema_decoders(child, decoders, paths)?;
         }
         SchemaNodeKind::Struct { fields } => {
             for field in fields {
-                collect_schema_decoders(field, decoders);
+                collect_schema_decoders(field, decoders, paths)?;
             }
         }
         SchemaNodeKind::Union { variants, .. } => {
             for variant in variants {
-                collect_schema_decoders(variant, decoders);
+                collect_schema_decoders(variant, decoders, paths)?;
             }
         }
         SchemaNodeKind::Custom { decoder, .. } => {
             decoders.entry(decoder.clone()).or_insert(1);
+            if paths.insert(node.path.clone(), decoder.clone()).is_some() {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "duplicate custom decoder path {}",
+                    node.path
+                )));
+            }
         }
         SchemaNodeKind::Primitive { .. } | SchemaNodeKind::Reference { .. } => {}
     }
+    Ok(())
 }
 
 fn check_version(version: u32) -> Result<()> {
@@ -459,7 +485,8 @@ mod tests {
 
     /// Verifies that custom schema nodes always become decoder requirements.
     #[test]
-    fn conversion_collects_custom_node_decoders() {
+    fn conversion_collects_custom_node_decoders(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         // given
         let export = XEditExport {
             contract_version: 1,
@@ -488,7 +515,11 @@ mod tests {
                     },
                 },
             }],
-            callbacks: Vec::new(),
+            callbacks: vec![ExportedCallback {
+                path: "TEST/root".to_owned(),
+                callback_id: "decoder.required".to_owned(),
+                semantic: true,
+            }],
         };
         let rules = ConversionRules {
             format_version: 1,
@@ -496,8 +527,7 @@ mod tests {
         };
 
         // when
-        let package =
-            convert_xedit_export(export, &rules, b"{}").expect("custom node export should convert");
+        let package = convert_xedit_export(export, &rules, b"{}")?;
 
         // then
         assert_eq!(
@@ -507,5 +537,13 @@ mod tests {
                 minimum_version: 1,
             }]
         );
+        assert!(matches!(
+            package.callback_bindings()[0].implementation,
+            CallbackImplementation::Custom {
+                ref decoder,
+                minimum_decoder_version: 1,
+            } if decoder == "xedit.dtunion"
+        ));
+        Ok(())
     }
 }
