@@ -28,7 +28,7 @@ pub use error::{Result, SemanticError};
 pub use handler::{
     HandlerContext, HandlerInvocation, HandlerMutation, HandlerOutput, HandlerPhase,
     HandlerRecordContext, ResourceHashResolver, SemanticHandler, SemanticHandlerRegistry,
-    ValueFormat,
+    ValueFormat, WwiseGuidInfo, WwiseGuidResolver,
 };
 pub use validation::{Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationReport};
 pub use value::{ByteSpan, FieldOrigin, FieldValue, NamedValue, OwnedFieldValue};

@@ -100,6 +100,20 @@ impl<'context, 'record> RecordView<'context, 'record> {
             .format_value_as(self.record, path, value, format)
     }
 
+    /// Parses edited xEdit text back to a typed value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the bound transform rejects
+    /// the text or returns an invalid result.
+    pub fn parse_edit_value(
+        &self,
+        path: &str,
+        text: &str,
+    ) -> Result<Option<crate::OwnedFieldValue>> {
+        self.context.parse_edit_value(self.record, path, text)
+    }
+
     /// Returns whether xEdit allows a decoded value to be removed.
     ///
     /// # Errors

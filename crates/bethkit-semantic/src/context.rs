@@ -2,11 +2,13 @@
 //!
 //! Semantic runtime context tying packages to decoder implementations.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use bethkit_core::Record;
 use bethkit_schema::{CallbackImplementation, ConflictPriority, SchemaPackage, SchemaRegistry};
 
+use crate::{value::handler_to_owned_value, OwnedFieldValue};
 use crate::{
     DecoderRegistry, FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, RecordEditor,
     RecordView, Result, SemanticError, SemanticHandlerRegistry, ValueFormat,
@@ -245,6 +247,61 @@ impl SemanticContext {
             );
         }
         Ok(formatted)
+    }
+
+    /// Parses text accepted by an xEdit edit control back to a typed value.
+    ///
+    /// `None` means that the path has no executable text-to-value transform.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when a bound transform rejects the
+    /// input or returns an invalid result.
+    pub fn parse_edit_value(
+        &self,
+        record: &Record,
+        path: &str,
+        text: &str,
+    ) -> Result<Option<OwnedFieldValue>> {
+        let input = FieldValue::String(Cow::Owned(text.to_owned()));
+        let mut parsed = None;
+        for binding in self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| {
+                binding.path == path
+                    && binding.callback_id == "def.value_transform"
+                    && !crate::handler::is_validation_binding(binding)
+            })
+        {
+            if !matches!(
+                binding.implementation,
+                CallbackImplementation::BuiltIn { .. }
+                    | CallbackImplementation::CustomHandler { .. }
+            ) {
+                continue;
+            }
+            match self.handlers.invoke(
+                binding,
+                self.handler_record(record),
+                HandlerPhase::ParseEditValue,
+                Some(&input),
+            )? {
+                HandlerOutput::None => {}
+                HandlerOutput::Value(value) => {
+                    parsed = Some(handler_to_owned_value(value, path)?);
+                }
+                _ => {
+                    return Err(SemanticError::Handler {
+                        handler: binding.callback_id.clone(),
+                        message: "edit parser returned a non-value result".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(parsed)
     }
 
     /// Returns whether xEdit allows the value at an exact schema path to be removed.

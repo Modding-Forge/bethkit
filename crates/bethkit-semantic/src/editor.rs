@@ -8,7 +8,7 @@ use bethkit_schema::{
     PrimitiveType, SchemaNode, SchemaNodeKind,
 };
 
-use crate::value::float_to_raw;
+use crate::value::{float_to_raw, handler_to_owned_value};
 use crate::{
     FieldValue, HandlerMutation, HandlerOutput, HandlerPhase, HandlerRecordContext,
     OwnedFieldValue, Result, SemanticContext, SemanticError, SemanticHandlerRegistry,
@@ -608,31 +608,6 @@ fn owned_leaf_to_handler_value(value: &OwnedFieldValue) -> FieldValue<'static> {
         OwnedFieldValue::Array(values) => {
             FieldValue::Array(values.iter().map(owned_leaf_to_handler_value).collect())
         }
-    }
-}
-
-fn handler_to_owned_value(value: FieldValue<'static>, path: &str) -> Result<OwnedFieldValue> {
-    match value {
-        FieldValue::Int(value) => Ok(OwnedFieldValue::Int(value)),
-        FieldValue::UInt(value) => Ok(OwnedFieldValue::UInt(value)),
-        FieldValue::Float(value) => Ok(OwnedFieldValue::Float(value)),
-        FieldValue::String(value) => Ok(OwnedFieldValue::String(value.into_owned())),
-        FieldValue::FormId { value, .. } => Ok(OwnedFieldValue::FormId(value)),
-        FieldValue::Bytes(value) => Ok(OwnedFieldValue::Bytes(value.into_owned())),
-        FieldValue::Array(values) => values
-            .into_iter()
-            .map(|value| handler_to_owned_value(value, path))
-            .collect::<Result<Vec<_>>>()
-            .map(OwnedFieldValue::Array),
-        FieldValue::Struct(values) => values
-            .into_iter()
-            .map(|value| handler_to_owned_value(value.value, path))
-            .collect::<Result<Vec<_>>>()
-            .map(OwnedFieldValue::Struct),
-        _ => Err(SemanticError::Handler {
-            handler: path.to_owned(),
-            message: "handler returned a value unsupported by the editor".to_owned(),
-        }),
     }
 }
 

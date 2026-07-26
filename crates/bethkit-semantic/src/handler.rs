@@ -37,6 +37,8 @@ pub enum HandlerPhase {
     EditValue,
     /// Native-value text presentation.
     NativeValue,
+    /// Conversion from edited text back to a typed value.
+    ParseEditValue,
     /// Validation equivalent to xEdit's `ctCheck`.
     Validation,
     /// Transactional callback after a value is changed.
@@ -216,6 +218,39 @@ pub trait ResourceHashResolver: Send + Sync {
     fn resolve_folder_hash(&self, hash: u64) -> Option<String>;
 }
 
+/// Metadata associated with one Wwise object GUID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WwiseGuidInfo {
+    name: String,
+    object_path: String,
+}
+
+impl WwiseGuidInfo {
+    /// Creates Wwise object metadata.
+    pub fn new(name: impl Into<String>, object_path: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            object_path: object_path.into(),
+        }
+    }
+
+    /// Returns the Wwise object name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the Wwise object path.
+    pub fn object_path(&self) -> &str {
+        &self.object_path
+    }
+}
+
+/// Resolves Wwise object metadata from a binary GUID.
+pub trait WwiseGuidResolver: Send + Sync {
+    /// Resolves metadata for one GUID.
+    fn resolve_wwise_guid(&self, guid: [u8; 16]) -> Option<WwiseGuidInfo>;
+}
+
 /// Versioned semantic-handler registry.
 #[derive(Clone, Default)]
 pub struct SemanticHandlerRegistry {
@@ -239,6 +274,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
         registry.register(Arc::new(InvalidModelInfoValidation));
+        registry.register(Arc::new(WwiseGuidFormatter { resolver: None }));
         registry
     }
 
@@ -252,6 +288,13 @@ impl SemanticHandlerRegistry {
     /// This replaces the built-in formatter while preserving its stable handler ID.
     pub fn set_resource_hash_resolver(&mut self, resolver: Arc<dyn ResourceHashResolver>) {
         self.register(Arc::new(ResourceHashFormatter {
+            resolver: Some(resolver),
+        }));
+    }
+
+    /// Installs the metadata resolver used by Starfield Wwise GUID callbacks.
+    pub fn set_wwise_guid_resolver(&mut self, resolver: Arc<dyn WwiseGuidResolver>) {
+        self.register(Arc::new(WwiseGuidFormatter {
             resolver: Some(resolver),
         }));
     }
@@ -414,6 +457,16 @@ impl SemanticHandler for FormatRgb {
     }
 
     fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if !matches!(
+            invocation.phase,
+            HandlerPhase::Display
+                | HandlerPhase::Summary
+                | HandlerPhase::SortKey
+                | HandlerPhase::EditValue
+                | HandlerPhase::NativeValue
+        ) {
+            return Ok(HandlerOutput::None);
+        }
         let include_alpha = invocation
             .context
             .configuration
@@ -524,6 +577,173 @@ fn resource_hash(value: &FieldValue<'_>) -> Result<u64> {
             handler: "format.resource_hash".to_owned(),
             message: "resource-hash formatter requires an integer value".to_owned(),
         }),
+    }
+}
+
+struct WwiseGuidFormatter {
+    resolver: Option<Arc<dyn WwiseGuidResolver>>,
+}
+
+impl SemanticHandler for WwiseGuidFormatter {
+    fn id(&self) -> &'static str {
+        "format.wwise_guid"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(wwise_guid_error(
+                    "Wwise GUID edit parsing requires a string value",
+                ));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Bytes(
+                std::borrow::Cow::Owned(parse_wwise_guid(value)?.to_vec()),
+            )));
+        }
+        let value = invocation
+            .value
+            .ok_or_else(|| wwise_guid_error("Wwise GUID formatting requires a value"))?;
+        let guid = wwise_guid_bytes(value)?;
+        let canonical = format_wwise_guid(guid);
+        if !matches!(
+            invocation.phase,
+            HandlerPhase::Display
+                | HandlerPhase::Summary
+                | HandlerPhase::SortKey
+                | HandlerPhase::EditValue
+                | HandlerPhase::NativeValue
+        ) {
+            return Ok(HandlerOutput::None);
+        }
+        if matches!(
+            invocation.phase,
+            HandlerPhase::SortKey | HandlerPhase::NativeValue
+        ) {
+            return Ok(HandlerOutput::Text(canonical));
+        }
+        let Some(resolver) = &self.resolver else {
+            return Ok(HandlerOutput::Text(canonical));
+        };
+        if guid == [0; 16] {
+            return Ok(HandlerOutput::Text(String::new()));
+        }
+        let Some(info) = resolver.resolve_wwise_guid(guid) else {
+            return Ok(HandlerOutput::Text(canonical));
+        };
+        if invocation.phase == HandlerPhase::Summary && !info.name().is_empty() {
+            return Ok(HandlerOutput::Text(info.name().to_owned()));
+        }
+        let mut formatted = if info.name().is_empty() {
+            canonical
+        } else {
+            format!("{} {canonical}", info.name())
+        };
+        if !info.object_path().is_empty() {
+            let object_path = if invocation.phase == HandlerPhase::EditValue {
+                truncate_wwise_object_path(info.object_path())
+            } else {
+                info.object_path().to_owned()
+            };
+            formatted.push_str(&format!(" \"{object_path}\""));
+        }
+        Ok(HandlerOutput::Text(formatted))
+    }
+}
+
+fn wwise_guid_bytes(value: &FieldValue<'_>) -> Result<[u8; 16]> {
+    match value {
+        FieldValue::Bytes(value) => value
+            .as_ref()
+            .try_into()
+            .map_err(|_| wwise_guid_error("Wwise GUID requires exactly 16 bytes")),
+        FieldValue::String(value) => parse_wwise_guid(value),
+        _ => Err(wwise_guid_error(
+            "Wwise GUID formatting requires bytes or canonical text",
+        )),
+    }
+}
+
+fn format_wwise_guid(guid: [u8; 16]) -> String {
+    let data1 = u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]]);
+    let data2 = u16::from_le_bytes([guid[4], guid[5]]);
+    let data3 = u16::from_le_bytes([guid[6], guid[7]]);
+    format!(
+        "{{{data1:08X}-{data2:04X}-{data3:04X}-{:02X}{:02X}-\
+         {:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        guid[8], guid[9], guid[10], guid[11], guid[12], guid[13], guid[14], guid[15]
+    )
+}
+
+fn parse_wwise_guid(value: &str) -> Result<[u8; 16]> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok([0; 16]);
+    }
+    let canonical = if let Some(start) = value.find('{') {
+        let remainder = &value[start..];
+        let end = remainder
+            .find('}')
+            .ok_or_else(|| wwise_guid_error("Wwise GUID is missing a closing brace"))?;
+        &remainder[..=end]
+    } else {
+        value
+    };
+    let body = canonical
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .unwrap_or(canonical);
+    let parts: Vec<&str> = body.split('-').collect();
+    if parts.len() != 5
+        || parts[0].len() != 8
+        || parts[1].len() != 4
+        || parts[2].len() != 4
+        || parts[3].len() != 4
+        || parts[4].len() != 12
+    {
+        return Err(wwise_guid_error("Wwise GUID has an invalid shape"));
+    }
+    let data1 = parse_guid_hex_u32(parts[0])?;
+    let data2 = parse_guid_hex_u16(parts[1])?;
+    let data3 = parse_guid_hex_u16(parts[2])?;
+    let tail = format!("{}{}", parts[3], parts[4]);
+    let mut guid = [0_u8; 16];
+    guid[0..4].copy_from_slice(&data1.to_le_bytes());
+    guid[4..6].copy_from_slice(&data2.to_le_bytes());
+    guid[6..8].copy_from_slice(&data3.to_le_bytes());
+    for (index, chunk) in tail.as_bytes().chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(chunk)
+            .map_err(|_| wwise_guid_error("Wwise GUID contains invalid text"))?;
+        guid[8 + index] = u8::from_str_radix(text, 16)
+            .map_err(|_| wwise_guid_error("Wwise GUID contains invalid hexadecimal digits"))?;
+    }
+    Ok(guid)
+}
+
+fn parse_guid_hex_u32(value: &str) -> Result<u32> {
+    u32::from_str_radix(value, 16)
+        .map_err(|_| wwise_guid_error("Wwise GUID contains invalid hexadecimal digits"))
+}
+
+fn parse_guid_hex_u16(value: &str) -> Result<u16> {
+    u16::from_str_radix(value, 16)
+        .map_err(|_| wwise_guid_error("Wwise GUID contains invalid hexadecimal digits"))
+}
+
+fn truncate_wwise_object_path(value: &str) -> String {
+    if value.chars().count() <= 64 {
+        return value.to_owned();
+    }
+    value.chars().take(61).chain("...".chars()).collect()
+}
+
+fn wwise_guid_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.wwise_guid".to_owned(),
+        message: message.into(),
     }
 }
 
@@ -761,6 +981,19 @@ mod tests {
         }
     }
 
+    struct TestWwiseGuidResolver;
+
+    impl WwiseGuidResolver for TestWwiseGuidResolver {
+        fn resolve_wwise_guid(&self, guid: [u8; 16]) -> Option<WwiseGuidInfo> {
+            (guid == test_wwise_guid()).then(|| {
+                WwiseGuidInfo::new(
+                    "Play_Test",
+                    "\\Events\\Default Work Unit\\Play_Test_With_A_Long_Object_Path_123456789",
+                )
+            })
+        }
+    }
+
     /// Matches xEdit's angle normalization boundaries and large-value guard.
     #[test]
     fn radians_normalizer_matches_xedit_boundaries(
@@ -930,6 +1163,58 @@ mod tests {
         Ok(())
     }
 
+    /// Formats Wwise GUIDs using Delphi's mixed-endian canonical representation.
+    #[test]
+    fn wwise_guid_formatter_matches_xedit_display_modes() -> Result<()> {
+        let resolver: Arc<dyn WwiseGuidResolver> = Arc::new(TestWwiseGuidResolver);
+        let value = FieldValue::Bytes(std::borrow::Cow::Owned(test_wwise_guid().to_vec()));
+        assert_eq!(
+            format_wwise_guid(test_wwise_guid()),
+            "{00112233-4455-6677-8899-AABBCCDDEEFF}"
+        );
+        let display = invoke_wwise(Some(Arc::clone(&resolver)), HandlerPhase::Display, &value)?;
+        assert!(matches!(
+            display,
+            HandlerOutput::Text(text)
+                if text
+                    == "Play_Test {00112233-4455-6677-8899-AABBCCDDEEFF} \
+                        \"\\Events\\Default Work Unit\\Play_Test_With_A_Long_Object_Path_123456789\""
+        ));
+        let summary = invoke_wwise(Some(Arc::clone(&resolver)), HandlerPhase::Summary, &value)?;
+        assert!(matches!(
+            summary,
+            HandlerOutput::Text(text) if text == "Play_Test"
+        ));
+        let HandlerOutput::Text(edit_value) =
+            invoke_wwise(Some(resolver), HandlerPhase::EditValue, &value)?
+        else {
+            return Err(wwise_guid_error("edit formatter did not return text"));
+        };
+        let quoted_path = edit_value
+            .split('"')
+            .nth(1)
+            .ok_or_else(|| wwise_guid_error("edit formatter omitted object path"))?;
+        assert_eq!(quoted_path.chars().count(), 64);
+        assert!(quoted_path.ends_with("..."));
+        Ok(())
+    }
+
+    /// Extracts canonical GUID text from xEdit's decorated editable value.
+    #[test]
+    fn wwise_guid_edit_parser_round_trips_binary_value() -> Result<()> {
+        let input = FieldValue::String(std::borrow::Cow::Borrowed(
+            "Play_Test {00112233-4455-6677-8899-AABBCCDDEEFF} \"\\Events\\Play_Test\"",
+        ));
+        let output = invoke_wwise(None, HandlerPhase::ParseEditValue, &input)?;
+        assert!(matches!(
+            output,
+            HandlerOutput::Value(FieldValue::Bytes(value))
+                if value.as_ref() == test_wwise_guid()
+        ));
+        assert_eq!(parse_wwise_guid("")?, [0; 16]);
+        Ok(())
+    }
+
     /// Mirrors xEdit's model-info header expansion and dependent count updates.
     #[test]
     fn model_info_after_set_updates_only_defined_header_counts() -> Result<()> {
@@ -1095,5 +1380,47 @@ mod tests {
                 message: "test formatter returned a non-text result".to_owned(),
             }),
         }
+    }
+
+    fn invoke_wwise(
+        resolver: Option<Arc<dyn WwiseGuidResolver>>,
+        phase: HandlerPhase,
+        value: &FieldValue<'static>,
+    ) -> Result<HandlerOutput> {
+        let binding = CallbackBinding {
+            path: "TEST/Guid".to_owned(),
+            callback_id: "def.value_transform".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-wwise-guid".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "format.wwise_guid".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        WwiseGuidFormatter { resolver }.invoke(HandlerInvocation {
+            context: HandlerContext {
+                binding: &binding,
+                record_signature: Signature(*b"TEST"),
+                form_id: FormId::NULL,
+                form_version: 0,
+                game: SchemaGame::Starfield,
+                configuration: match &binding.implementation {
+                    CallbackImplementation::BuiltIn { operation } => &operation.configuration,
+                    _ => unreachable!("test binding is built-in"),
+                },
+            },
+            phase,
+            value: Some(value),
+        })
+    }
+
+    const fn test_wwise_guid() -> [u8; 16] {
+        [
+            0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF,
+        ]
     }
 }

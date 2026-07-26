@@ -7,6 +7,8 @@ use std::borrow::Cow;
 use bethkit_core::{FormId, Signature};
 use bethkit_schema::SchemaNodeId;
 
+use crate::{Result, SemanticError};
+
 /// Half-open byte range inside a subrecord payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ByteSpan {
@@ -202,6 +204,34 @@ pub enum OwnedFieldValue {
     Struct(Vec<OwnedFieldValue>),
     /// Homogeneous array values.
     Array(Vec<OwnedFieldValue>),
+}
+
+pub(crate) fn handler_to_owned_value(
+    value: FieldValue<'static>,
+    path: &str,
+) -> Result<OwnedFieldValue> {
+    match value {
+        FieldValue::Int(value) => Ok(OwnedFieldValue::Int(value)),
+        FieldValue::UInt(value) => Ok(OwnedFieldValue::UInt(value)),
+        FieldValue::Float(value) => Ok(OwnedFieldValue::Float(value)),
+        FieldValue::String(value) => Ok(OwnedFieldValue::String(value.into_owned())),
+        FieldValue::FormId { value, .. } => Ok(OwnedFieldValue::FormId(value)),
+        FieldValue::Bytes(value) => Ok(OwnedFieldValue::Bytes(value.into_owned())),
+        FieldValue::Array(values) => values
+            .into_iter()
+            .map(|value| handler_to_owned_value(value, path))
+            .collect::<Result<Vec<_>>>()
+            .map(OwnedFieldValue::Array),
+        FieldValue::Struct(values) => values
+            .into_iter()
+            .map(|value| handler_to_owned_value(value.value, path))
+            .collect::<Result<Vec<_>>>()
+            .map(OwnedFieldValue::Struct),
+        _ => Err(SemanticError::Handler {
+            handler: path.to_owned(),
+            message: "handler returned a value unsupported by the editor".to_owned(),
+        }),
+    }
 }
 
 pub(crate) fn float_from_raw(value: f64, scale: f64, digits: i32) -> f64 {
