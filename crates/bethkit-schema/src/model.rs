@@ -337,6 +337,11 @@ pub struct StringType {
     /// Optional structural terminator byte following the complete string representation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trailing_terminator: Option<u8>,
+    /// Values accepted by an xEdit string-enumeration formatter.
+    ///
+    /// An empty list means that the string is unrestricted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_values: Vec<String>,
 }
 
 /// Length prefix stored before a variable-sized string.

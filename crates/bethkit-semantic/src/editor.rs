@@ -864,6 +864,7 @@ mod tests {
                 fixed_length: None,
                 length_prefix: None,
                 trailing_terminator: None,
+                allowed_values: Vec::new(),
             },
         }
     }
@@ -907,6 +908,7 @@ mod tests {
                     offset: 2,
                 }),
                 trailing_terminator: Some(b'|'),
+                allowed_values: Vec::new(),
             },
         };
 
@@ -931,6 +933,7 @@ mod tests {
                 fixed_length: None,
                 length_prefix: None,
                 trailing_terminator: Some(b'|'),
+                allowed_values: Vec::new(),
             },
         };
 

@@ -6,7 +6,10 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use bethkit_core::Record;
-use bethkit_schema::{CallbackImplementation, ConflictPriority, SchemaPackage, SchemaRegistry};
+use bethkit_schema::{
+    CallbackImplementation, ConflictPriority, PrimitiveType, SchemaNodeKind, SchemaPackage,
+    SchemaRegistry,
+};
 
 use crate::{value::handler_to_owned_value, OwnedFieldValue};
 use crate::{
@@ -206,8 +209,11 @@ impl SemanticContext {
         value: &FieldValue<'_>,
         format: ValueFormat,
     ) -> Result<Option<String>> {
-        let handler_value = value.to_handler_value();
-        let mut formatted = None;
+        let mut handler_value = value.to_handler_value();
+        let mut formatted = self.format_string_enumeration(record, path, value, format);
+        if let Some(text) = &formatted {
+            handler_value = FieldValue::String(Cow::Owned(text.clone()));
+        }
         for binding in self
             .registry
             .package()
@@ -229,22 +235,22 @@ impl SemanticContext {
             ) {
                 continue;
             }
-            formatted = Some(
-                match self.handlers.invoke(
-                    binding,
-                    self.handler_record(record),
-                    format.into(),
-                    Some(&handler_value),
-                )? {
-                    HandlerOutput::Text(value) => value,
-                    _ => {
-                        return Err(SemanticError::Handler {
-                            handler: binding.callback_id.clone(),
-                            message: "value formatter returned a non-text result".to_owned(),
-                        });
-                    }
-                },
-            );
+            let text = match self.handlers.invoke(
+                binding,
+                self.handler_record(record),
+                format.into(),
+                Some(&handler_value),
+            )? {
+                HandlerOutput::Text(value) => value,
+                _ => {
+                    return Err(SemanticError::Handler {
+                        handler: binding.callback_id.clone(),
+                        message: "value formatter returned a non-text result".to_owned(),
+                    });
+                }
+            };
+            handler_value = FieldValue::String(Cow::Owned(text.clone()));
+            formatted = Some(text);
         }
         Ok(formatted)
     }
@@ -264,7 +270,9 @@ impl SemanticContext {
         text: &str,
     ) -> Result<Option<OwnedFieldValue>> {
         let input = FieldValue::String(Cow::Owned(text.to_owned()));
-        let mut parsed = None;
+        let mut parsed = self
+            .string_enumeration(record, path)
+            .map(|_| OwnedFieldValue::String(text.to_owned()));
         for binding in self
             .registry
             .package()
@@ -302,6 +310,34 @@ impl SemanticContext {
             }
         }
         Ok(parsed)
+    }
+
+    fn string_enumeration<'a>(&'a self, record: &Record, path: &str) -> Option<&'a [String]> {
+        let node = self.registry.get_node(record.header.signature, path)?;
+        match &node.kind {
+            SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::String { string },
+            } if !string.allowed_values.is_empty() => Some(&string.allowed_values),
+            _ => None,
+        }
+    }
+
+    fn format_string_enumeration(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+        format: ValueFormat,
+    ) -> Option<String> {
+        let allowed_values = self.string_enumeration(record, path)?;
+        let FieldValue::String(value) = value else {
+            return None;
+        };
+        Some(format_string_enumeration_value(
+            allowed_values,
+            value,
+            format,
+        ))
     }
 
     /// Returns whether xEdit allows the value at an exact schema path to be removed.
@@ -401,5 +437,56 @@ impl SemanticContext {
             record.header.form_version,
             self.registry.package().manifest().game,
         )
+    }
+}
+
+fn format_string_enumeration_value(
+    allowed_values: &[String],
+    value: &str,
+    format: ValueFormat,
+) -> String {
+    match format {
+        ValueFormat::Display | ValueFormat::Summary
+            if !value.is_empty() && !allowed_values.iter().any(|allowed| allowed == value) =>
+        {
+            format!("<Unknown: {value}>")
+        }
+        ValueFormat::SortKey => value.to_uppercase(),
+        ValueFormat::Display
+        | ValueFormat::Summary
+        | ValueFormat::EditValue
+        | ValueFormat::NativeValue => value.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Matches xEdit's string-enumeration behavior across presentation modes.
+    #[test]
+    fn string_enumeration_formats_known_and_unknown_values() {
+        let allowed = vec!["BGSActivityTracker".to_owned()];
+
+        assert_eq!(
+            format_string_enumeration_value(&allowed, "BGSActivityTracker", ValueFormat::Display),
+            "BGSActivityTracker"
+        );
+        assert_eq!(
+            format_string_enumeration_value(&allowed, "FutureComponent", ValueFormat::Summary),
+            "<Unknown: FutureComponent>"
+        );
+        assert_eq!(
+            format_string_enumeration_value(&allowed, "FutureComponent", ValueFormat::EditValue),
+            "FutureComponent"
+        );
+        assert_eq!(
+            format_string_enumeration_value(&allowed, "mixedCase", ValueFormat::SortKey),
+            "MIXEDCASE"
+        );
+        assert_eq!(
+            format_string_enumeration_value(&allowed, "", ValueFormat::Display),
+            ""
+        );
     }
 }

@@ -37,6 +37,8 @@ pub enum DiagnosticCode {
     InvalidFormIdTarget,
     /// An xEdit semantic validation callback rejected a value.
     CallbackValidation,
+    /// A string is not present in its schema-declared xEdit enumeration.
+    InvalidStringEnumeration,
     /// A subrecord is unknown to the current schema.
     UnknownSubrecord,
 }

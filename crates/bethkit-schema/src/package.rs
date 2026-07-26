@@ -605,6 +605,22 @@ fn validate_node(
                 )));
             }
         }
+        let mut allowed_values = BTreeSet::new();
+        for value in &string.allowed_values {
+            validate_string(value, limits)?;
+            if value.is_empty() {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "string enumeration contains an empty value at {}",
+                    node.path
+                )));
+            }
+            if !allowed_values.insert(value) {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "string enumeration contains duplicate value {value:?} at {}",
+                    node.path
+                )));
+            }
+        }
     }
     if let SchemaNodeKind::Array {
         count: crate::ArrayCount::Prefixed { integer },

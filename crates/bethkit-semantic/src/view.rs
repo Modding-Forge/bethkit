@@ -350,6 +350,37 @@ impl<'context, 'record> RecordView<'context, 'record> {
         span: ByteSpan,
         report: &mut ValidationReport,
     ) {
+        let node = self
+            .context
+            .registry()
+            .get_node(self.record.header.signature, path);
+        if let (
+            Some(SchemaNode {
+                kind:
+                    SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::String { string },
+                    },
+                ..
+            }),
+            FieldValue::String(value),
+        ) = (node, value)
+        {
+            if !value.is_empty()
+                && !string.allowed_values.is_empty()
+                && !string
+                    .allowed_values
+                    .iter()
+                    .any(|allowed| allowed == value.as_ref())
+            {
+                report.push(self.diagnostic(
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::InvalidStringEnumeration,
+                    format!("<Unknown: {value}>"),
+                    node,
+                    Some(span),
+                ));
+            }
+        }
         for binding in self
             .context
             .registry()
@@ -1211,6 +1242,7 @@ mod tests {
             fixed_length: None,
             length_prefix: None,
             trailing_terminator: None,
+            allowed_values: Vec::new(),
         };
 
         let value = decode_string(&string, b"Gr\xfc\xdfe\0ignored", false, "TEST")
@@ -1231,6 +1263,7 @@ mod tests {
             fixed_length: None,
             length_prefix: None,
             trailing_terminator: None,
+            allowed_values: Vec::new(),
         };
 
         let value =
@@ -1254,6 +1287,7 @@ mod tests {
                 offset: 2,
             }),
             trailing_terminator: Some(b'|'),
+            allowed_values: Vec::new(),
         };
 
         let value = decode_string(&string, b"\x03\0abc|", false, "TEST")
@@ -1274,6 +1308,7 @@ mod tests {
             fixed_length: None,
             length_prefix: None,
             trailing_terminator: Some(b'|'),
+            allowed_values: Vec::new(),
         };
 
         let bytes = 0x1234_5678_u32.to_le_bytes();
