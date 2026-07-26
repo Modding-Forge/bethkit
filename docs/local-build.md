@@ -77,8 +77,11 @@ disabled command-line compiler:
 ```
 
 Open
-`target\xedit-source\xDump.dproj` in Delphi, select **Release** and **Win32**,
-build the project, and finish artifact verification with:
+the generated `project` path printed by the helper (normally
+`target\xedit-source\xDump.Release.dproj`) in Delphi. It has an isolated project
+identity and is pinned to **Release** and **Win32**, preventing Delphi from
+restoring a stale Debug selection. Build the project and finish artifact
+verification with:
 
 ```powershell
 .\scripts\Build-XEditExporter.ps1 -UseExistingIdeBuild

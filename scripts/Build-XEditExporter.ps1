@@ -280,9 +280,81 @@ $buildInfo = @"
 $projectPath = Join-Path $WorktreeDirectory.FullName 'xDump.dproj'
 $expectedExecutable = Join-Path $WorktreeDirectory.FullName 'Build\xDump.exe'
 if ($PrepareOnly) {
+    $ideProjectPath = Join-Path (
+        $WorktreeDirectory.FullName
+    ) "xDump.$Configuration.dproj"
+    [xml] $ideProject = [System.IO.File]::ReadAllText($projectPath)
+    $namespace = [System.Xml.XmlNamespaceManager]::new(
+        $ideProject.NameTable
+    )
+    $namespace.AddNamespace(
+        'msb',
+        'http://schemas.microsoft.com/developer/msbuild/2003'
+    )
+    $properties = $ideProject.SelectSingleNode(
+        '/msb:Project/msb:PropertyGroup[msb:Base="True"]',
+        $namespace
+    )
+    if ($null -eq $properties) {
+        throw 'Could not find the base xDump project properties'
+    }
+    $configNode = $properties.SelectSingleNode('msb:Config', $namespace)
+    $platformNode = $properties.SelectSingleNode(
+        'msb:Platform',
+        $namespace
+    )
+    $projectGuidNode = $properties.SelectSingleNode(
+        'msb:ProjectGuid',
+        $namespace
+    )
+    if (
+        $null -eq $configNode -or
+        $null -eq $platformNode -or
+        $null -eq $projectGuidNode
+    ) {
+        throw 'Could not find the configurable xDump project properties'
+    }
+    $configNode.InnerText = $Configuration
+    $platformNode.InnerText = $Platform
+    $projectGuidNode.InnerText = if ($Configuration -eq 'Release') {
+        '{A4F76125-C0E0-4B03-B641-01392E5528D6}'
+    }
+    else {
+        '{BF10C4DA-25EB-45D4-96C6-81868B1F9E95}'
+    }
+    $xmlSettings = [System.Xml.XmlWriterSettings]::new()
+    $xmlSettings.Encoding = [System.Text.UTF8Encoding]::new($false)
+    $xmlSettings.Indent = $true
+    $xmlSettings.NewLineChars = "`n"
+    $xmlSettings.NewLineHandling = 'Replace'
+    $xmlWriter = [System.Xml.XmlWriter]::Create(
+        $ideProjectPath,
+        $xmlSettings
+    )
+    try {
+        $ideProject.Save($xmlWriter)
+    }
+    finally {
+        $xmlWriter.Dispose()
+    }
+
+    $ideUserProject = @"
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Config Condition="'`$(Config)'==''">$Configuration</Config>
+    <Platform Condition="'`$(Platform)'==''">$Platform</Platform>
+  </PropertyGroup>
+</Project>
+"@
+    [System.IO.File]::WriteAllText(
+        "$ideProjectPath.user",
+        $ideUserProject.Replace("`r`n", "`n"),
+        [System.Text.UTF8Encoding]::new($false)
+    )
+
     [pscustomobject] @{
         prepared = $true
-        project = $projectPath
+        project = $ideProjectPath
         expected_executable = $expectedExecutable
         exporter_patch_sha256 = $patchSha256
         exporter_build_sha256 = $buildSha256
