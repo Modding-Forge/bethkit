@@ -1,0 +1,83 @@
+diff --git a/xDump.dpr b/xDump.dpr
+index c6a55a2e..b87fb9d0 100644
+--- a/xDump.dpr
++++ b/xDump.dpr
+@@ -25,6 +25,7 @@ uses
+   TypInfo,
+   Classes,
+   SysUtils,
++  System.Hash,
+   Windows,
+   Registry,
+   IniFiles,
+@@ -61,6 +62,8 @@ uses
+ const
+   IMAGE_FILE_LARGE_ADDRESS_AWARE = $0020;
+ 
++{$I xDump\BethkitBuildInfo.inc}
++
+ {$SetPEFlags IMAGE_FILE_LARGE_ADDRESS_AWARE}
+ 
+ var
+@@ -86,6 +89,35 @@ begin
+     WriteLn(ErrOutput, FormatDateTime('<hh:nn:ss.zzz>', Now - StartTime), ' ', aStatus);
+ end;
+ 
++function BethkitHasExactArgument(const aArgument: string): Boolean;
++var
++  lIndex: Integer;
++begin
++  Result := False;
++  for lIndex := 1 to ParamCount do
++    if SameText(ParamStr(lIndex), aArgument) then
++      Exit(True);
++end;
++
++procedure BethkitWriteProvenance;
++var
++  lExecutableHash: string;
++begin
++  lExecutableHash := LowerCase(
++    THashSHA2.GetHashStringFromFile(ParamStr(0), THashSHA2.TSHA2Version.SHA256)
++  );
++  WriteLn(
++    '{"source_tag":"', BETHKIT_XEDIT_SOURCE_TAG,
++    '","source_commit":"', BETHKIT_XEDIT_SOURCE_COMMIT,
++    '","source_archive_sha256":"', BETHKIT_XEDIT_SOURCE_ARCHIVE_SHA256,
++    '","exporter_version":"', BETHKIT_EXPORTER_VERSION,
++    '","exporter_binary_sha256":"', lExecutableHash,
++    '","exporter_patch_sha256":"', BETHKIT_EXPORTER_PATCH_SHA256,
++    '","exporter_build_sha256":"', BETHKIT_EXPORTER_BUILD_SHA256,
++    '"}'
++  );
++end;
++
+ type
+   TExportFormat = (efUESPWiki, efRaw);
+   TwbDefProfile = string;
+@@ -948,6 +980,10 @@ begin
+   {$ELSE}
+   SysUtils.DecimalSeparator := '.';
+   {$IFEND}
++  if BethkitHasExactArgument('--bethkit-provenance') then begin
++    BethkitWriteProvenance;
++    Exit;
++  end;
+   _wbProgressCallback := ReportProgress;
+   wbDontSave := True;
+   wbAllowInternalEdit := False;
+diff --git a/xDump/BethkitBuildInfo.inc b/xDump/BethkitBuildInfo.inc
+new file mode 100644
+index 00000000..0e6cba80
+--- /dev/null
++++ b/xDump/BethkitBuildInfo.inc
+@@ -0,0 +1,9 @@
++  BETHKIT_XEDIT_SOURCE_TAG = 'xedit-4.1.5f';
++  BETHKIT_XEDIT_SOURCE_COMMIT = 'f5c00f3fa3ee39511185515802647246c807f759';
++  BETHKIT_XEDIT_SOURCE_ARCHIVE_SHA256 =
++    '8c89ff9822375cdd0b5183ecb0cda04ae6529a9e8bda7ea78426a43bac13d3e8';
++  BETHKIT_EXPORTER_VERSION = '1';
++  BETHKIT_EXPORTER_PATCH_SHA256 =
++    '0000000000000000000000000000000000000000000000000000000000000000';
++  BETHKIT_EXPORTER_BUILD_SHA256 =
++    '0000000000000000000000000000000000000000000000000000000000000000';

@@ -48,21 +48,30 @@ Bethkit build never invokes or downloads xEdit.
 
 Install:
 
-- [Delphi Community Edition](https://www.embarcadero.com/products/delphi/downloads)
-  or a licensed Delphi 12 installation.
+- A licensed [Delphi 12](https://www.embarcadero.com/products/delphi)
+  Professional or Enterprise installation for automated command-line builds.
+  Delphi Community Edition can build `xDump.dproj` in the IDE, but its license
+  disables the `dcc32`/MSBuild command-line compiler.
 - [Project Magician](https://www.uweraabe.de/Blog/downloads/download-info/project-magician/).
 - [DDevExtensions](https://github.com/DelphiPraxis/DDevExtensions/releases).
 - The additional libraries and setup listed in the
   [official xEdit developer documentation](https://github.com/TES5Edit/TES5Edit#developer-documentation).
 
-Clone [TES5Edit/xEdit](https://github.com/TES5Edit/TES5Edit) and check out the
-revision recorded in `xedit-source.lock`. The current lock is
+The local TES5Edit clone is expected at `..\TES5Edit`. The build helper creates
+and reuses an isolated worktree under `target\xedit-source`, leaving changes in
+the main clone untouched. The current lock is
 `xedit-4.1.5f` at
 `f5c00f3fa3ee39511185515802647246c807f759`.
 
-The provenance-capable exporter patch is not yet accepted in this repository.
-Consequently, local and public schema regeneration remains deliberately
-blocked. Once an audited exporter exists, generate all eleven packages with:
+Build and provenance-check the exporter with:
+
+```powershell
+.\scripts\Build-XEditExporter.ps1
+```
+
+The provenance operation is implemented. Definition-graph export is still
+under development, so complete schema regeneration remains deliberately
+blocked. Once that patch is complete, generate all eleven packages with:
 
 ```powershell
 .\scripts\New-XEditSchemaCatalog.ps1 `
