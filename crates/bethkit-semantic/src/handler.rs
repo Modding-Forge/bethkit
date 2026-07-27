@@ -1197,6 +1197,11 @@ impl SemanticHandler for FormatRgb {
             })?;
         let digits =
             configured_optional_digits(self.id(), invocation.context.configuration, "digits")?;
+        let alpha_digits = configured_optional_digits(
+            self.id(),
+            invocation.context.configuration,
+            "alpha_digits",
+        )?;
         let value = invocation.value.ok_or_else(|| SemanticError::Handler {
             handler: self.id().to_owned(),
             message: "RGB formatter requires a value".to_owned(),
@@ -1205,6 +1210,7 @@ impl SemanticHandler for FormatRgb {
             value,
             include_alpha,
             digits,
+            alpha_digits,
         )?))
     }
 }
@@ -2892,6 +2898,7 @@ fn format_rgb(
     value: &FieldValue<'_>,
     include_alpha: bool,
     digits: Option<usize>,
+    alpha_digits: Option<usize>,
 ) -> Result<String> {
     let FieldValue::Struct(components) = value else {
         return Err(SemanticError::Handler {
@@ -2911,7 +2918,15 @@ fn format_rgb(
     }
     let formatted: Vec<String> = components[..required_components]
         .iter()
-        .map(|component| format_numeric_component("format.rgb", &component.value, digits))
+        .enumerate()
+        .map(|(index, component)| {
+            let component_digits = if index == 3 {
+                alpha_digits.or(digits)
+            } else {
+                digits
+            };
+            format_numeric_component("format.rgb", &component.value, component_digits)
+        })
         .collect::<Result<_>>()?;
     Ok(format!(
         "{}({})",
@@ -3538,11 +3553,18 @@ mod tests {
             component("Red", FieldValue::Float(12.0)),
             component("Green", FieldValue::Float(34.0)),
             component("Blue", FieldValue::Float(56.0)),
-            component("Alpha", FieldValue::Float(78.0)),
+            component("Alpha", FieldValue::Float(0.123_456_7)),
         ]);
 
-        assert_eq!(format_rgb(&rgb, false, None)?, "RGB(12, 34, 56)");
-        assert_eq!(format_rgb(&rgba, true, Some(0))?, "RGBA(12, 34, 56, 78)");
+        assert_eq!(format_rgb(&rgb, false, None, None)?, "RGB(12, 34, 56)");
+        assert_eq!(
+            format_rgb(&rgba, true, Some(0), None)?,
+            "RGBA(12, 34, 56, 0)"
+        );
+        assert_eq!(
+            format_rgb(&rgba, true, Some(0), Some(6))?,
+            "RGBA(12, 34, 56, 0.123457)"
+        );
         Ok(())
     }
 
