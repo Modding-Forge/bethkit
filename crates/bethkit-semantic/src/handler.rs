@@ -2848,18 +2848,7 @@ impl SemanticHandler for IntegerLookupFormatter {
                 .iter()
                 .find(|(_, name)| name.eq_ignore_ascii_case(input))
                 .map(|(value, _)| *value)
-                .map_or_else(
-                    || {
-                        input
-                            .trim()
-                            .parse::<i64>()
-                            .map_err(|error| SemanticError::Handler {
-                                handler: self.id().to_owned(),
-                                message: format!("invalid integer edit value {input:?}: {error}"),
-                            })
-                    },
-                    Ok,
-                )?;
+                .map_or_else(|| parse_delphi_integer(input, self.id()), Ok)?;
             return Ok(HandlerOutput::Value(FieldValue::Int(value)));
         }
 
@@ -2928,6 +2917,22 @@ impl SemanticHandler for IntegerLookupFormatter {
                 format!("{:0width$X}", value as u64)
             }
             HandlerPhase::NativeValue => String::new(),
+            HandlerPhase::Validation => name.map_or_else(
+                || match configuration_string(
+                    invocation.context.configuration,
+                    "unknown_validation",
+                    self.id(),
+                ) {
+                    Ok("angle") => Ok(format!("<Unknown: {value}>")),
+                    Ok("none") => Ok(String::new()),
+                    Ok(policy) => Err(SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: format!("unsupported unknown validation policy {policy:?}"),
+                    }),
+                    Err(error) => Err(error),
+                },
+                |_| Ok(String::new()),
+            )?,
             _ => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Text(text))
@@ -6299,6 +6304,7 @@ mod tests {
                         ],
                         "unknown_display": "angle",
                         "unknown_summary": "decimal",
+                        "unknown_validation": "angle",
                         "sort_hex_width": 8
                     }),
                 },
@@ -6362,6 +6368,26 @@ mod tests {
             )?,
             HandlerOutput::Text(text) if text.is_empty()
         ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::Validation,
+                Some(&known),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text.is_empty()
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::Validation,
+                Some(&unknown),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "<Unknown: 9>"
+        ));
 
         let named_edit = FieldValue::String(Cow::Borrowed("getanswer"));
         assert!(matches!(
@@ -6381,6 +6407,17 @@ mod tests {
                 record,
                 HandlerPhase::ParseEditValue,
                 Some(&numeric_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(123))
+        ));
+        let hexadecimal_edit = FieldValue::String(Cow::Borrowed("$7B"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&hexadecimal_edit),
                 None,
             )?,
             HandlerOutput::Value(FieldValue::Int(123))
