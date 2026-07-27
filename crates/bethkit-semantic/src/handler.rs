@@ -773,6 +773,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectStarfieldComponentDat2));
         registry.register(Arc::new(SelectOblivionObmeEfitParameter));
         registry.register(Arc::new(SelectOblivionObmeEfixParameter));
+        registry.register(Arc::new(SelectGameSettingValue));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -3959,6 +3960,8 @@ struct SelectOblivionObmeEfitParameter;
 
 struct SelectOblivionObmeEfixParameter;
 
+struct SelectGameSettingValue;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4278,6 +4281,32 @@ fn select_oblivion_obme_parameter(
         .copied()
         .unwrap_or_default();
     Ok(HandlerOutput::Integer(i64::from(selected)))
+}
+
+impl SemanticHandler for SelectGameSettingValue {
+    fn id(&self) -> &'static str {
+        "select.game_setting_value"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let editor_id =
+            source_subrecord_text(&invocation, Signature(*b"EDID"), self.id())?.unwrap_or_default();
+        let selected = match editor_id.as_bytes().first() {
+            Some(b's') => 0,
+            Some(b'f') => 2,
+            Some(b'b') => 3,
+            Some(b'u') => 4,
+            _ => 1,
+        };
+        Ok(HandlerOutput::Integer(selected))
+    }
 }
 
 fn source_subrecord_text<'a>(
@@ -9272,6 +9301,54 @@ mod tests {
                     HandlerSubrecordSource::ReadOnly {
                         record: &record,
                         index: source_index,
+                    },
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
+        Ok(())
+    }
+
+    /// Selects GMST value layouts from the first editor-ID character.
+    #[test]
+    fn game_setting_value_selector_matches_all_xedit_type_codes() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.game_setting_value",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"GMST"), FormId::NULL, 0, SchemaGame::Fallout76);
+
+        // when / then
+        for (editor_id, expected) in [
+            ("sSetting", 0_i64),
+            ("iSetting", 1),
+            ("fSetting", 2),
+            ("bSetting", 3),
+            ("uSetting", 4),
+            ("xSetting", 1),
+            ("", 1),
+        ] {
+            let record = test_record(
+                *b"GMST",
+                &[
+                    (*b"EDID", [editor_id.as_bytes(), &[0]].concat()),
+                    (*b"DATA", vec![0; 4]),
+                ],
+            )?;
+            assert!(matches!(
+                handlers.invoke_with_subrecord(
+                    &binding,
+                    context,
+                    HandlerSubrecordSource::ReadOnly {
+                        record: &record,
+                        index: 1,
                     },
                     HandlerPhase::UnionSelection,
                     None,
