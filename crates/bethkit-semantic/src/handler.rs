@@ -278,6 +278,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(CtdaTypeFormatter));
+        registry.register(Arc::new(IntegerLookupFormatter));
         registry.register(Arc::new(InvalidModelInfoValidation));
         registry.register(Arc::new(WwiseGuidFormatter { resolver: None }));
         registry
@@ -966,6 +967,182 @@ impl SemanticHandler for CtdaTypeFormatter {
         };
         Ok(HandlerOutput::Text(text))
     }
+}
+
+struct IntegerLookupFormatter;
+
+impl SemanticHandler for IntegerLookupFormatter {
+    fn id(&self) -> &'static str {
+        "format.integer_lookup"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let values = integer_lookup_values(invocation.context.configuration, self.id())?;
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let FieldValue::String(input) =
+                invocation.value.ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "integer lookup edit parsing requires text".to_owned(),
+                })?
+            else {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "integer lookup edit parsing requires text".to_owned(),
+                });
+            };
+            let value = values
+                .iter()
+                .find(|(_, name)| name.eq_ignore_ascii_case(input))
+                .map(|(value, _)| *value)
+                .map_or_else(
+                    || {
+                        input
+                            .trim()
+                            .parse::<i64>()
+                            .map_err(|error| SemanticError::Handler {
+                                handler: self.id().to_owned(),
+                                message: format!("invalid integer edit value {input:?}: {error}"),
+                            })
+                    },
+                    Ok,
+                )?;
+            return Ok(HandlerOutput::Value(FieldValue::Int(value)));
+        }
+
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "integer lookup formatting requires an integer value".to_owned(),
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "integer lookup value exceeds i64".to_owned(),
+        })?;
+        let name = values
+            .iter()
+            .find(|(candidate, _)| *candidate == value)
+            .map(|(_, name)| *name);
+        let text = match invocation.phase {
+            HandlerPhase::Display => name.map_or_else(
+                || match configuration_string(
+                    invocation.context.configuration,
+                    "unknown_display",
+                    self.id(),
+                ) {
+                    Ok("angle") => Ok(format!("<Unknown: {value}>")),
+                    Ok(policy) => Err(SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: format!("unsupported unknown display policy {policy:?}"),
+                    }),
+                    Err(error) => Err(error),
+                },
+                |name| Ok(name.to_owned()),
+            )?,
+            HandlerPhase::Summary => name.map_or_else(
+                || match configuration_string(
+                    invocation.context.configuration,
+                    "unknown_summary",
+                    self.id(),
+                ) {
+                    Ok("decimal") => Ok(value.to_string()),
+                    Ok("angle") => Ok(format!("<Unknown: {value}>")),
+                    Ok(policy) => Err(SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: format!("unsupported unknown summary policy {policy:?}"),
+                    }),
+                    Err(error) => Err(error),
+                },
+                |name| Ok(name.to_owned()),
+            )?,
+            HandlerPhase::EditValue => name.map_or_else(|| value.to_string(), str::to_owned),
+            HandlerPhase::SortKey => {
+                let width = invocation
+                    .context
+                    .configuration
+                    .get("sort_hex_width")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: "integer lookup requires sort_hex_width".to_owned(),
+                    })?;
+                let width = usize::try_from(width).map_err(|_| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "integer lookup sort width exceeds usize".to_owned(),
+                })?;
+                format!("{:0width$X}", value as u64)
+            }
+            HandlerPhase::NativeValue => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+fn integer_lookup_values<'a>(
+    configuration: &'a serde_json::Value,
+    handler: &str,
+) -> Result<Vec<(i64, &'a str)>> {
+    let values = configuration
+        .get("values")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "integer lookup requires a values array".to_owned(),
+        })?;
+    let mut output = Vec::with_capacity(values.len());
+    for entry in values {
+        let value = entry
+            .get("value")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: "integer lookup value must be an i64".to_owned(),
+            })?;
+        let name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: "integer lookup name must not be empty".to_owned(),
+            })?;
+        if output.iter().any(|(existing_value, existing_name)| {
+            *existing_value == value || *existing_name == name
+        }) {
+            return Err(SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: "integer lookup contains duplicate values or names".to_owned(),
+            });
+        }
+        output.push((value, name));
+    }
+    if output.is_empty() {
+        return Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "integer lookup values must not be empty".to_owned(),
+        });
+    }
+    Ok(output)
+}
+
+fn configuration_string<'a>(
+    configuration: &'a serde_json::Value,
+    key: &str,
+    handler: &str,
+) -> Result<&'a str> {
+    configuration
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("integer lookup requires {key}"),
+        })
 }
 
 fn format_ctda_type_display(value: u64, legacy: bool) -> String {
@@ -1857,6 +2034,114 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::UInt(0xA7))
+        ));
+        Ok(())
+    }
+
+    /// Preserves xEdit's runtime integer name table and unknown-value behavior.
+    #[test]
+    fn integer_lookup_formatter_uses_materialized_edit_values() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/value".to_owned(),
+            callback_id: "integer.formatter".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-integer-lookup".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "format.integer_lookup".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "values": [
+                            { "value": 7, "name": "GetLucky" },
+                            { "value": 42, "name": "GetAnswer" }
+                        ],
+                        "unknown_display": "angle",
+                        "unknown_summary": "decimal",
+                        "sort_hex_width": 8
+                    }),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let known = FieldValue::Enumeration {
+            value: 42,
+            name: Some("GetAnswer".to_owned()),
+        };
+        for phase in [
+            HandlerPhase::Display,
+            HandlerPhase::Summary,
+            HandlerPhase::EditValue,
+        ] {
+            assert!(matches!(
+                handlers.invoke(&binding, record, phase, Some(&known), None)?,
+                HandlerOutput::Text(text) if text == "GetAnswer"
+            ));
+        }
+        let unknown = FieldValue::Int(9);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::Display,
+                Some(&unknown),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "<Unknown: 9>"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::Summary,
+                Some(&unknown),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "9"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::SortKey,
+                Some(&unknown),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "00000009"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::NativeValue,
+                Some(&unknown),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text.is_empty()
+        ));
+
+        let named_edit = FieldValue::String(Cow::Borrowed("getanswer"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&named_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(42))
+        ));
+        let numeric_edit = FieldValue::String(Cow::Borrowed("123"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&numeric_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(123))
         ));
         Ok(())
     }
