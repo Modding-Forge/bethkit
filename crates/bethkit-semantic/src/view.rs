@@ -537,19 +537,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 Ok(FieldValue::Struct(values))
             }
             SchemaNodeKind::Array { element, count } => {
-                let element_size: usize =
-                    fixed_node_size(element).ok_or_else(|| SemanticError::Decode {
-                        path: node.path.clone(),
-                        message: "variable-size array requires a custom decoder".to_owned(),
-                    })?;
-                if element_size == 0 {
-                    return Err(SemanticError::Decode {
-                        path: node.path.clone(),
-                        message: "array element size must not be zero".to_owned(),
-                    });
-                }
-                let (prefix_size, element_count): (usize, usize) = match count {
-                    ArrayCount::Fixed { count } => (0, *count as usize),
+                let (prefix_size, element_count): (usize, Option<usize>) = match count {
+                    ArrayCount::Fixed { count } => (0, Some(*count as usize)),
                     ArrayCount::Prefixed { integer } => {
                         let count: u64 = decode_unsigned_integer(*integer, current, &node.path)?;
                         let count: usize =
@@ -557,9 +546,9 @@ impl<'context, 'record> RecordView<'context, 'record> {
                                 path: node.path.clone(),
                                 message: "array count exceeds platform size".to_owned(),
                             })?;
-                        (integer.width as usize, count)
+                        (integer.width as usize, Some(count))
                     }
-                    ArrayCount::Remainder => (0, current.len() / element_size),
+                    ArrayCount::Remainder => (0, None),
                     ArrayCount::Expression { expression } => {
                         let context = EvalContext {
                             payload,
@@ -581,35 +570,69 @@ impl<'context, 'record> RecordView<'context, 'record> {
                                 path: node.path.clone(),
                                 message: "array count exceeds platform size".to_owned(),
                             })?;
-                        (0, count)
+                        (0, Some(count))
                     }
                 };
-                let expected: usize = element_count
-                    .checked_mul(element_size)
-                    .and_then(|size| size.checked_add(prefix_size))
-                    .ok_or_else(|| SemanticError::Decode {
-                        path: node.path.clone(),
-                        message: "array byte length overflowed".to_owned(),
-                    })?;
-                if expected != current.len() {
+                if prefix_size > current.len() {
                     return Err(SemanticError::Decode {
                         path: node.path.clone(),
                         message: format!(
-                            "array expects {expected} bytes, payload has {}",
+                            "array prefix needs {prefix_size} bytes, payload has {}",
                             current.len()
                         ),
                     });
                 }
-                let mut values: Vec<FieldValue<'a>> = Vec::with_capacity(element_count);
-                for index in 0..element_count {
-                    let start: usize = prefix_size + index * element_size;
-                    let end: usize = start + element_size;
+                let mut values: Vec<FieldValue<'a>> =
+                    Vec::with_capacity(element_count.unwrap_or_default());
+                let mut cursor = prefix_size;
+                while element_count.is_none_or(|count| values.len() < count) {
+                    if cursor == current.len() && element_count.is_none() {
+                        break;
+                    }
+                    let remaining = current.get(cursor..).ok_or_else(|| SemanticError::Decode {
+                        path: node.path.clone(),
+                        message: "array cursor exceeded payload".to_owned(),
+                    })?;
+                    let consumed = node_data_size(element, remaining, self.localized)?;
+                    if consumed == 0 {
+                        return Err(SemanticError::Decode {
+                            path: element.path.clone(),
+                            message: "array element consumed no bytes".to_owned(),
+                        });
+                    }
+                    let end =
+                        cursor
+                            .checked_add(consumed)
+                            .ok_or_else(|| SemanticError::Decode {
+                                path: node.path.clone(),
+                                message: "array cursor overflowed".to_owned(),
+                            })?;
+                    let element_data =
+                        current
+                            .get(cursor..end)
+                            .ok_or_else(|| SemanticError::Decode {
+                                path: element.path.clone(),
+                                message: format!(
+                                    "array element needs {consumed} bytes, only {} remain",
+                                    remaining.len()
+                                ),
+                            })?;
                     values.push(self.decode_node(
                         element,
                         payload,
-                        &current[start..end],
-                        offset + start,
+                        element_data,
+                        offset + cursor,
                     )?);
+                    cursor = end;
+                }
+                if cursor != current.len() {
+                    return Err(SemanticError::Decode {
+                        path: node.path.clone(),
+                        message: format!(
+                            "{} array payload bytes were not consumed",
+                            current.len().saturating_sub(cursor)
+                        ),
+                    });
                 }
                 Ok(FieldValue::Array(values))
             }
@@ -1088,69 +1111,124 @@ fn read_string_length(width: u8, data: &[u8], path: &str) -> Result<usize> {
 }
 
 fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usize> {
-    if let SchemaNodeKind::Array {
-        element,
-        count: ArrayCount::Prefixed { integer },
-    } = &node.kind
-    {
-        let element_size: usize =
-            fixed_node_size(element).ok_or_else(|| SemanticError::Decode {
-                path: node.path.clone(),
-                message: "prefixed array element must have a fixed size".to_owned(),
-            })?;
-        let count: usize = usize::try_from(decode_unsigned_integer(*integer, data, &node.path)?)
-            .map_err(|_| SemanticError::Decode {
-                path: node.path.clone(),
-                message: "array count exceeds platform size".to_owned(),
-            })?;
-        return count
-            .checked_mul(element_size)
-            .and_then(|size| size.checked_add(integer.width as usize))
-            .ok_or_else(|| SemanticError::Decode {
-                path: node.path.clone(),
-                message: "array byte length overflowed".to_owned(),
-            });
+    match &node.kind {
+        SchemaNodeKind::Primitive {
+            primitive: PrimitiveType::String { string },
+        } => {
+            if is_localized_string(string) && localized {
+                return Ok(4);
+            }
+            let trailing: usize = usize::from(string.trailing_terminator.is_some());
+            if let Some(prefix) = string.length_prefix {
+                let length: usize = read_string_length(prefix.width, data, &node.path)?;
+                return (prefix.offset as usize)
+                    .checked_add(length)
+                    .and_then(|value| value.checked_add(trailing))
+                    .ok_or_else(|| SemanticError::Decode {
+                        path: node.path.clone(),
+                        message: "string size overflowed".to_owned(),
+                    });
+            }
+            if let Some(length) = string.fixed_length {
+                return (length as usize).checked_add(trailing).ok_or_else(|| {
+                    SemanticError::Decode {
+                        path: node.path.clone(),
+                        message: "string size overflowed".to_owned(),
+                    }
+                });
+            }
+            if string.zero_terminated {
+                let body_length: usize = data
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .map_or(data.len(), |index| index + 1);
+                return body_length
+                    .checked_add(trailing)
+                    .ok_or_else(|| SemanticError::Decode {
+                        path: node.path.clone(),
+                        message: "string size overflowed".to_owned(),
+                    });
+            }
+            Ok(data.len())
+        }
+        SchemaNodeKind::Struct { fields } => {
+            let mut cursor = 0_usize;
+            for field in fields {
+                let remaining = data.get(cursor..).ok_or_else(|| SemanticError::Decode {
+                    path: field.path.clone(),
+                    message: "struct size cursor exceeded payload".to_owned(),
+                })?;
+                let consumed = node_data_size(field, remaining, localized)?;
+                cursor = cursor
+                    .checked_add(consumed)
+                    .ok_or_else(|| SemanticError::Decode {
+                        path: field.path.clone(),
+                        message: "struct size overflowed".to_owned(),
+                    })?;
+                if cursor > data.len() {
+                    return Err(SemanticError::Decode {
+                        path: field.path.clone(),
+                        message: format!(
+                            "field needs {consumed} bytes, only {} remain",
+                            remaining.len()
+                        ),
+                    });
+                }
+            }
+            Ok(cursor)
+        }
+        SchemaNodeKind::Array { element, count } => {
+            let (mut cursor, count) = match count {
+                ArrayCount::Fixed { count } => (0, Some(*count as usize)),
+                ArrayCount::Prefixed { integer } => {
+                    let count =
+                        usize::try_from(decode_unsigned_integer(*integer, data, &node.path)?)
+                            .map_err(|_| SemanticError::Decode {
+                                path: node.path.clone(),
+                                message: "array count exceeds platform size".to_owned(),
+                            })?;
+                    (integer.width as usize, Some(count))
+                }
+                ArrayCount::Remainder => (0, None),
+                ArrayCount::Expression { .. } => return Ok(data.len()),
+            };
+            let mut decoded = 0_usize;
+            while count.is_none_or(|count| decoded < count) {
+                if cursor == data.len() && count.is_none() {
+                    break;
+                }
+                let remaining = data.get(cursor..).ok_or_else(|| SemanticError::Decode {
+                    path: node.path.clone(),
+                    message: "array size cursor exceeded payload".to_owned(),
+                })?;
+                let consumed = node_data_size(element, remaining, localized)?;
+                if consumed == 0 {
+                    return Err(SemanticError::Decode {
+                        path: element.path.clone(),
+                        message: "array element consumed no bytes".to_owned(),
+                    });
+                }
+                cursor = cursor
+                    .checked_add(consumed)
+                    .ok_or_else(|| SemanticError::Decode {
+                        path: node.path.clone(),
+                        message: "array size overflowed".to_owned(),
+                    })?;
+                if cursor > data.len() {
+                    return Err(SemanticError::Decode {
+                        path: element.path.clone(),
+                        message: format!(
+                            "array element needs {consumed} bytes, only {} remain",
+                            remaining.len()
+                        ),
+                    });
+                }
+                decoded += 1;
+            }
+            Ok(cursor)
+        }
+        _ => Ok(fixed_node_size(node).unwrap_or(data.len())),
     }
-    if let SchemaNodeKind::Primitive {
-        primitive: PrimitiveType::String { string },
-    } = &node.kind
-    {
-        if is_localized_string(string) && localized {
-            return Ok(4);
-        }
-        let trailing: usize = usize::from(string.trailing_terminator.is_some());
-        if let Some(prefix) = string.length_prefix {
-            let length: usize = read_string_length(prefix.width, data, &node.path)?;
-            return (prefix.offset as usize)
-                .checked_add(length)
-                .and_then(|value| value.checked_add(trailing))
-                .ok_or_else(|| SemanticError::Decode {
-                    path: node.path.clone(),
-                    message: "string size overflowed".to_owned(),
-                });
-        }
-        if let Some(length) = string.fixed_length {
-            return (length as usize)
-                .checked_add(trailing)
-                .ok_or_else(|| SemanticError::Decode {
-                    path: node.path.clone(),
-                    message: "string size overflowed".to_owned(),
-                });
-        }
-        if string.zero_terminated {
-            let body_length: usize = data
-                .iter()
-                .position(|byte| *byte == 0)
-                .map_or(data.len(), |index| index + 1);
-            return body_length
-                .checked_add(trailing)
-                .ok_or_else(|| SemanticError::Decode {
-                    path: node.path.clone(),
-                    message: "string size overflowed".to_owned(),
-                });
-        }
-    }
-    Ok(fixed_node_size(node).unwrap_or(data.len()))
 }
 
 fn fixed_node_size(node: &SchemaNode) -> Option<usize> {
@@ -1237,6 +1315,91 @@ mod tests {
         };
 
         assert_eq!(node_data_size(&node, b"\x02\x01\0\x02\0tail", false)?, 5);
+        Ok(())
+    }
+
+    /// Walks length-prefixed variable elements instead of consuming the tail.
+    #[test]
+    fn prefixed_array_size_supports_variable_struct_elements(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let byte_order = ByteOrder::LittleEndian;
+        let node = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(1),
+            path: "TEST/items".to_owned(),
+            name: "Items".to_owned(),
+            required: false,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Array {
+                element: Box::new(SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(2),
+                    path: "TEST/items/element".to_owned(),
+                    name: "Item".to_owned(),
+                    required: false,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Struct {
+                        fields: vec![
+                            SchemaNode {
+                                id: bethkit_schema::SchemaNodeId(3),
+                                path: "TEST/items/element/name".to_owned(),
+                                name: "Name".to_owned(),
+                                required: true,
+                                conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Primitive {
+                                    primitive: PrimitiveType::String {
+                                        string: StringType {
+                                            encoding: "utf8".to_owned(),
+                                            localized: false,
+                                            zero_terminated: false,
+                                            fixed_length: None,
+                                            length_prefix: Some(
+                                                bethkit_schema::StringLengthPrefix {
+                                                    width: 1,
+                                                    offset: 1,
+                                                },
+                                            ),
+                                            trailing_terminator: None,
+                                            allowed_values: Vec::new(),
+                                        },
+                                    },
+                                },
+                            },
+                            SchemaNode {
+                                id: bethkit_schema::SchemaNodeId(4),
+                                path: "TEST/items/element/value".to_owned(),
+                                name: "Value".to_owned(),
+                                required: true,
+                                conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Primitive {
+                                    primitive: PrimitiveType::Integer {
+                                        integer: IntegerType {
+                                            width: 2,
+                                            signed: false,
+                                            byte_order,
+                                        },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                }),
+                count: ArrayCount::Prefixed {
+                    integer: IntegerType {
+                        width: 1,
+                        signed: false,
+                        byte_order,
+                    },
+                },
+            },
+        };
+
+        assert_eq!(
+            node_data_size(&node, b"\x02\x03abc\x01\0\x02de\x02\0tail", false)?,
+            12
+        );
         Ok(())
     }
 
