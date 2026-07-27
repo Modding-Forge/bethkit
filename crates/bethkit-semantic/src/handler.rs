@@ -1820,6 +1820,19 @@ impl SemanticHandler for SynchronizeCountAfterSet {
                 handler: self.id().to_owned(),
                 message: "counter synchronization requires counter_required".to_owned(),
             })?;
+        let nested = invocation
+            .context
+            .configuration
+            .get("counter_nested")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if nested {
+            return Ok(HandlerOutput::Mutations(vec![HandlerMutation::Set {
+                path,
+                occurrence: 0,
+                value: OwnedFieldValue::UInt(value),
+            }]));
+        }
         Ok(HandlerOutput::Mutations(vec![
             HandlerMutation::SynchronizeCount {
                 path,
@@ -3478,6 +3491,53 @@ mod tests {
                         value: 3,
                         remove_when_zero: true,
                     }] if path == "TEST/0:Value Count"
+                )
+        ));
+        Ok(())
+    }
+
+    /// Writes array lengths to an integer nested inside a sibling subrecord.
+    #[test]
+    fn synchronize_count_handler_targets_nested_counter_fields() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/1:Animations".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-nested-counter".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.sync_count".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "counter_path": "TEST/0:IDLC/payload/0:Animation Count",
+                        "counter_required": true,
+                        "counter_nested": true
+                    }),
+                },
+            },
+        };
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Fallout3);
+        let values = FieldValue::Array(vec![FieldValue::UInt(1), FieldValue::UInt(2)]);
+
+        let output = SemanticHandlerRegistry::builtin().invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&values),
+            None,
+        )?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::Set {
+                        path,
+                        occurrence: 0,
+                        value: OwnedFieldValue::UInt(2),
+                    }] if path == "TEST/0:IDLC/payload/0:Animation Count"
                 )
         ));
         Ok(())
