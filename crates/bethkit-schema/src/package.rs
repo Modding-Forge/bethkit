@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CallbackBinding, CallbackImplementation, Result, SchemaError, SchemaGame, SchemaManifest,
-    SchemaNode, SchemaNodeId, SchemaNodeKind, SchemaRecord, SchemaSignature, ValidationStatus,
+    CallbackBinding, CallbackImplementation, Expression, Result, SchemaError, SchemaGame,
+    SchemaManifest, SchemaNode, SchemaNodeId, SchemaNodeKind, SchemaRecord, SchemaSignature,
+    ValidationStatus,
 };
 
 /// Magic bytes at the beginning of one `.bkschema` package.
@@ -298,6 +299,7 @@ impl SchemaPackage {
                 &mut node_ids,
                 &mut paths,
             )?;
+            validate_expression_field_order(&record.root, &BTreeSet::new(), limits)?;
         }
         for decoder in &self.manifest.required_decoders {
             if decoder.id.trim().is_empty() {
@@ -747,6 +749,113 @@ fn validate_node(
     Ok(())
 }
 
+fn validate_expression_field_order(
+    node: &SchemaNode,
+    visible_fields: &BTreeSet<String>,
+    limits: &SchemaLoadLimits,
+) -> Result<()> {
+    if let Some(condition) = &node.condition {
+        validate_expression_fields(condition, visible_fields, &node.path, limits)?;
+    }
+    match &node.kind {
+        SchemaNodeKind::Sequence { children } => {
+            for child in children {
+                validate_expression_field_order(child, &BTreeSet::new(), limits)?;
+            }
+        }
+        SchemaNodeKind::Choice { alternatives } => {
+            for alternative in alternatives {
+                validate_expression_field_order(alternative, visible_fields, limits)?;
+            }
+        }
+        SchemaNodeKind::Repeat { child, .. } | SchemaNodeKind::Subrecord { payload: child, .. } => {
+            validate_expression_field_order(child, &BTreeSet::new(), limits)?;
+        }
+        SchemaNodeKind::Compressed { child, .. } | SchemaNodeKind::Terminated { child, .. } => {
+            validate_expression_field_order(child, visible_fields, limits)?;
+        }
+        SchemaNodeKind::Array { element, count } => {
+            if let crate::ArrayCount::Expression { expression } = count {
+                validate_expression_fields(expression, visible_fields, &node.path, limits)?;
+            }
+            validate_expression_field_order(element, &BTreeSet::new(), limits)?;
+        }
+        SchemaNodeKind::Struct { fields } => {
+            let mut local_fields = BTreeSet::new();
+            for field in fields {
+                validate_expression_field_order(field, &local_fields, limits)?;
+                local_fields.insert(field.path.clone());
+            }
+        }
+        SchemaNodeKind::Union { selector, variants } => {
+            if let crate::UnionSelector::Expression(expression) = selector {
+                validate_expression_fields(expression, visible_fields, &node.path, limits)?;
+            }
+            for variant in variants {
+                validate_expression_field_order(variant, visible_fields, limits)?;
+            }
+        }
+        SchemaNodeKind::Custom { .. }
+        | SchemaNodeKind::Primitive { .. }
+        | SchemaNodeKind::Reference { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_expression_fields(
+    expression: &Expression,
+    visible_fields: &BTreeSet<String>,
+    expression_path: &str,
+    limits: &SchemaLoadLimits,
+) -> Result<()> {
+    match expression {
+        Expression::ReadField { path } => {
+            validate_string(path, limits)?;
+            if !visible_fields.contains(path) {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "field expression at {expression_path} references unavailable or later field {path}"
+                )));
+            }
+        }
+        Expression::Equal { left, right }
+        | Expression::NotEqual { left, right }
+        | Expression::LessThan { left, right }
+        | Expression::Add { left, right }
+        | Expression::Subtract { left, right }
+        | Expression::Multiply { left, right }
+        | Expression::Divide { left, right } => {
+            validate_expression_fields(left, visible_fields, expression_path, limits)?;
+            validate_expression_fields(right, visible_fields, expression_path, limits)?;
+        }
+        Expression::BitSet { value, .. }
+        | Expression::Not { value }
+        | Expression::BitCount { value } => {
+            validate_expression_fields(value, visible_fields, expression_path, limits)?;
+        }
+        Expression::And { values } | Expression::Or { values } => {
+            for value in values {
+                validate_expression_fields(value, visible_fields, expression_path, limits)?;
+            }
+        }
+        Expression::Select {
+            condition,
+            if_true,
+            if_false,
+        } => {
+            validate_expression_fields(condition, visible_fields, expression_path, limits)?;
+            validate_expression_fields(if_true, visible_fields, expression_path, limits)?;
+            validate_expression_fields(if_false, visible_fields, expression_path, limits)?;
+        }
+        Expression::Bool { .. }
+        | Expression::Int { .. }
+        | Expression::PayloadLength
+        | Expression::FormVersion
+        | Expression::ReadUnsigned { .. }
+        | Expression::RecordSignature { .. } => {}
+    }
+    Ok(())
+}
+
 fn validate_string(value: &str, limits: &SchemaLoadLimits) -> Result<()> {
     if value.len() > limits.maximum_string_bytes {
         return Err(SchemaError::LimitExceeded(format!(
@@ -762,6 +871,73 @@ fn validate_string(value: &str, limits: &SchemaLoadLimits) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{ByteOrder, IntegerType, PrimitiveType, SchemaNodeKind, UnionSelector};
+
+    /// Rejects field expressions that read a field not yet decoded.
+    #[test]
+    fn field_expressions_require_prior_stable_paths(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let integer = IntegerType {
+            width: 1,
+            signed: false,
+            byte_order: ByteOrder::LittleEndian,
+        };
+        let count_path = "TEST/data/count".to_owned();
+        let node = SchemaNode {
+            id: SchemaNodeId(0),
+            path: "TEST/data".to_owned(),
+            name: "Data".to_owned(),
+            required: true,
+            conflict_priority: crate::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    SchemaNode {
+                        id: SchemaNodeId(1),
+                        path: "TEST/data/items".to_owned(),
+                        name: "Items".to_owned(),
+                        required: true,
+                        conflict_priority: crate::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Array {
+                            element: Box::new(SchemaNode {
+                                id: SchemaNodeId(2),
+                                path: "TEST/data/items/element".to_owned(),
+                                name: "Item".to_owned(),
+                                required: true,
+                                conflict_priority: crate::ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Primitive {
+                                    primitive: PrimitiveType::Integer { integer },
+                                },
+                            }),
+                            count: crate::ArrayCount::Expression {
+                                expression: Expression::ReadField {
+                                    path: count_path.clone(),
+                                },
+                            },
+                        },
+                    },
+                    SchemaNode {
+                        id: SchemaNodeId(3),
+                        path: count_path,
+                        name: "Count".to_owned(),
+                        required: true,
+                        conflict_priority: crate::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::Integer { integer },
+                        },
+                    },
+                ],
+            },
+        };
+
+        let result =
+            validate_expression_field_order(&node, &BTreeSet::new(), &SchemaLoadLimits::default());
+
+        assert!(matches!(result, Err(SchemaError::InvalidGraph(_))));
+        Ok(())
+    }
 
     /// Rejects callback-selected unions without an executable semantic binding.
     #[test]
