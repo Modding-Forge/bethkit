@@ -105,7 +105,12 @@ impl RecordEditor {
         candidate.subrecords[index].data = encoded;
         let changed = self.changed_field_at(&candidate, index)?;
         decoded_values.insert((path.to_owned(), occurrence), decoded);
-        self.apply_mutations_with_values(&mut candidate, &mut decoded_values, mutations)?;
+        self.apply_local_mutations_with_scope(
+            &mut candidate,
+            &mut decoded_values,
+            &changed,
+            mutations,
+        )?;
         self.apply_after_set_callbacks(&mut candidate, &mut decoded_values, &changed)?;
         self.record = candidate;
         self.decoded_values = decoded_values;
@@ -202,7 +207,12 @@ impl RecordEditor {
         let changed = self.changed_field_at(&candidate, insertion_index)?;
         let mut decoded_values = self.decoded_values.clone();
         decoded_values.insert((path.to_owned(), occurrence), decoded);
-        self.apply_mutations_with_values(&mut candidate, &mut decoded_values, mutations)?;
+        self.apply_local_mutations_with_scope(
+            &mut candidate,
+            &mut decoded_values,
+            &changed,
+            mutations,
+        )?;
         self.apply_after_set_callbacks(&mut candidate, &mut decoded_values, &changed)?;
         self.record = candidate;
         self.decoded_values = decoded_values;
@@ -1266,6 +1276,321 @@ impl RecordEditor {
         Ok(())
     }
 
+    fn apply_local_mutations_with_scope(
+        &self,
+        record: &mut WritableRecord,
+        decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+        changed: &ChangedField,
+        mutations: Vec<HandlerMutation>,
+    ) -> Result<()> {
+        for mutation in mutations {
+            let path = mutation_path(&mutation);
+            let repeat_scope = changed
+                .repeat_scopes
+                .iter()
+                .filter(|scope| path_is_within(path, &scope.path))
+                .max_by_key(|scope| scope.path.len());
+            if let Some(repeat_scope) = repeat_scope {
+                self.apply_mutation_in_scope(record, decoded_values, repeat_scope, mutation)?;
+            } else {
+                self.apply_mutations_with_values(record, decoded_values, vec![mutation])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_mutation_in_scope(
+        &self,
+        record: &mut WritableRecord,
+        decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+        repeat_scope: &RepeatScope,
+        mutation: HandlerMutation,
+    ) -> Result<()> {
+        match mutation {
+            HandlerMutation::Set {
+                path,
+                occurrence,
+                value,
+            } => {
+                let (_, occurrence) = self
+                    .scoped_assignment(record, repeat_scope, &path, occurrence)?
+                    .ok_or_else(|| SemanticError::MissingOccurrence {
+                        path: path.clone(),
+                        occurrence,
+                    })?;
+                self.apply_mutations_with_values(
+                    record,
+                    decoded_values,
+                    vec![HandlerMutation::Set {
+                        path,
+                        occurrence,
+                        value,
+                    }],
+                )
+            }
+            HandlerMutation::SetIfEqual {
+                path,
+                occurrence,
+                expected,
+                value,
+            } => {
+                let (_, occurrence) = self
+                    .scoped_assignment(record, repeat_scope, &path, occurrence)?
+                    .ok_or_else(|| SemanticError::MissingOccurrence {
+                        path: path.clone(),
+                        occurrence,
+                    })?;
+                self.apply_mutations_with_values(
+                    record,
+                    decoded_values,
+                    vec![HandlerMutation::SetIfEqual {
+                        path,
+                        occurrence,
+                        expected,
+                        value,
+                    }],
+                )
+            }
+            HandlerMutation::Insert { path, value } => {
+                self.insert_in_scope(record, decoded_values, repeat_scope, &path, &value)
+            }
+            HandlerMutation::Remove { path, occurrence } => {
+                let (_, occurrence) = self
+                    .scoped_assignment(record, repeat_scope, &path, occurrence)?
+                    .ok_or_else(|| SemanticError::MissingOccurrence {
+                        path: path.clone(),
+                        occurrence,
+                    })?;
+                self.apply_mutations_with_values(
+                    record,
+                    decoded_values,
+                    vec![HandlerMutation::Remove { path, occurrence }],
+                )
+            }
+            HandlerMutation::RemoveAll { path } => {
+                self.remove_all_in_scope(record, decoded_values, repeat_scope, &path)
+            }
+            HandlerMutation::SynchronizeCount {
+                path,
+                occurrence,
+                value,
+                remove_when_zero,
+            } => {
+                let existing = self.scoped_assignment(record, repeat_scope, &path, occurrence)?;
+                if let Some((_, occurrence)) = existing {
+                    self.apply_mutations_with_values(
+                        record,
+                        decoded_values,
+                        vec![HandlerMutation::SynchronizeCount {
+                            path,
+                            occurrence,
+                            value,
+                            remove_when_zero,
+                        }],
+                    )
+                } else if value == 0 && remove_when_zero {
+                    Ok(())
+                } else {
+                    self.insert_in_scope(
+                        record,
+                        decoded_values,
+                        repeat_scope,
+                        &path,
+                        &OwnedFieldValue::UInt(value),
+                    )
+                }
+            }
+            HandlerMutation::SynchronizePresence {
+                path,
+                occurrence,
+                present,
+                value,
+            } => {
+                let existing = self.scoped_assignment(record, repeat_scope, &path, occurrence)?;
+                if let Some((_, occurrence)) = existing {
+                    self.apply_mutations_with_values(
+                        record,
+                        decoded_values,
+                        vec![HandlerMutation::SynchronizePresence {
+                            path,
+                            occurrence,
+                            present,
+                            value,
+                        }],
+                    )
+                } else if present {
+                    self.insert_in_scope(record, decoded_values, repeat_scope, &path, &value)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn scoped_assignment(
+        &self,
+        record: &WritableRecord,
+        repeat_scope: &RepeatScope,
+        path: &str,
+        local_occurrence: usize,
+    ) -> Result<Option<(usize, usize)>> {
+        let schema = self
+            .registry
+            .get(record.signature)
+            .ok_or_else(|| SemanticError::MissingRecordSchema(record.signature.to_string()))?;
+        let parent_path = find_containing_subrecord(&schema.root, path)
+            .ok_or_else(|| SemanticError::MissingPath(path.to_owned()))?
+            .path
+            .as_str();
+        let grammar = self.grammar_for(record)?;
+        let selected = grammar
+            .assignments
+            .iter()
+            .zip(&grammar.repeat_scopes)
+            .enumerate()
+            .filter(|(_, (assignment, scopes))| {
+                assignment.is_some_and(|node| node.path == parent_path)
+                    && scopes.contains(repeat_scope)
+            })
+            .nth(local_occurrence);
+        let Some((index, _)) = selected else {
+            return Ok(None);
+        };
+        let occurrence = grammar.assignments[..index]
+            .iter()
+            .filter(|assignment| assignment.is_some_and(|node| node.path == parent_path))
+            .count();
+        Ok(Some((index, occurrence)))
+    }
+
+    fn insert_in_scope(
+        &self,
+        record: &mut WritableRecord,
+        decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+        repeat_scope: &RepeatScope,
+        path: &str,
+        value: &OwnedFieldValue,
+    ) -> Result<()> {
+        let node = self.find_node(path)?;
+        let SchemaNodeKind::Subrecord { payload, .. } = &node.kind else {
+            return Err(SemanticError::Encode {
+                path: path.to_owned(),
+                message: "handler mutation path is not a subrecord".to_owned(),
+            });
+        };
+        let (signature, encoded) = self.encode_path(path, value)?;
+        let index = self.scoped_schema_insertion_index(record, node, repeat_scope)?;
+        let grammar = self.grammar_for(record)?;
+        let occurrence = grammar.assignments[..index]
+            .iter()
+            .filter(|assignment| assignment.is_some_and(|assigned| assigned.path == path))
+            .count();
+        record.subrecords.insert(
+            index,
+            WritableSubRecord {
+                signature,
+                data: encoded,
+            },
+        );
+        let decoded = self.owned_to_handler_value(payload, value)?;
+        insert_decoded_occurrence(decoded_values, path, occurrence, decoded);
+        Ok(())
+    }
+
+    fn scoped_schema_insertion_index(
+        &self,
+        record: &WritableRecord,
+        target: &SchemaNode,
+        repeat_scope: &RepeatScope,
+    ) -> Result<usize> {
+        let schema = self
+            .registry
+            .get(record.signature)
+            .ok_or_else(|| SemanticError::MissingRecordSchema(record.signature.to_string()))?;
+        let scope_node = find_node_by_path(&schema.root, &repeat_scope.path)
+            .ok_or_else(|| SemanticError::MissingPath(repeat_scope.path.clone()))?;
+        let ordered = top_level_subrecords(scope_node);
+        let target_order = ordered
+            .iter()
+            .position(|candidate| candidate.id == target.id)
+            .ok_or_else(|| SemanticError::MissingPath(target.path.clone()))?;
+        let grammar = self.grammar_for(record)?;
+        let scoped_indices = grammar
+            .repeat_scopes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, scopes)| scopes.contains(repeat_scope).then_some(index))
+            .collect::<Vec<_>>();
+        let first = scoped_indices
+            .first()
+            .copied()
+            .ok_or_else(|| SemanticError::Encode {
+                path: target.path.clone(),
+                message: "repeat scope has no assigned subrecords".to_owned(),
+            })?;
+        let mut after_existing = None;
+        for index in scoped_indices {
+            let Some(assigned) = grammar.assignments[index] else {
+                continue;
+            };
+            if assigned.path == target.path {
+                after_existing = Some(index + 1);
+                continue;
+            }
+            let Some(order) = ordered
+                .iter()
+                .position(|candidate| candidate.id == assigned.id)
+            else {
+                continue;
+            };
+            if order > target_order {
+                return Ok(after_existing.unwrap_or(index));
+            }
+        }
+        Ok(after_existing.unwrap_or_else(|| {
+            grammar
+                .repeat_scopes
+                .iter()
+                .enumerate()
+                .skip(first)
+                .take_while(|(_, scopes)| scopes.contains(repeat_scope))
+                .map(|(index, _)| index + 1)
+                .last()
+                .unwrap_or(first)
+        }))
+    }
+
+    fn remove_all_in_scope(
+        &self,
+        record: &mut WritableRecord,
+        decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+        repeat_scope: &RepeatScope,
+        path: &str,
+    ) -> Result<()> {
+        loop {
+            let Some((index, occurrence)) =
+                self.scoped_assignment(record, repeat_scope, path, 0)?
+            else {
+                return Ok(());
+            };
+            let node = self.find_node(path)?;
+            let SchemaNodeKind::Subrecord { signature, .. } = &node.kind else {
+                return Err(SemanticError::Encode {
+                    path: path.to_owned(),
+                    message: "handler mutation path is not a subrecord".to_owned(),
+                });
+            };
+            if record.subrecords[index].signature != Signature::from(*signature) {
+                return Err(SemanticError::Encode {
+                    path: path.to_owned(),
+                    message: "assigned subrecord signature does not match schema".to_owned(),
+                });
+            }
+            record.subrecords.remove(index);
+            remove_decoded_occurrence(decoded_values, path, occurrence);
+        }
+    }
+
     fn apply_nested_set(
         &self,
         record: &mut WritableRecord,
@@ -1771,6 +2096,45 @@ fn remove_decoded_occurrence(
             decoded_values.insert((key.0, key.1.saturating_sub(1)), value);
         }
     }
+}
+
+fn insert_decoded_occurrence(
+    decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+    path: &str,
+    occurrence: usize,
+    value: FieldValue<'static>,
+) {
+    let mut shifted = decoded_values
+        .keys()
+        .filter(|(candidate, index)| candidate == path && *index >= occurrence)
+        .cloned()
+        .collect::<Vec<_>>();
+    shifted.sort_by_key(|key| std::cmp::Reverse(key.1));
+    for key in shifted {
+        if let Some(value) = decoded_values.remove(&key) {
+            decoded_values.insert((key.0, key.1.saturating_add(1)), value);
+        }
+    }
+    decoded_values.insert((path.to_owned(), occurrence), value);
+}
+
+fn mutation_path(mutation: &HandlerMutation) -> &str {
+    match mutation {
+        HandlerMutation::Set { path, .. }
+        | HandlerMutation::SetIfEqual { path, .. }
+        | HandlerMutation::Insert { path, .. }
+        | HandlerMutation::Remove { path, .. }
+        | HandlerMutation::RemoveAll { path }
+        | HandlerMutation::SynchronizeCount { path, .. }
+        | HandlerMutation::SynchronizePresence { path, .. } => path,
+    }
+}
+
+fn path_is_within(path: &str, parent: &str) -> bool {
+    path == parent
+        || path
+            .strip_prefix(parent)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn collect_expression_field_values(
@@ -3305,6 +3669,133 @@ mod tests {
                 (Signature(*b"VALU"), vec![2]),
             ]
         );
+        Ok(())
+    }
+
+    /// Maps local callback sets to the edited repeated grammar occurrence.
+    #[test]
+    fn local_callback_set_targets_changed_repeat_scope() -> Result<()> {
+        // given
+        let editor = editor_with_repeated_counter_groups()?;
+        let counter_path = "TEST/0:Groups/repeat/0:Group/0:Count";
+        let mut record = clone_record(&editor.record);
+        let mut decoded_values = editor.decoded_values.clone();
+        let changed = editor.changed_field_at(&record, 2)?;
+
+        // when
+        editor.apply_local_mutations_with_scope(
+            &mut record,
+            &mut decoded_values,
+            &changed,
+            vec![HandlerMutation::Set {
+                path: counter_path.to_owned(),
+                occurrence: 0,
+                value: OwnedFieldValue::UInt(7),
+            }],
+        )?;
+
+        // then
+        assert_eq!(record.subrecords[0].data, 1_u32.to_le_bytes());
+        assert_eq!(record.subrecords[2].data, 7_u32.to_le_bytes());
+        assert!(matches!(
+            decoded_values.get(&(counter_path.to_owned(), 0)),
+            Some(FieldValue::UInt(1))
+        ));
+        assert!(matches!(
+            decoded_values.get(&(counter_path.to_owned(), 1)),
+            Some(FieldValue::UInt(7))
+        ));
+        Ok(())
+    }
+
+    /// Inserts an absent callback field inside its repeated grammar occurrence.
+    #[test]
+    fn local_callback_presence_inserts_inside_changed_repeat_scope() -> Result<()> {
+        // given
+        let editor = editor_with_repeated_counter_groups()?;
+        let value_path = "TEST/0:Groups/repeat/0:Group/1:Values";
+        let mut record = clone_record(&editor.record);
+        let mut decoded_values = editor.decoded_values.clone();
+        record.subrecords.remove(1);
+        remove_decoded_occurrence(&mut decoded_values, value_path, 0);
+        let changed = editor.changed_field_at(&record, 0)?;
+
+        // when
+        editor.apply_local_mutations_with_scope(
+            &mut record,
+            &mut decoded_values,
+            &changed,
+            vec![HandlerMutation::SynchronizePresence {
+                path: value_path.to_owned(),
+                occurrence: 0,
+                present: true,
+                value: OwnedFieldValue::Bytes(vec![9]),
+            }],
+        )?;
+
+        // then
+        assert_eq!(
+            record
+                .subrecords
+                .iter()
+                .map(|subrecord| (subrecord.signature, subrecord.data.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Signature(*b"VCNT"), 1_u32.to_le_bytes().to_vec()),
+                (Signature(*b"VALU"), vec![9]),
+                (Signature(*b"VCNT"), 1_u32.to_le_bytes().to_vec()),
+                (Signature(*b"VALU"), vec![2]),
+            ]
+        );
+        assert!(matches!(
+            decoded_values.get(&(value_path.to_owned(), 0)),
+            Some(FieldValue::Bytes(bytes)) if bytes.as_ref() == [9]
+        ));
+        assert!(matches!(
+            decoded_values.get(&(value_path.to_owned(), 1)),
+            Some(FieldValue::Bytes(bytes)) if bytes.as_ref() == [2]
+        ));
+        Ok(())
+    }
+
+    /// Removes callback fields only from the changed repeated grammar occurrence.
+    #[test]
+    fn local_callback_remove_all_preserves_other_repeat_scopes() -> Result<()> {
+        // given
+        let editor = editor_with_repeated_counter_groups()?;
+        let value_path = "TEST/0:Groups/repeat/0:Group/1:Values";
+        let mut record = clone_record(&editor.record);
+        let mut decoded_values = editor.decoded_values.clone();
+        let changed = editor.changed_field_at(&record, 0)?;
+
+        // when
+        editor.apply_local_mutations_with_scope(
+            &mut record,
+            &mut decoded_values,
+            &changed,
+            vec![HandlerMutation::RemoveAll {
+                path: value_path.to_owned(),
+            }],
+        )?;
+
+        // then
+        assert_eq!(
+            record
+                .subrecords
+                .iter()
+                .map(|subrecord| (subrecord.signature, subrecord.data.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Signature(*b"VCNT"), 1_u32.to_le_bytes().to_vec()),
+                (Signature(*b"VCNT"), 1_u32.to_le_bytes().to_vec()),
+                (Signature(*b"VALU"), vec![2]),
+            ]
+        );
+        assert!(matches!(
+            decoded_values.get(&(value_path.to_owned(), 0)),
+            Some(FieldValue::Bytes(bytes)) if bytes.as_ref() == [2]
+        ));
+        assert!(!decoded_values.contains_key(&(value_path.to_owned(), 1)));
         Ok(())
     }
 
