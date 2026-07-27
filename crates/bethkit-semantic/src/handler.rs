@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bethkit_core::{FormId, Record, RecordFlags, Signature, WritableRecord};
-use bethkit_schema::{CallbackBinding, CallbackImplementation, ConflictPriority, SchemaGame};
+use bethkit_schema::{
+    CallbackBinding, CallbackImplementation, ConditionFunctionTable, ConflictPriority, SchemaGame,
+};
 
 use crate::{FieldValue, OwnedFieldValue, Result, SemanticError};
 
@@ -434,6 +436,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
         registry.register(Arc::new(ModelInfoArrayCount));
+        registry.register(Arc::new(SelectCtdaParameter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -485,6 +488,14 @@ impl SemanticHandlerRegistry {
         self.register(Arc::new(WwiseGuidFormatter {
             resolver: Some(resolver),
         }));
+    }
+
+    /// Installs the package-specific xEdit condition-function table.
+    ///
+    /// This replaces the table-less built-in selector while preserving its
+    /// stable handler identifier.
+    pub fn set_condition_function_table(&mut self, table: Arc<ConditionFunctionTable>) {
+        self.register(Arc::new(SelectCtdaParameter { table: Some(table) }));
     }
 
     /// Resolves a handler satisfying a minimum implementation version.
@@ -2160,6 +2171,199 @@ impl SemanticHandler for ModelInfoArrayCount {
             .map(u32::from_le_bytes)
             .unwrap_or(0);
         Ok(HandlerOutput::Integer(i64::from(count)))
+    }
+}
+
+struct SelectCtdaParameter {
+    table: Option<Arc<ConditionFunctionTable>>,
+}
+
+impl SemanticHandler for SelectCtdaParameter {
+    fn id(&self) -> &'static str {
+        "select.ctda_parameter"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let table = self.table.as_deref().ok_or_else(|| {
+            ctda_parameter_error("schema package has no condition-function table")
+        })?;
+        let bytes = match invocation.value {
+            Some(FieldValue::Bytes(value)) => value.as_ref(),
+            _ => {
+                return Err(ctda_parameter_error(
+                    "union selection requires payload bytes",
+                ))
+            }
+        };
+        let parameter = invocation
+            .context
+            .configuration
+            .get("parameter")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| (1..=3).contains(value))
+            .ok_or_else(|| ctda_parameter_error("parameter must be 1, 2, or 3"))?;
+        let function_index = read_configured_integer(
+            invocation.context.configuration,
+            "function",
+            bytes,
+            self.id(),
+        )?;
+        let Ok(function_index) = i32::try_from(function_index) else {
+            return Ok(HandlerOutput::Integer(0));
+        };
+        let function = table
+            .functions()
+            .binary_search_by_key(&function_index, |function| function.index())
+            .ok()
+            .and_then(|index| table.functions().get(index));
+        let Some(function) = function else {
+            return Ok(HandlerOutput::Integer(0));
+        };
+        let parameter_index = parameter - 1;
+        let mut variant = function.parameter_variants()[parameter_index];
+        if function.aliasable_parameters()[parameter_index] {
+            let flags = read_configured_integer(
+                invocation.context.configuration,
+                "type",
+                bytes,
+                self.id(),
+            )?;
+            let run_on = read_configured_integer(
+                invocation.context.configuration,
+                "run_on",
+                bytes,
+                self.id(),
+            )?;
+            variant = select_ctda_flag_variant(
+                invocation.context.game,
+                function.name(),
+                flags,
+                run_on,
+                variant,
+                table,
+            )?;
+        }
+        Ok(HandlerOutput::Integer(i64::from(variant)))
+    }
+}
+
+fn select_ctda_flag_variant(
+    game: SchemaGame,
+    function_name: &str,
+    flags: i64,
+    run_on: i64,
+    base_variant: u16,
+    table: &ConditionFunctionTable,
+) -> Result<u16> {
+    let Some(alias_variant) = table.alias_variant() else {
+        return Ok(base_variant);
+    };
+    let packdata_variant = table
+        .packdata_variant()
+        .ok_or_else(|| ctda_parameter_error("condition table has no packdata variant"))?;
+    if flags & 0x02 != 0 {
+        let preserves_current_package = matches!(
+            game,
+            SchemaGame::Fallout4
+                | SchemaGame::Fallout4Vr
+                | SchemaGame::Fallout76
+                | SchemaGame::Starfield
+        ) && run_on == 5
+            && function_name == "GetIsCurrentPackage";
+        if !preserves_current_package
+            || (game == SchemaGame::Starfield && run_on == 14 && function_name == "GetDistance")
+        {
+            return Ok(alias_variant);
+        }
+        return Ok(base_variant);
+    }
+    if flags & 0x08 != 0 {
+        return Ok(packdata_variant);
+    }
+    Ok(base_variant)
+}
+
+fn read_configured_integer(
+    configuration: &serde_json::Value,
+    prefix: &str,
+    bytes: &[u8],
+    handler: &str,
+) -> Result<i64> {
+    let offset = configuration
+        .get(format!("{prefix}_offset"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| configured_integer_error(handler, prefix, "offset is missing"))?;
+    let width = configuration
+        .get(format!("{prefix}_width"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| (1..=8).contains(value))
+        .ok_or_else(|| configured_integer_error(handler, prefix, "width is invalid"))?;
+    let signed = configuration
+        .get(format!("{prefix}_signed"))
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| configured_integer_error(handler, prefix, "signed flag is missing"))?;
+    let byte_order = configuration
+        .get(format!("{prefix}_byte_order"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| configured_integer_error(handler, prefix, "byte order is missing"))?;
+    let end = offset
+        .checked_add(width)
+        .ok_or_else(|| configured_integer_error(handler, prefix, "range overflowed"))?;
+    let data = bytes.get(offset..end).ok_or_else(|| {
+        configured_integer_error(handler, prefix, "range exceeds the callback payload")
+    })?;
+    let mut storage = [0_u8; 8];
+    let value = match byte_order {
+        "little" => {
+            storage[..width].copy_from_slice(data);
+            u64::from_le_bytes(storage)
+        }
+        "big" => {
+            storage[8 - width..].copy_from_slice(data);
+            u64::from_be_bytes(storage)
+        }
+        _ => {
+            return Err(configured_integer_error(
+                handler,
+                prefix,
+                "byte order is invalid",
+            ))
+        }
+    };
+    if !signed {
+        return i64::try_from(value)
+            .map_err(|_| configured_integer_error(handler, prefix, "value exceeds i64"));
+    }
+    let bits = width * 8;
+    let signed_value = if bits == 64 || value & (1_u64 << (bits - 1)) == 0 {
+        value
+    } else {
+        value | (!0_u64 << bits)
+    };
+    Ok(signed_value as i64)
+}
+
+fn configured_integer_error(handler: &str, prefix: &str, message: &str) -> SemanticError {
+    SemanticError::Handler {
+        handler: handler.to_owned(),
+        message: format!("{prefix} integer {message}"),
+    }
+}
+
+fn ctda_parameter_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "select.ctda_parameter".to_owned(),
+        message: message.into(),
     }
 }
 
@@ -5815,6 +6019,91 @@ mod tests {
             ));
         };
         assert!(matches!(&fields[0].value, FieldValue::Array(values) if values.is_empty()));
+        Ok(())
+    }
+
+    /// Selects Starfield CTDA parameter variants from the exported xEdit table.
+    #[test]
+    fn ctda_parameter_selector_uses_function_table_and_flags() -> Result<()> {
+        // given
+        let binding = CallbackBinding {
+            path: "TEST/0:CTDA/payload/5:Parameter #1".to_owned(),
+            callback_id: "union.select".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-ctda-parameter".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "select.ctda_parameter".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "parameter": 1,
+                        "type_offset": 0,
+                        "type_width": 1,
+                        "type_signed": false,
+                        "type_byte_order": "little",
+                        "function_offset": 8,
+                        "function_width": 2,
+                        "function_signed": false,
+                        "function_byte_order": "little",
+                        "run_on_offset": 20,
+                        "run_on_width": 4,
+                        "run_on_signed": false,
+                        "run_on_byte_order": "little"
+                    }),
+                },
+            },
+        };
+        let table = ConditionFunctionTable::new(
+            Some(9),
+            Some(39),
+            vec![
+                bethkit_schema::ConditionFunction::new(
+                    1,
+                    "GetDistance",
+                    "",
+                    [36, 1, 1],
+                    [true, false, false],
+                ),
+                bethkit_schema::ConditionFunction::new(
+                    2,
+                    "GetIsCurrentPackage",
+                    "",
+                    [38, 1, 1],
+                    [true, false, false],
+                ),
+            ],
+        );
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_condition_function_table(Arc::new(table));
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Starfield);
+        let select = |function: u16, flags: u8, run_on: u32| -> Result<i64> {
+            let mut payload = vec![0_u8; 24];
+            payload[0] = flags;
+            payload[8..10].copy_from_slice(&function.to_le_bytes());
+            payload[20..24].copy_from_slice(&run_on.to_le_bytes());
+            let value = FieldValue::Bytes(Cow::Owned(payload));
+            match handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::UnionSelection,
+                Some(&value),
+                None,
+            )? {
+                HandlerOutput::Integer(value) => Ok(value),
+                _ => Err(ctda_parameter_error(
+                    "test selector returned a non-integer value",
+                )),
+            }
+        };
+
+        // when / then
+        assert_eq!(select(1, 0, 0)?, 36);
+        assert_eq!(select(1, 0x02, 14)?, 9);
+        assert_eq!(select(1, 0x08, 0)?, 39);
+        assert_eq!(select(2, 0x02, 5)?, 38);
+        assert_eq!(select(2, 0x0A, 5)?, 38);
+        assert_eq!(select(999, 0, 0)?, 0);
         Ok(())
     }
 

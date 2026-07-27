@@ -46,8 +46,11 @@ impl SemanticContext {
     pub fn new_with_handlers(
         package: Arc<SchemaPackage>,
         decoders: DecoderRegistry,
-        handlers: SemanticHandlerRegistry,
+        mut handlers: SemanticHandlerRegistry,
     ) -> Result<Self> {
+        if let Some(table) = package.condition_function_table() {
+            handlers.set_condition_function_table(Arc::new(table.clone()));
+        }
         for requirement in &package.manifest().required_decoders {
             decoders.require(&requirement.id, requirement.minimum_version)?;
         }
