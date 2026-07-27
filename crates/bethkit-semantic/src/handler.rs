@@ -248,12 +248,26 @@ pub enum HandlerOutput {
     Text(String),
     /// File-local FormID result.
     FormId(FormId),
+    /// Resolved semantic element link.
+    Link(SemanticLink),
     /// Exterior-cell grid coordinates.
     GridCell(RecordGridCell),
     /// Record index keys.
     IndexKeys(Vec<RecordIndexKey>),
     /// Transactional record edits.
     Mutations(Vec<HandlerMutation>),
+}
+
+/// Stable target identity returned by an xEdit link callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticLink {
+    /// One effective alias inside a resolved quest record.
+    QuestAlias {
+        /// File-local FormID of the quest reference used by the source value.
+        quest_form_id: FormId,
+        /// Numeric alias identifier inside the winning quest definition.
+        alias_index: i64,
+    },
 }
 
 /// Input supplied to a semantic callback handler.
@@ -491,6 +505,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatFactionRelation { resolver: None }));
         registry.register(Arc::new(FormatObjectProperty { resolver: None }));
         registry.register(Arc::new(FormatVmadObjectAlias { resolver: None }));
+        registry.register(Arc::new(ResolveVmadObjectAliasLink { resolver: None }));
         registry.register(Arc::new(FormatLandscapePosition));
         registry.register(Arc::new(FormatClimateMoons));
         registry.register(Arc::new(FormatIdleAnimationGroup));
@@ -548,6 +563,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatVmadObjectAlias {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(ResolveVmadObjectAliasLink {
             resolver: Some(resolver),
         }));
     }
@@ -1693,6 +1711,63 @@ struct FormatVmadObjectAlias {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct ResolveVmadObjectAliasLink {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for ResolveVmadObjectAliasLink {
+    fn id(&self) -> &'static str {
+        "resolve.vmad_object_alias"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ReferenceResolution {
+            return Ok(HandlerOutput::None);
+        }
+        let raw = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                vmad_alias_link_error("VMAD object-alias link resolution requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| vmad_alias_link_error("VMAD object alias exceeds i64"))?;
+        if raw < 0 {
+            return Ok(HandlerOutput::None);
+        }
+        let form_id_path =
+            configured_text(self.id(), invocation.context.configuration, "form_id_path")?;
+        let Some((quest_form_id, targets)) = invocation
+            .value_scope
+            .and_then(|scope| scoped_form_id(scope, form_id_path))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(quest) = self.resolver.as_deref().and_then(|resolver| {
+            resolver.resolve_form_id(
+                handler_record_context(&invocation.context),
+                quest_form_id,
+                targets,
+            )
+        }) else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(aliases) = quest.quest_aliases() else {
+            return Ok(HandlerOutput::None);
+        };
+        if aliases.iter().all(|alias| alias.index() != raw) {
+            return Ok(HandlerOutput::None);
+        }
+        Ok(HandlerOutput::Link(SemanticLink::QuestAlias {
+            quest_form_id,
+            alias_index: raw,
+        }))
+    }
+}
+
 impl SemanticHandler for FormatVmadObjectAlias {
     fn id(&self) -> &'static str {
         "format.vmad_object_alias"
@@ -1927,6 +2002,13 @@ fn parse_vmad_alias(value: &str, game: SchemaGame) -> i64 {
 fn vmad_alias_error(message: impl Into<String>) -> SemanticError {
     SemanticError::Handler {
         handler: "format.vmad_object_alias".to_owned(),
+        message: message.into(),
+    }
+}
+
+fn vmad_alias_link_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "resolve.vmad_object_alias".to_owned(),
         message: message.into(),
     }
 }
@@ -6043,6 +6125,47 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::Int(-1))
+        ));
+        let link_binding = test_metadata_binding(
+            "value.links_to",
+            "resolve.vmad_object_alias",
+            serde_json::json!({ "form_id_path": form_id_path }),
+        );
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &link_binding,
+                fallout,
+                HandlerPhase::ReferenceResolution,
+                Some(&alias),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Link(SemanticLink::QuestAlias {
+                quest_form_id: FormId(0x5678),
+                alias_index: 7,
+            })
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &link_binding,
+                fallout,
+                HandlerPhase::ReferenceResolution,
+                Some(&unknown),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &link_binding,
+                fallout,
+                HandlerPhase::ReferenceResolution,
+                Some(&none),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::None
         ));
         Ok(())
     }

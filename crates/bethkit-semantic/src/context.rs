@@ -15,7 +15,7 @@ use crate::{value::handler_to_owned_value, OwnedFieldValue};
 use crate::{
     DecoderRegistry, FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, RecordEditor,
     RecordGridCell, RecordIndexKey, RecordView, Result, SemanticError, SemanticHandlerRegistry,
-    ValueFormat,
+    SemanticLink, ValueFormat,
 };
 
 /// Runtime context for schema-guided operations on one game mode.
@@ -295,6 +295,83 @@ impl SemanticContext {
             formatted = Some(text);
         }
         Ok(formatted)
+    }
+
+    /// Resolves the semantic link exposed by one decoded value.
+    ///
+    /// `None` means that no executable link callback resolved a target.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when a link callback rejects the
+    /// value or returns an invalid result.
+    pub fn resolve_link(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+    ) -> Result<Option<SemanticLink>> {
+        self.resolve_link_with_scope(record, path, value, None)
+    }
+
+    /// Resolves a semantic link using the value's sibling-value container.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when a link callback rejects the
+    /// value or scope, or returns an invalid result.
+    pub fn resolve_link_in_scope(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+        scope: &FieldValue<'_>,
+    ) -> Result<Option<SemanticLink>> {
+        self.resolve_link_with_scope(record, path, value, Some(scope))
+    }
+
+    fn resolve_link_with_scope(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+        scope: Option<&FieldValue<'_>>,
+    ) -> Result<Option<SemanticLink>> {
+        let handler_value = value.to_handler_value();
+        let handler_scope = scope.map(FieldValue::to_handler_value);
+        for binding in self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| binding.path == path && binding.callback_id == "value.links_to")
+        {
+            if !matches!(
+                binding.implementation,
+                CallbackImplementation::BuiltIn { .. }
+                    | CallbackImplementation::CustomHandler { .. }
+            ) {
+                continue;
+            }
+            match self.handlers.invoke_with_value_scope(
+                binding,
+                self.handler_record(record),
+                HandlerPhase::ReferenceResolution,
+                Some(&handler_value),
+                None,
+                handler_scope.as_ref(),
+            )? {
+                HandlerOutput::None => {}
+                HandlerOutput::Link(link) => return Ok(Some(link)),
+                _ => {
+                    return Err(SemanticError::Handler {
+                        handler: binding.callback_id.clone(),
+                        message: "link resolver returned a non-link result".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Parses text accepted by an xEdit edit control back to a typed value.

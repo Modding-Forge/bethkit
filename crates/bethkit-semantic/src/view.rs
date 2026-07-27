@@ -15,7 +15,7 @@ use crate::value::float_from_raw;
 use crate::{
     grammar::interpret, ByteSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, FieldOrigin,
     FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, NamedValue, Result,
-    SemanticContext, SemanticError, ValidationReport, ValueFormat,
+    SemanticContext, SemanticError, SemanticLink, ValidationReport, ValueFormat,
 };
 
 /// One decoded top-level record field.
@@ -116,6 +116,32 @@ impl<'context, 'record> RecordView<'context, 'record> {
     ) -> Result<Option<String>> {
         self.context
             .format_value_as_in_scope(self.record, path, value, scope, format)
+    }
+
+    /// Resolves the semantic link exposed by a decoded value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the bound link callback rejects
+    /// the value or returns an invalid result.
+    pub fn resolve_link(&self, path: &str, value: &FieldValue<'_>) -> Result<Option<SemanticLink>> {
+        self.context.resolve_link(self.record, path, value)
+    }
+
+    /// Resolves a semantic link using the value's sibling-value container.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the bound link callback rejects
+    /// the value or scope, or returns an invalid result.
+    pub fn resolve_link_in_scope(
+        &self,
+        path: &str,
+        value: &FieldValue<'_>,
+        scope: &FieldValue<'_>,
+    ) -> Result<Option<SemanticLink>> {
+        self.context
+            .resolve_link_in_scope(self.record, path, value, scope)
     }
 
     /// Parses edited xEdit text back to a typed value.
