@@ -5,16 +5,16 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use bethkit_core::Record;
+use bethkit_core::{FormId, Record};
 use bethkit_schema::{
-    CallbackImplementation, ConflictPriority, PrimitiveType, SchemaNodeKind, SchemaPackage,
-    SchemaRegistry,
+    CallbackBinding, CallbackImplementation, ConflictPriority, PrimitiveType, SchemaNodeKind,
+    SchemaPackage, SchemaRegistry,
 };
 
 use crate::{value::handler_to_owned_value, OwnedFieldValue};
 use crate::{
     DecoderRegistry, FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, RecordEditor,
-    RecordView, Result, SemanticError, SemanticHandlerRegistry, ValueFormat,
+    RecordGridCell, RecordView, Result, SemanticError, SemanticHandlerRegistry, ValueFormat,
 };
 
 /// Runtime context for schema-guided operations on one game mode.
@@ -455,6 +455,73 @@ impl SemanticContext {
         Ok(decision)
     }
 
+    /// Returns xEdit's dynamic grid coordinates for a main record.
+    ///
+    /// `None` means the record has no grid callback or the callback reports
+    /// that the record has no exterior grid position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the callback is duplicated,
+    /// not executable, or returns an invalid result.
+    pub fn record_grid_cell(&self, record: &Record) -> Result<Option<RecordGridCell>> {
+        let Some(binding) = self.record_metadata_binding(record, "record.grid_cell")? else {
+            return Ok(None);
+        };
+        match self.invoke_record_metadata(record, binding)? {
+            HandlerOutput::GridCell(value) => Ok(Some(value)),
+            HandlerOutput::None => Ok(None),
+            _ => Err(invalid_record_metadata_output(
+                binding,
+                "grid-cell callback returned a non-grid result",
+            )),
+        }
+    }
+
+    /// Returns xEdit's dynamic FormID for a main record.
+    ///
+    /// `None` means the record has no FormID callback or the callback cannot
+    /// derive a FormID from the current record data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the callback is duplicated,
+    /// not executable, or returns an invalid result.
+    pub fn record_form_id(&self, record: &Record) -> Result<Option<FormId>> {
+        let Some(binding) = self.record_metadata_binding(record, "record.form_id")? else {
+            return Ok(None);
+        };
+        match self.invoke_record_metadata(record, binding)? {
+            HandlerOutput::FormId(value) => Ok(Some(value)),
+            HandlerOutput::None => Ok(None),
+            _ => Err(invalid_record_metadata_output(
+                binding,
+                "FormID callback returned a non-FormID result",
+            )),
+        }
+    }
+
+    /// Returns xEdit's dynamic identity string for a main record.
+    ///
+    /// `None` means the record has no identity callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the callback is duplicated,
+    /// not executable, or returns an invalid result.
+    pub fn record_identity(&self, record: &Record) -> Result<Option<String>> {
+        let Some(binding) = self.record_metadata_binding(record, "record.identity")? else {
+            return Ok(None);
+        };
+        match self.invoke_record_metadata(record, binding)? {
+            HandlerOutput::Text(value) => Ok(Some(value)),
+            _ => Err(invalid_record_metadata_output(
+                binding,
+                "identity callback returned a non-text result",
+            )),
+        }
+    }
+
     pub(crate) fn apply_normalizers<'a>(
         &self,
         path: &str,
@@ -505,6 +572,61 @@ impl SemanticContext {
             record.header.form_version,
             self.registry.package().manifest().game,
         )
+    }
+
+    fn record_metadata_binding<'a>(
+        &'a self,
+        record: &Record,
+        callback_id: &str,
+    ) -> Result<Option<&'a CallbackBinding>> {
+        let record_path = record.header.signature.to_string();
+        let mut bindings = self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| binding.path == record_path && binding.callback_id == callback_id);
+        let Some(binding) = bindings.next() else {
+            return Ok(None);
+        };
+        if bindings.next().is_some() {
+            return Err(SemanticError::Handler {
+                handler: callback_id.to_owned(),
+                message: "record metadata callback is bound more than once".to_owned(),
+            });
+        }
+        if !matches!(
+            binding.implementation,
+            CallbackImplementation::BuiltIn { .. } | CallbackImplementation::CustomHandler { .. }
+        ) {
+            return Err(SemanticError::Handler {
+                handler: callback_id.to_owned(),
+                message: "record metadata callback is not executable".to_owned(),
+            });
+        }
+        Ok(Some(binding))
+    }
+
+    fn invoke_record_metadata(
+        &self,
+        record: &Record,
+        binding: &CallbackBinding,
+    ) -> Result<HandlerOutput> {
+        self.handlers.invoke_with_source_record(
+            binding,
+            self.handler_record(record),
+            Some(record),
+            HandlerPhase::RecordMetadata,
+            None,
+            None,
+        )
+    }
+}
+
+fn invalid_record_metadata_output(binding: &CallbackBinding, message: &str) -> SemanticError {
+    SemanticError::Handler {
+        handler: binding.callback_id.clone(),
+        message: message.to_owned(),
     }
 }
 

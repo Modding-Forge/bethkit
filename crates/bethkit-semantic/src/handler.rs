@@ -97,6 +97,15 @@ pub struct HandlerRecordContext {
     pub game: SchemaGame,
 }
 
+/// Grid coordinates returned by an xEdit record-metadata callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordGridCell {
+    /// Signed exterior-cell X coordinate.
+    pub x: i32,
+    /// Signed exterior-cell Y coordinate.
+    pub y: i32,
+}
+
 impl HandlerRecordContext {
     /// Creates callback record metadata.
     pub const fn new(
@@ -186,6 +195,8 @@ pub enum HandlerOutput {
     Text(String),
     /// File-local FormID result.
     FormId(FormId),
+    /// Exterior-cell grid coordinates.
+    GridCell(RecordGridCell),
     /// Record index keys.
     IndexKeys(Vec<String>),
     /// Transactional record edits.
@@ -290,6 +301,11 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(IgnoreEmptyConflictPriority));
         registry.register(Arc::new(CellWaterConflictPriority));
         registry.register(Arc::new(ConstantMetadataBoolean));
+        registry.register(Arc::new(MorrowindGridCell));
+        registry.register(Arc::new(MorrowindGridFormId));
+        registry.register(Arc::new(MorrowindReferenceFormId));
+        registry.register(Arc::new(NullRecordFormId));
+        registry.register(Arc::new(MorrowindGridIdentity));
         registry.register(Arc::new(FormatRgb));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
@@ -559,6 +575,237 @@ impl SemanticHandler for ConstantMetadataBoolean {
             })?;
         Ok(HandlerOutput::Boolean(value))
     }
+}
+
+struct MorrowindGridCell;
+
+impl SemanticHandler for MorrowindGridCell {
+    fn id(&self) -> &'static str {
+        "metadata.morrowind.grid_cell"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::RecordMetadata {
+            return Ok(HandlerOutput::None);
+        }
+        let record = require_source_record(self.id(), &invocation)?;
+        let grid = morrowind_grid_cell(self.id(), record)?;
+        Ok(grid.map_or(HandlerOutput::None, HandlerOutput::GridCell))
+    }
+}
+
+struct MorrowindGridFormId;
+
+impl SemanticHandler for MorrowindGridFormId {
+    fn id(&self) -> &'static str {
+        "metadata.morrowind.grid_form_id"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::RecordMetadata {
+            return Ok(HandlerOutput::None);
+        }
+        let record = require_source_record(self.id(), &invocation)?;
+        let base = configured_byte(self.id(), invocation.context.configuration, "base")?;
+        let Some(grid) = morrowind_grid_cell(self.id(), record)? else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(grid_cell_form_id(base, grid).map_or(HandlerOutput::None, HandlerOutput::FormId))
+    }
+}
+
+struct MorrowindReferenceFormId;
+
+impl SemanticHandler for MorrowindReferenceFormId {
+    fn id(&self) -> &'static str {
+        "metadata.morrowind.reference_form_id"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::RecordMetadata {
+            return Ok(HandlerOutput::None);
+        }
+        let record = require_source_record(self.id(), &invocation)?;
+        let Some(frmr) = record.get(Signature(*b"FRMR"))? else {
+            return Ok(HandlerOutput::None);
+        };
+        let mut form_id = frmr.as_form_id()?;
+        if form_id.file_index() == 0 {
+            form_id.0 |= 0xFF00_0000;
+        }
+        Ok(HandlerOutput::FormId(form_id))
+    }
+}
+
+struct NullRecordFormId;
+
+impl SemanticHandler for NullRecordFormId {
+    fn id(&self) -> &'static str {
+        "metadata.null_form_id"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::RecordMetadata {
+            Ok(HandlerOutput::FormId(FormId::NULL))
+        } else {
+            Ok(HandlerOutput::None)
+        }
+    }
+}
+
+struct MorrowindGridIdentity;
+
+impl SemanticHandler for MorrowindGridIdentity {
+    fn id(&self) -> &'static str {
+        "metadata.morrowind.grid_identity"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::RecordMetadata {
+            return Ok(HandlerOutput::None);
+        }
+        let record = require_source_record(self.id(), &invocation)?;
+        let prefix = invocation
+            .context
+            .configuration
+            .get("prefix")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let fallback_to_editor_id = invocation
+            .context
+            .configuration
+            .get("fallback_to_editor_id")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let identity = match morrowind_grid_cell(self.id(), record)? {
+            Some(grid) => format!("{prefix}{}", grid_cell_sort_key(grid)),
+            None if fallback_to_editor_id => morrowind_editor_id(record)?.unwrap_or_default(),
+            None => String::new(),
+        };
+        Ok(HandlerOutput::Text(identity))
+    }
+}
+
+fn require_source_record<'a>(
+    handler: &str,
+    invocation: &'a HandlerInvocation<'_>,
+) -> Result<&'a Record> {
+    invocation
+        .source_record
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "record metadata callback requires the source record".to_owned(),
+        })
+}
+
+fn configured_byte(handler: &str, configuration: &serde_json::Value, key: &str) -> Result<u8> {
+    configuration
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("record metadata callback requires byte configuration `{key}`"),
+        })
+}
+
+fn morrowind_grid_cell(handler: &str, record: &Record) -> Result<Option<RecordGridCell>> {
+    let (signature, x_offset, y_offset) = if record.header.signature == Signature(*b"CELL") {
+        (Signature::DATA, 4, 8)
+    } else if record.header.signature == Signature(*b"LAND") {
+        (Signature(*b"INTV"), 0, 4)
+    } else if record.header.signature == Signature(*b"PGRD") {
+        (Signature::DATA, 0, 4)
+    } else {
+        return Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!(
+                "record {} does not provide Morrowind grid metadata",
+                record.header.signature
+            ),
+        });
+    };
+    let Some(subrecord) = record.get(signature)? else {
+        return Ok(None);
+    };
+    let bytes = subrecord.as_bytes();
+    if bytes.len() < y_offset + 4 {
+        return Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!(
+                "{} grid payload is truncated: expected at least {} bytes, got {}",
+                record.header.signature,
+                y_offset + 4,
+                bytes.len()
+            ),
+        });
+    }
+    if record.header.signature == Signature(*b"CELL") {
+        let flags = u32::from_le_bytes(
+            bytes[0..4]
+                .try_into()
+                .expect("CELL flag slice has an exact checked length"),
+        );
+        if flags & 1 != 0 {
+            return Ok(None);
+        }
+    }
+    let x = i32::from_le_bytes(
+        bytes[x_offset..x_offset + 4]
+            .try_into()
+            .expect("grid X slice has an exact checked length"),
+    );
+    let y = i32::from_le_bytes(
+        bytes[y_offset..y_offset + 4]
+            .try_into()
+            .expect("grid Y slice has an exact checked length"),
+    );
+    if record.header.signature == Signature(*b"PGRD") && x == 0 && y == 0 {
+        return Ok(None);
+    }
+    Ok(Some(RecordGridCell { x, y }))
+}
+
+fn grid_cell_form_id(base: u8, grid: RecordGridCell) -> Option<FormId> {
+    if !(-512..=511).contains(&grid.x) || !(-512..=511).contains(&grid.y) {
+        return None;
+    }
+    let x = u32::try_from(grid.x + 512).ok()?;
+    let y = u32::try_from(grid.y + 512).ok()?;
+    Some(FormId((u32::from(base) << 16) + (x << 10) + y))
+}
+
+fn grid_cell_sort_key(grid: RecordGridCell) -> String {
+    let x = i64::from(grid.x) - i64::from(i32::MIN);
+    let y = i64::from(grid.y) - i64::from(i32::MIN);
+    format!("{x:08X}|{y:08X}")
+}
+
+fn morrowind_editor_id(record: &Record) -> Result<Option<String>> {
+    let Some(name) = record.get(Signature(*b"NAME"))? else {
+        return Ok(None);
+    };
+    Ok(Some(name.as_zstring()?.to_owned()))
 }
 
 fn is_empty_value(value: &FieldValue<'_>) -> bool {
@@ -1853,6 +2100,207 @@ mod tests {
         )?;
         assert!(matches!(output, HandlerOutput::Boolean(false)));
         Ok(())
+    }
+
+    /// Matches xEdit's TES3 grid extraction, FormID, and identity callbacks.
+    #[test]
+    fn morrowind_cell_metadata_matches_xedit() -> Result<()> {
+        let mut exterior_data = 0_u32.to_le_bytes().to_vec();
+        exterior_data.extend_from_slice(&(-1_i32).to_le_bytes());
+        exterior_data.extend_from_slice(&2_i32.to_le_bytes());
+        let exterior = test_record(
+            *b"CELL",
+            &[(*b"NAME", b"Balmora\0".to_vec()), (*b"DATA", exterior_data)],
+        )?;
+        let grid_binding = test_metadata_binding(
+            "record.grid_cell",
+            "metadata.morrowind.grid_cell",
+            serde_json::json!({}),
+        );
+        let form_binding = test_metadata_binding(
+            "record.form_id",
+            "metadata.morrowind.grid_form_id",
+            serde_json::json!({ "base": 160 }),
+        );
+        let identity_binding = test_metadata_binding(
+            "record.identity",
+            "metadata.morrowind.grid_identity",
+            serde_json::json!({
+                "prefix": "<Exterior>",
+                "fallback_to_editor_id": true
+            }),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"CELL"), FormId::NULL, 0, SchemaGame::Morrowind);
+
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &grid_binding,
+                context,
+                Some(&exterior),
+                HandlerPhase::RecordMetadata,
+                None,
+                None,
+            )?,
+            HandlerOutput::GridCell(RecordGridCell { x: -1, y: 2 })
+        ));
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &form_binding,
+                context,
+                Some(&exterior),
+                HandlerPhase::RecordMetadata,
+                None,
+                None,
+            )?,
+            HandlerOutput::FormId(FormId(0x00A7_FE02))
+        ));
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &identity_binding,
+                context,
+                Some(&exterior),
+                HandlerPhase::RecordMetadata,
+                None,
+                None,
+            )?,
+            HandlerOutput::Text(value) if value == "<Exterior>7FFFFFFF|80000002"
+        ));
+
+        let mut interior_data = 1_u32.to_le_bytes().to_vec();
+        interior_data.extend_from_slice(&10_i32.to_le_bytes());
+        interior_data.extend_from_slice(&20_i32.to_le_bytes());
+        let interior = test_record(
+            *b"CELL",
+            &[(*b"NAME", b"Vivec\0".to_vec()), (*b"DATA", interior_data)],
+        )?;
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &grid_binding,
+                context,
+                Some(&interior),
+                HandlerPhase::RecordMetadata,
+                None,
+                None,
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &identity_binding,
+                context,
+                Some(&interior),
+                HandlerPhase::RecordMetadata,
+                None,
+                None,
+            )?,
+            HandlerOutput::Text(value) if value == "Vivec"
+        ));
+        Ok(())
+    }
+
+    /// Matches xEdit's TES3 reference and header FormID callbacks.
+    #[test]
+    fn morrowind_non_grid_form_ids_match_xedit() -> Result<()> {
+        let reference = test_record(
+            *b"REFR",
+            &[(*b"FRMR", 0x0012_3456_u32.to_le_bytes().to_vec())],
+        )?;
+        let reference_binding = test_metadata_binding(
+            "record.form_id",
+            "metadata.morrowind.reference_form_id",
+            serde_json::json!({}),
+        );
+        let null_binding = test_metadata_binding(
+            "record.form_id",
+            "metadata.null_form_id",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let reference_context =
+            HandlerRecordContext::new(Signature(*b"REFR"), FormId::NULL, 0, SchemaGame::Morrowind);
+
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &reference_binding,
+                reference_context,
+                Some(&reference),
+                HandlerPhase::RecordMetadata,
+                None,
+                None,
+            )?,
+            HandlerOutput::FormId(FormId(0xFF12_3456))
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &null_binding,
+                HandlerRecordContext::new(
+                    Signature::TES3,
+                    FormId(0xFFFF_FFFF),
+                    0,
+                    SchemaGame::Morrowind,
+                ),
+                HandlerPhase::RecordMetadata,
+                None,
+                None,
+            )?,
+            HandlerOutput::FormId(FormId::NULL)
+        ));
+        Ok(())
+    }
+
+    fn test_metadata_binding(
+        callback_id: &str,
+        operation: &str,
+        configuration: serde_json::Value,
+    ) -> CallbackBinding {
+        CallbackBinding {
+            path: "TEST".to_owned(),
+            callback_id: callback_id.to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: format!("test-{operation}"),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: operation.to_owned(),
+                    minimum_version: 1,
+                    configuration,
+                },
+            },
+        }
+    }
+
+    fn test_record(signature: [u8; 4], subrecords: &[([u8; 4], Vec<u8>)]) -> Result<Record> {
+        let data_size: usize = subrecords
+            .iter()
+            .map(|(_, payload)| 6 + payload.len())
+            .sum();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&signature);
+        bytes.extend_from_slice(
+            &u32::try_from(data_size)
+                .expect("test record data fits in u32")
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        for (subrecord_signature, payload) in subrecords {
+            bytes.extend_from_slice(subrecord_signature);
+            bytes.extend_from_slice(
+                &u16::try_from(payload.len())
+                    .expect("test subrecord payload fits in u16")
+                    .to_le_bytes(),
+            );
+            bytes.extend_from_slice(payload);
+        }
+        let mut cursor = bethkit_io::SliceCursor::new(&bytes);
+        Ok(Record::parse_header(
+            &mut cursor,
+            &bethkit_core::GameContext::sse(),
+        )?)
     }
 
     fn test_cell_record(data_flags: u16, deleted: bool) -> Result<Record> {
