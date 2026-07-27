@@ -17,9 +17,10 @@ pub use error::{Result, SchemaError};
 pub use expression::{EvalContext, EvalValue, Expression};
 pub use model::{
     ArrayCount, BuiltInOperation, ByteOrder, CallbackBinding, CallbackClass,
-    CallbackImplementation, ConflictPriority, DecoderRequirement, HandlerRequirement, IntegerType,
-    PrimitiveType, SchemaGame, SchemaManifest, SchemaNode, SchemaNodeId, SchemaNodeKind,
-    SchemaRecord, SchemaSignature, StringLengthPrefix, StringType, UnionSelector, ValidationStatus,
+    CallbackImplementation, ConditionFunction, ConditionFunctionTable, ConflictPriority,
+    DecoderRequirement, HandlerRequirement, IntegerType, PrimitiveType, SchemaGame, SchemaManifest,
+    SchemaNode, SchemaNodeId, SchemaNodeKind, SchemaRecord, SchemaSignature, StringLengthPrefix,
+    StringType, UnionSelector, ValidationStatus,
 };
 pub use package::{
     encode_bundle, SchemaLoadLimits, SchemaPackage, BUNDLE_MAGIC, PACKAGE_FORMAT_VERSION,

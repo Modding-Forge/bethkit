@@ -54,6 +54,98 @@ impl From<SchemaSignature> for Signature {
     }
 }
 
+/// One xEdit condition function and its schema-union parameter variants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConditionFunction {
+    index: i32,
+    name: String,
+    description: String,
+    parameter_variants: [u16; 3],
+    aliasable_parameters: [bool; 3],
+}
+
+impl ConditionFunction {
+    /// Creates metadata exported from one xEdit condition-function table entry.
+    pub fn new(
+        index: i32,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameter_variants: [u16; 3],
+        aliasable_parameters: [bool; 3],
+    ) -> Self {
+        Self {
+            index,
+            name: name.into(),
+            description: description.into(),
+            parameter_variants,
+            aliasable_parameters,
+        }
+    }
+
+    /// Returns the numeric condition-function identifier.
+    pub const fn index(&self) -> i32 {
+        self.index
+    }
+
+    /// Returns the xEdit function name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the optional xEdit function description.
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// Returns the union variant selected for each of the three parameters.
+    pub const fn parameter_variants(&self) -> [u16; 3] {
+        self.parameter_variants
+    }
+
+    /// Returns whether each parameter participates in alias/packdata overrides.
+    pub const fn aliasable_parameters(&self) -> [bool; 3] {
+        self.aliasable_parameters
+    }
+}
+
+/// Shared xEdit condition-function semantics for one game mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConditionFunctionTable {
+    alias_variant: Option<u16>,
+    packdata_variant: Option<u16>,
+    functions: Vec<ConditionFunction>,
+}
+
+impl ConditionFunctionTable {
+    /// Creates a condition-function table and its flag-selected union variants.
+    pub fn new(
+        alias_variant: Option<u16>,
+        packdata_variant: Option<u16>,
+        functions: Vec<ConditionFunction>,
+    ) -> Self {
+        Self {
+            alias_variant,
+            packdata_variant,
+            functions,
+        }
+    }
+
+    /// Returns the union variant selected by xEdit's "use aliases" flag.
+    pub const fn alias_variant(&self) -> Option<u16> {
+        self.alias_variant
+    }
+
+    /// Returns the union variant selected by xEdit's "use packdata" flag.
+    pub const fn packdata_variant(&self) -> Option<u16> {
+        self.packdata_variant
+    }
+
+    /// Returns all condition functions in numeric identifier order.
+    pub fn functions(&self) -> &[ConditionFunction] {
+        &self.functions
+    }
+}
+
 /// Game mode represented by a schema package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CallbackBinding, CallbackImplementation, Expression, Result, SchemaError, SchemaGame,
-    SchemaManifest, SchemaNode, SchemaNodeId, SchemaNodeKind, SchemaRecord, SchemaSignature,
-    ValidationStatus,
+    CallbackBinding, CallbackImplementation, ConditionFunctionTable, Expression, Result,
+    SchemaError, SchemaGame, SchemaManifest, SchemaNode, SchemaNodeId, SchemaNodeKind,
+    SchemaRecord, SchemaSignature, ValidationStatus,
 };
 
 /// Magic bytes at the beginning of one `.bkschema` package.
@@ -35,6 +35,8 @@ pub struct SchemaLoadLimits {
     pub maximum_package_bytes: usize,
     /// Maximum number of records in one package.
     pub maximum_records: usize,
+    /// Maximum number of condition-function entries in one package.
+    pub maximum_condition_functions: usize,
     /// Maximum total number of schema nodes.
     pub maximum_nodes: usize,
     /// Maximum schema tree depth.
@@ -48,6 +50,7 @@ impl Default for SchemaLoadLimits {
         Self {
             maximum_package_bytes: 64 * 1024 * 1024,
             maximum_records: 4096,
+            maximum_condition_functions: 4096,
             maximum_nodes: 1_000_000,
             maximum_depth: 128,
             maximum_string_bytes: 64 * 1024,
@@ -61,6 +64,8 @@ struct PackagePayload {
     records: Vec<SchemaRecord>,
     #[serde(default)]
     callback_bindings: Vec<CallbackBinding>,
+    #[serde(default)]
+    condition_function_table: Option<ConditionFunctionTable>,
 }
 
 /// A validated, owned schema package for one game mode.
@@ -69,6 +74,7 @@ pub struct SchemaPackage {
     manifest: SchemaManifest,
     records: Vec<SchemaRecord>,
     callback_bindings: Vec<CallbackBinding>,
+    condition_function_table: Option<ConditionFunctionTable>,
     payload_sha256: [u8; 32],
 }
 
@@ -95,10 +101,26 @@ impl SchemaPackage {
         records: Vec<SchemaRecord>,
         callback_bindings: Vec<CallbackBinding>,
     ) -> Result<Self> {
+        Self::new_with_semantics(manifest, records, callback_bindings, None)
+    }
+
+    /// Creates and validates a package with callbacks and shared semantic tables.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::InvalidGraph`] when the graph, callback bindings,
+    /// condition-function metadata, or manifest requirements are invalid.
+    pub fn new_with_semantics(
+        manifest: SchemaManifest,
+        records: Vec<SchemaRecord>,
+        callback_bindings: Vec<CallbackBinding>,
+        condition_function_table: Option<ConditionFunctionTable>,
+    ) -> Result<Self> {
         let mut package = Self {
             manifest,
             records,
             callback_bindings,
+            condition_function_table,
             payload_sha256: [0; 32],
         };
         package.validate(&SchemaLoadLimits::default())?;
@@ -181,6 +203,7 @@ impl SchemaPackage {
             manifest: payload.manifest,
             records: payload.records,
             callback_bindings: payload.callback_bindings,
+            condition_function_table: payload.condition_function_table,
             payload_sha256: actual_hash,
         };
         package.validate(limits)?;
@@ -224,6 +247,11 @@ impl SchemaPackage {
         &self.callback_bindings
     }
 
+    /// Returns the xEdit condition-function table in numeric identifier order.
+    pub fn condition_function_table(&self) -> Option<&ConditionFunctionTable> {
+        self.condition_function_table.as_ref()
+    }
+
     /// Returns the package payload digest.
     pub fn payload_sha256(&self) -> [u8; 32] {
         self.payload_sha256
@@ -234,6 +262,7 @@ impl SchemaPackage {
             manifest: self.manifest.clone(),
             records: self.records.clone(),
             callback_bindings: self.callback_bindings.clone(),
+            condition_function_table: self.condition_function_table.clone(),
         };
         let mut encoded: Vec<u8> = Vec::new();
         ciborium::ser::into_writer(&payload, &mut encoded)
@@ -278,6 +307,7 @@ impl SchemaPackage {
                 limits.maximum_records
             )));
         }
+        validate_condition_function_table(self.condition_function_table.as_ref(), limits)?;
 
         let mut signatures: BTreeSet<SchemaSignature> = BTreeSet::new();
         let mut node_ids: BTreeSet<SchemaNodeId> = BTreeSet::new();
@@ -328,6 +358,64 @@ impl SchemaPackage {
         }
         Ok(())
     }
+}
+
+fn validate_condition_function_table(
+    table: Option<&ConditionFunctionTable>,
+    limits: &SchemaLoadLimits,
+) -> Result<()> {
+    let Some(table) = table else {
+        return Ok(());
+    };
+    if table.alias_variant().is_some() != table.packdata_variant().is_some() {
+        return Err(SchemaError::InvalidGraph(
+            "condition aliases and packdata variants must be declared together".to_owned(),
+        ));
+    }
+    let functions = table.functions();
+    if functions.len() > limits.maximum_condition_functions {
+        return Err(SchemaError::LimitExceeded(format!(
+            "package has {} condition functions, limit is {}",
+            functions.len(),
+            limits.maximum_condition_functions
+        )));
+    }
+    let mut previous_index: Option<i32> = None;
+    for function in functions {
+        if function.index() < 0 {
+            return Err(SchemaError::InvalidGraph(format!(
+                "condition function {} has a negative index",
+                function.name()
+            )));
+        }
+        if previous_index.is_some_and(|index| function.index() <= index) {
+            return Err(SchemaError::InvalidGraph(
+                "condition functions must have unique ascending indexes".to_owned(),
+            ));
+        }
+        if function.name().trim().is_empty() {
+            return Err(SchemaError::InvalidGraph(format!(
+                "condition function {} has an empty name",
+                function.index()
+            )));
+        }
+        validate_string(function.name(), limits)?;
+        validate_string(function.description(), limits)?;
+        for (variant, aliasable) in function
+            .parameter_variants()
+            .into_iter()
+            .zip(function.aliasable_parameters())
+        {
+            if aliasable && variant == 0 {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "condition function {} has an aliasable empty parameter",
+                    function.index()
+                )));
+            }
+        }
+        previous_index = Some(function.index());
+    }
+    Ok(())
 }
 
 fn validate_semantic_selector_bindings(
@@ -930,7 +1018,9 @@ fn validate_string(value: &str, limits: &SchemaLoadLimits) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ByteOrder, IntegerType, PrimitiveType, SchemaNodeKind, UnionSelector};
+    use crate::{
+        ByteOrder, ConditionFunction, IntegerType, PrimitiveType, SchemaNodeKind, UnionSelector,
+    };
 
     /// Rejects field expressions that read a field not yet decoded.
     #[test]
@@ -1103,6 +1193,67 @@ mod tests {
         // then
         assert_eq!(first, second);
         assert_eq!(decoded.records().len(), 1);
+        Ok(())
+    }
+
+    /// Preserves one shared xEdit condition-function table through CBOR.
+    #[test]
+    fn package_round_trip_preserves_condition_functions(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let base = test_package()?;
+        let function = ConditionFunction::new(
+            1,
+            "GetDistance",
+            "Gets the distance to a reference.",
+            [36, 1, 1],
+            [true, false, false],
+        );
+        let package = SchemaPackage::new_with_semantics(
+            base.manifest.clone(),
+            base.records.clone(),
+            Vec::new(),
+            Some(ConditionFunctionTable::new(
+                Some(9),
+                Some(39),
+                vec![function.clone()],
+            )),
+        )?;
+
+        // when
+        let decoded = SchemaPackage::from_bytes(&package.to_bytes()?)?;
+
+        // then
+        let table = decoded
+            .condition_function_table()
+            .expect("test package contains condition metadata");
+        assert_eq!(table.alias_variant(), Some(9));
+        assert_eq!(table.packdata_variant(), Some(39));
+        assert_eq!(table.functions(), &[function]);
+        Ok(())
+    }
+
+    /// Rejects duplicate or unsorted condition-function identifiers.
+    #[test]
+    fn package_rejects_unsorted_condition_functions(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let base = test_package()?;
+        let functions = vec![
+            ConditionFunction::new(5, "GetLocked", "", [1, 1, 1], [false; 3]),
+            ConditionFunction::new(1, "GetDistance", "", [36, 1, 1], [true, false, false]),
+        ];
+
+        // when
+        let result = SchemaPackage::new_with_semantics(
+            base.manifest,
+            base.records,
+            Vec::new(),
+            Some(ConditionFunctionTable::new(None, None, functions)),
+        );
+
+        // then
+        assert!(matches!(result, Err(SchemaError::InvalidGraph(_))));
         Ok(())
     }
 
