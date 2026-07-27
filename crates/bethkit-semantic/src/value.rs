@@ -55,7 +55,7 @@ pub enum FieldOrigin {
 }
 
 /// A named nested value.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NamedValue<'a> {
     /// Stable schema node identifier.
     pub node_id: SchemaNodeId,
@@ -70,7 +70,7 @@ pub struct NamedValue<'a> {
 }
 
 /// A decoded value that borrows strings and bytes from the source record.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FieldValue<'a> {
     /// Signed integer.
     Int(i64),

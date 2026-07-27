@@ -95,12 +95,13 @@ impl RecordEditor {
         let encoded: Vec<u8> = self.encode_node(payload, &normalized)?;
         let decoded = self.owned_to_handler_value(payload, &normalized)?;
         let mut candidate = clone_record(&self.record);
+        let mut decoded_values = self.decoded_values.clone();
         candidate.subrecords[index].data = encoded;
-        self.apply_mutations(&mut candidate, mutations)?;
-        self.apply_record_after_set(&mut candidate)?;
+        decoded_values.insert((path.to_owned(), occurrence), decoded);
+        self.apply_mutations_with_values(&mut candidate, &mut decoded_values, mutations)?;
+        self.apply_record_after_set(&mut candidate, &mut decoded_values)?;
         self.record = candidate;
-        self.decoded_values
-            .insert((path.to_owned(), occurrence), decoded);
+        self.decoded_values = decoded_values;
         Ok(())
     }
 
@@ -191,11 +192,12 @@ impl RecordEditor {
                 data: encoded,
             },
         );
-        self.apply_mutations(&mut candidate, mutations)?;
-        self.apply_record_after_set(&mut candidate)?;
+        let mut decoded_values = self.decoded_values.clone();
+        decoded_values.insert((path.to_owned(), occurrence), decoded);
+        self.apply_mutations_with_values(&mut candidate, &mut decoded_values, mutations)?;
+        self.apply_record_after_set(&mut candidate, &mut decoded_values)?;
         self.record = candidate;
-        self.decoded_values
-            .insert((path.to_owned(), occurrence), decoded);
+        self.decoded_values = decoded_values;
         Ok(())
     }
 
@@ -214,10 +216,12 @@ impl RecordEditor {
         };
         let index = self.assigned_subrecord_index(&self.record, path, occurrence)?;
         let mut candidate = clone_record(&self.record);
+        let mut decoded_values = self.decoded_values.clone();
         candidate.subrecords.remove(index);
-        self.apply_record_after_set(&mut candidate)?;
+        remove_decoded_occurrence(&mut decoded_values, path, occurrence);
+        self.apply_record_after_set(&mut candidate, &mut decoded_values)?;
         self.record = candidate;
-        self.remove_decoded_occurrence(path, occurrence);
+        self.decoded_values = decoded_values;
         Ok(())
     }
 
@@ -819,9 +823,10 @@ impl RecordEditor {
         )
     }
 
-    fn apply_mutations(
+    fn apply_mutations_with_values(
         &self,
         record: &mut WritableRecord,
+        decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
         mutations: Vec<HandlerMutation>,
     ) -> Result<()> {
         for mutation in mutations {
@@ -831,20 +836,35 @@ impl RecordEditor {
                     occurrence,
                     value,
                 } => {
-                    let (signature, encoded) = self.encode_path(&path, &value)?;
-                    let index = self.assigned_subrecord_index(record, &path, occurrence)?;
-                    if record.subrecords[index].signature != signature {
-                        return Err(SemanticError::Encode {
-                            path,
-                            message: "assigned subrecord signature does not match schema"
-                                .to_owned(),
-                        });
+                    let node = self.find_node(&path)?;
+                    if let SchemaNodeKind::Subrecord { signature, payload } = &node.kind {
+                        let signature = Signature::from(*signature);
+                        let encoded = self.encode_node(payload, &value)?;
+                        let index = self.assigned_subrecord_index(record, &path, occurrence)?;
+                        if record.subrecords[index].signature != signature {
+                            return Err(SemanticError::Encode {
+                                path,
+                                message: "assigned subrecord signature does not match schema"
+                                    .to_owned(),
+                            });
+                        }
+                        record.subrecords[index].data = encoded;
+                        let decoded = self.owned_to_handler_value(payload, &value)?;
+                        decoded_values.insert((path, occurrence), decoded);
+                    } else {
+                        self.apply_nested_set(record, decoded_values, &path, occurrence, value)?;
                     }
-                    record.subrecords[index].data = encoded;
                 }
                 HandlerMutation::Insert { path, value } => {
                     let (signature, encoded) = self.encode_path(&path, &value)?;
                     let node = self.find_node(&path)?;
+                    let SchemaNodeKind::Subrecord { payload, .. } = &node.kind else {
+                        return Err(SemanticError::Encode {
+                            path,
+                            message: "handler mutation path is not a subrecord".to_owned(),
+                        });
+                    };
+                    let occurrence = self.assigned_occurrence_count(record, &path)?;
                     let index = self.schema_insertion_index(record, node)?;
                     record.subrecords.insert(
                         index,
@@ -853,6 +873,8 @@ impl RecordEditor {
                             data: encoded,
                         },
                     );
+                    let decoded = self.owned_to_handler_value(payload, &value)?;
+                    decoded_values.insert((path, occurrence), decoded);
                 }
                 HandlerMutation::Remove { path, occurrence } => {
                     let node = self.find_node(&path)?;
@@ -872,6 +894,7 @@ impl RecordEditor {
                         });
                     }
                     record.subrecords.remove(index);
+                    remove_decoded_occurrence(decoded_values, &path, occurrence);
                 }
                 HandlerMutation::SynchronizeCount {
                     path,
@@ -879,6 +902,13 @@ impl RecordEditor {
                     value,
                     remove_when_zero,
                 } => {
+                    let node = self.find_node(&path)?;
+                    let SchemaNodeKind::Subrecord { payload, .. } = &node.kind else {
+                        return Err(SemanticError::Encode {
+                            path,
+                            message: "counter path is not a subrecord".to_owned(),
+                        });
+                    };
                     let existing = self
                         .assigned_subrecord_index(record, &path, occurrence)
                         .map(Some)
@@ -889,6 +919,7 @@ impl RecordEditor {
                     if value == 0 && remove_when_zero {
                         if let Some(index) = existing {
                             record.subrecords.remove(index);
+                            remove_decoded_occurrence(decoded_values, &path, occurrence);
                         }
                         continue;
                     }
@@ -903,8 +934,11 @@ impl RecordEditor {
                             });
                         }
                         record.subrecords[index].data = encoded;
+                        decoded_values.insert(
+                            (path, occurrence),
+                            self.owned_to_handler_value(payload, &OwnedFieldValue::UInt(value))?,
+                        );
                     } else {
-                        let node = self.find_node(&path)?;
                         let index = self.schema_insertion_index(record, node)?;
                         record.subrecords.insert(
                             index,
@@ -913,6 +947,10 @@ impl RecordEditor {
                                 data: encoded,
                             },
                         );
+                        decoded_values.insert(
+                            (path, occurrence),
+                            self.owned_to_handler_value(payload, &OwnedFieldValue::UInt(value))?,
+                        );
                     }
                 }
             }
@@ -920,7 +958,72 @@ impl RecordEditor {
         Ok(())
     }
 
-    fn apply_record_after_set(&self, record: &mut WritableRecord) -> Result<()> {
+    fn apply_nested_set(
+        &self,
+        record: &mut WritableRecord,
+        decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+        path: &str,
+        occurrence: usize,
+        value: OwnedFieldValue,
+    ) -> Result<()> {
+        let schema = self
+            .registry
+            .get(record.signature)
+            .ok_or_else(|| SemanticError::MissingRecordSchema(record.signature.to_string()))?;
+        let parent = find_containing_subrecord(&schema.root, path)
+            .ok_or_else(|| SemanticError::MissingPath(path.to_owned()))?
+            .clone();
+        let parent_occurrences = decoded_values
+            .keys()
+            .filter_map(|(candidate, occurrence)| {
+                (candidate == &parent.path).then_some(*occurrence)
+            })
+            .collect::<Vec<_>>();
+        let mut remaining_occurrence = occurrence;
+        let mut replacement = Some(value);
+        for parent_occurrence in parent_occurrences {
+            let key = (parent.path.clone(), parent_occurrence);
+            let current =
+                decoded_values
+                    .get(&key)
+                    .ok_or_else(|| SemanticError::MissingOccurrence {
+                        path: parent.path.clone(),
+                        occurrence: parent_occurrence,
+                    })?;
+            let mut updated = handler_to_owned_value(current.to_handler_value(), &parent.path)?;
+            if !self.set_nested_value(
+                &parent,
+                &mut updated,
+                path,
+                &mut remaining_occurrence,
+                &mut replacement,
+            )? {
+                continue;
+            }
+            let (signature, encoded) = self.encode_path(&parent.path, &updated)?;
+            let index = self.assigned_subrecord_index(record, &parent.path, parent_occurrence)?;
+            if record.subrecords[index].signature != signature {
+                return Err(SemanticError::Encode {
+                    path: parent.path,
+                    message: "assigned subrecord signature does not match schema".to_owned(),
+                });
+            }
+            record.subrecords[index].data = encoded;
+            let decoded = self.owned_to_handler_value(&parent, &updated)?;
+            decoded_values.insert(key, decoded);
+            return Ok(());
+        }
+        Err(SemanticError::MissingOccurrence {
+            path: path.to_owned(),
+            occurrence,
+        })
+    }
+
+    fn apply_record_after_set(
+        &self,
+        record: &mut WritableRecord,
+        decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+    ) -> Result<()> {
         let record_path = record.signature.to_string();
         for binding in self
             .registry
@@ -949,7 +1052,7 @@ impl RecordEditor {
             )? {
                 HandlerOutput::None => {}
                 HandlerOutput::Mutations(handler_mutations) => {
-                    self.apply_mutations(record, handler_mutations)?;
+                    self.apply_mutations_with_values(record, decoded_values, handler_mutations)?;
                 }
                 _ => {
                     return Err(SemanticError::Handler {
@@ -1037,22 +1140,6 @@ impl RecordEditor {
         Ok(())
     }
 
-    fn remove_decoded_occurrence(&mut self, path: &str, occurrence: usize) {
-        self.decoded_values.remove(&(path.to_owned(), occurrence));
-        let shifted = self
-            .decoded_values
-            .keys()
-            .filter(|(candidate, index)| candidate == path && *index > occurrence)
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in shifted {
-            if let Some(value) = self.decoded_values.remove(&key) {
-                self.decoded_values
-                    .insert((key.0, key.1.saturating_sub(1)), value);
-            }
-        }
-    }
-
     fn encode_path(&self, path: &str, value: &OwnedFieldValue) -> Result<(Signature, Vec<u8>)> {
         let node = self.find_node(path)?;
         let SchemaNodeKind::Subrecord { signature, payload } = &node.kind else {
@@ -1065,6 +1152,24 @@ impl RecordEditor {
             Signature::from(*signature),
             self.encode_node(payload, value)?,
         ))
+    }
+}
+
+fn remove_decoded_occurrence(
+    decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+    path: &str,
+    occurrence: usize,
+) {
+    decoded_values.remove(&(path.to_owned(), occurrence));
+    let shifted = decoded_values
+        .keys()
+        .filter(|(candidate, index)| candidate == path && *index > occurrence)
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in shifted {
+        if let Some(value) = decoded_values.remove(&key) {
+            decoded_values.insert((key.0, key.1.saturating_sub(1)), value);
+        }
     }
 }
 
@@ -2049,6 +2154,110 @@ mod tests {
         })
     }
 
+    fn editor_with_nested_counter() -> Result<RecordEditor> {
+        let count_path = "TEST/0:IDLC/payload/0:Animation Count";
+        let unused_path = "TEST/0:IDLC/payload/1:Unused";
+        let payload = SchemaNode {
+            id: SchemaNodeId(2),
+            path: "TEST/0:IDLC/payload".to_owned(),
+            name: "Animation Control".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    SchemaNode {
+                        id: SchemaNodeId(3),
+                        path: count_path.to_owned(),
+                        name: "Animation Count".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::Integer {
+                                integer: IntegerType {
+                                    width: 1,
+                                    signed: false,
+                                    byte_order: ByteOrder::LittleEndian,
+                                },
+                            },
+                        },
+                    },
+                    SchemaNode {
+                        id: SchemaNodeId(4),
+                        path: unused_path.to_owned(),
+                        name: "Unused".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Ignore,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::Unused { length: 3 },
+                        },
+                    },
+                ],
+            },
+        };
+        let parent = SchemaNode {
+            id: SchemaNodeId(1),
+            path: "TEST/0:IDLC".to_owned(),
+            name: "Animation Count".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(*b"IDLC"),
+                payload: Box::new(payload.clone()),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            test_manifest(),
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "TEST".to_owned(),
+                    name: "Test".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![parent],
+                    },
+                },
+            }],
+            Vec::new(),
+        )?;
+        let mut editor = RecordEditor {
+            registry: bethkit_schema::SchemaRegistry::new(Arc::new(package)),
+            decoders: crate::DecoderRegistry::builtin(),
+            handlers: SemanticHandlerRegistry::builtin(),
+            record: WritableRecord {
+                signature: Signature(*b"TEST"),
+                flags: bethkit_core::RecordFlags::empty(),
+                form_id: bethkit_core::FormId::NULL,
+                form_version: 44,
+                subrecords: vec![WritableSubRecord {
+                    signature: Signature(*b"IDLC"),
+                    data: vec![1, 0xaa, 0xbb, 0xcc],
+                }],
+            },
+            localized: false,
+            decoded_values: BTreeMap::new(),
+        };
+        let decoded = editor.owned_to_handler_value(
+            &payload,
+            &OwnedFieldValue::Struct(vec![
+                OwnedFieldValue::UInt(1),
+                OwnedFieldValue::Bytes(vec![0xaa, 0xbb, 0xcc]),
+            ]),
+        )?;
+        editor
+            .decoded_values
+            .insert(("TEST/0:IDLC".to_owned(), 0), decoded);
+        Ok(editor)
+    }
+
     #[test]
     fn windows_1252_strings_encode_exact_bytes() {
         let bytes = encode_primitive(
@@ -2082,14 +2291,57 @@ mod tests {
         Ok(())
     }
 
+    /// Applies multiple nested callback changes without losing sibling bytes.
+    #[test]
+    fn callback_mutations_update_nested_fields_transactionally() -> Result<()> {
+        // given
+        let editor = editor_with_nested_counter()?;
+        let mut record = clone_record(&editor.record);
+        let mut decoded_values = editor.decoded_values.clone();
+
+        // when
+        editor.apply_mutations_with_values(
+            &mut record,
+            &mut decoded_values,
+            vec![
+                HandlerMutation::Set {
+                    path: "TEST/0:IDLC/payload/0:Animation Count".to_owned(),
+                    occurrence: 0,
+                    value: OwnedFieldValue::UInt(7),
+                },
+                HandlerMutation::Set {
+                    path: "TEST/0:IDLC/payload/1:Unused".to_owned(),
+                    occurrence: 0,
+                    value: OwnedFieldValue::Bytes(vec![9, 8, 7]),
+                },
+            ],
+        )?;
+
+        // then
+        assert_eq!(record.subrecords[0].data, vec![7, 9, 8, 7]);
+        let cached = decoded_values
+            .get(&("TEST/0:IDLC".to_owned(), 0))
+            .ok_or_else(|| SemanticError::MissingPath("TEST/0:IDLC".to_owned()))?;
+        assert_eq!(
+            handler_to_owned_value(cached.to_handler_value(), "TEST/0:IDLC")?,
+            OwnedFieldValue::Struct(vec![
+                OwnedFieldValue::UInt(7),
+                OwnedFieldValue::Bytes(vec![9, 8, 7]),
+            ])
+        );
+        Ok(())
+    }
+
     /// Inserts, updates, and removes optional counters in schema order.
     #[test]
     fn editor_synchronizes_optional_counter_transactionally() -> Result<()> {
         let editor = editor_with_reused_signature()?;
         let mut record = clone_record(&editor.record);
+        let mut decoded_values = editor.decoded_values.clone();
 
-        editor.apply_mutations(
+        editor.apply_mutations_with_values(
             &mut record,
+            &mut decoded_values,
             vec![HandlerMutation::SynchronizeCount {
                 path: "TEST/2:Value Count".to_owned(),
                 occurrence: 0,
@@ -2113,8 +2365,9 @@ mod tests {
         );
         assert_eq!(record.subrecords[2].data, 3_u32.to_le_bytes());
 
-        editor.apply_mutations(
+        editor.apply_mutations_with_values(
             &mut record,
+            &mut decoded_values,
             vec![HandlerMutation::SynchronizeCount {
                 path: "TEST/2:Value Count".to_owned(),
                 occurrence: 0,
