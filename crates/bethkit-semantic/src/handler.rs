@@ -445,6 +445,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(InvalidateConflicts));
         registry.register(Arc::new(CtdaTypeFormatter));
         registry.register(Arc::new(IntegerLookupFormatter));
+        registry.register(Arc::new(EventFunctionMemberFormatter));
         registry.register(Arc::new(SynchronizeCountAfterSet));
         registry.register(Arc::new(SynchronizeRecordCountsAfterSet));
         registry.register(Arc::new(InvalidModelInfoValidation));
@@ -2939,6 +2940,93 @@ impl SemanticHandler for IntegerLookupFormatter {
     }
 }
 
+struct EventFunctionMemberFormatter;
+
+impl SemanticHandler for EventFunctionMemberFormatter {
+    fn id(&self) -> &'static str {
+        "format.event_function_member"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let values = event_function_member_values(invocation.context.configuration, self.id())?;
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let FieldValue::String(input) =
+                invocation.value.ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "event function/member parsing requires text".to_owned(),
+                })?
+            else {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "event function/member parsing requires text".to_owned(),
+                });
+            };
+            let Some((function, member)) = input.split_once(':') else {
+                return Ok(HandlerOutput::Value(FieldValue::UInt(0)));
+            };
+            let function = parse_event_component(function, &values.functions, self.id())?;
+            let member = parse_event_component(member, &values.members, self.id())?;
+            let packed = member
+                .checked_shl(16)
+                .and_then(|member| member.checked_add(function))
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "event function/member edit value overflowed i64".to_owned(),
+                })?;
+            return Ok(HandlerOutput::Value(if packed < 0 {
+                FieldValue::Int(packed)
+            } else {
+                FieldValue::UInt(packed as u64)
+            }));
+        }
+
+        let raw = callback_integer(
+            invocation.value.ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "event function/member formatting requires an integer".to_owned(),
+            })?,
+            self.id(),
+        )?;
+        let packed = callback_u32(raw, self.id())?;
+        let function = i64::from((packed & 0xFFFF) as u16);
+        let member = i64::from((packed >> 16) as u16);
+        let function_name = event_component_name(function, &values.functions);
+        let member_name = event_component_name(member, &values.members);
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+                format!(
+                    "{}:{}",
+                    function_name.map_or_else(|| function.to_string(), str::to_owned),
+                    member_name.map_or_else(|| member.to_string(), str::to_owned)
+                )
+            }
+            HandlerPhase::SortKey => format!("{packed:08X}"),
+            HandlerPhase::NativeValue => String::new(),
+            HandlerPhase::Validation => {
+                let function_error = function_name.map_or_else(
+                    || format!("EventFunction<Unknown: {function}>"),
+                    |_| String::new(),
+                );
+                let member_error = member_name.map_or_else(
+                    || format!("EventMember<Unknown: {member}>"),
+                    |_| String::new(),
+                );
+                if function_error.is_empty() && member_error.is_empty() {
+                    String::new()
+                } else {
+                    format!("{function_error}:{member_error}")
+                }
+            }
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
 struct SynchronizeCountAfterSet;
 
 impl SemanticHandler for SynchronizeCountAfterSet {
@@ -3217,6 +3305,126 @@ fn integer_lookup_values<'a>(
     Ok(output)
 }
 
+struct EventFunctionMemberValues<'a> {
+    functions: Vec<(i64, &'a str)>,
+    members: Vec<(i64, &'a str)>,
+}
+
+fn event_function_member_values<'a>(
+    configuration: &'a serde_json::Value,
+    handler: &str,
+) -> Result<EventFunctionMemberValues<'a>> {
+    let values = configuration
+        .get("values")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "event function/member formatter requires a values array".to_owned(),
+        })?;
+    let mut functions = Vec::new();
+    let mut members = Vec::new();
+    for entry in values {
+        let value = entry
+            .get("value")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: "event function/member value must be an i64".to_owned(),
+            })?;
+        if !(i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(&value) {
+            return Err(SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: "event function/member value exceeds 32 bits".to_owned(),
+            });
+        }
+        let name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: "event function/member name must be text".to_owned(),
+            })?;
+        let (function_name, member_name) =
+            name.split_once(':').ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!("event function/member name {name:?} has no separator"),
+            })?;
+        let packed = value as u32;
+        insert_event_component(
+            &mut functions,
+            i64::from((packed & 0xFFFF) as u16),
+            function_name,
+            handler,
+        )?;
+        insert_event_component(
+            &mut members,
+            i64::from((packed >> 16) as u16),
+            member_name,
+            handler,
+        )?;
+    }
+    if functions.is_empty() || members.is_empty() {
+        return Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "event function/member values must not be empty".to_owned(),
+        });
+    }
+    Ok(EventFunctionMemberValues { functions, members })
+}
+
+fn insert_event_component<'a>(
+    values: &mut Vec<(i64, &'a str)>,
+    value: i64,
+    name: &'a str,
+    handler: &str,
+) -> Result<()> {
+    if name.is_empty() || parse_delphi_integer(name, handler).is_ok() {
+        return Ok(());
+    }
+    if let Some((_, existing_name)) = values.iter().find(|(candidate, _)| *candidate == value) {
+        if *existing_name != name {
+            return Err(SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!(
+                    "event component {value} has conflicting names {existing_name:?} and {name:?}"
+                ),
+            });
+        }
+        return Ok(());
+    }
+    if let Some((existing_value, _)) = values
+        .iter()
+        .find(|(_, existing_name)| existing_name.eq_ignore_ascii_case(name))
+    {
+        if *existing_value != value {
+            return Err(SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!(
+                    "event component {name:?} has conflicting values {existing_value} and {value}"
+                ),
+            });
+        }
+        return Ok(());
+    }
+    values.push((value, name));
+    Ok(())
+}
+
+fn event_component_name<'a>(value: i64, values: &[(i64, &'a str)]) -> Option<&'a str> {
+    values
+        .iter()
+        .find(|(candidate, _)| *candidate == value)
+        .map(|(_, name)| *name)
+}
+
+fn parse_event_component(input: &str, values: &[(i64, &str)], handler: &str) -> Result<i64> {
+    values
+        .iter()
+        .find(|(_, name)| name.eq_ignore_ascii_case(input))
+        .map(|(value, _)| *value)
+        .map_or_else(|| parse_delphi_integer(input, handler), Ok)
+}
+
 fn configuration_string<'a>(
     configuration: &'a serde_json::Value,
     key: &str,
@@ -3436,6 +3644,19 @@ fn callback_integer(value: &FieldValue<'_>, handler: &str) -> Result<i128> {
             message: "callback requires an integer value".to_owned(),
         }),
     }
+}
+
+fn callback_u32(value: i128, handler: &str) -> Result<u32> {
+    if (0..=i128::from(u32::MAX)).contains(&value) {
+        return Ok(value as u32);
+    }
+    if (i128::from(i32::MIN)..0).contains(&value) {
+        return Ok(value as i32 as u32);
+    }
+    Err(SemanticError::Handler {
+        handler: handler.to_owned(),
+        message: "callback value exceeds 32 bits".to_owned(),
+    })
 }
 
 fn parse_delphi_integer(value: &str, handler: &str) -> Result<i64> {
@@ -6421,6 +6642,135 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::Int(123))
+        ));
+        Ok(())
+    }
+
+    /// Matches xEdit's paired Starfield event function/member formatter.
+    #[test]
+    fn event_function_member_formatter_preserves_each_component() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/value".to_owned(),
+            callback_id: "integer.formatter".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-event-function-member".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "format.event_function_member".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "values": [
+                            { "value": 0, "name": "GetIsID:None" },
+                            { "value": 4, "name": "GetItemValue:None" },
+                            { "value": 826671104, "name": "GetIsID:Form" },
+                            { "value": -65536, "name": "GetIsID:-1" }
+                        ]
+                    }),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Starfield);
+        let known = FieldValue::UInt(0x3146_0004);
+        for phase in [
+            HandlerPhase::Display,
+            HandlerPhase::Summary,
+            HandlerPhase::EditValue,
+        ] {
+            assert!(matches!(
+                handlers.invoke(&binding, record, phase, Some(&known), None)?,
+                HandlerOutput::Text(text) if text == "GetItemValue:Form"
+            ));
+        }
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::SortKey,
+                Some(&known),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "31460004"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::Validation,
+                Some(&known),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text.is_empty()
+        ));
+
+        let unknown = FieldValue::UInt(0x1234_0009);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::Display,
+                Some(&unknown),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "9:4660"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::Validation,
+                Some(&unknown),
+                None,
+            )?,
+            HandlerOutput::Text(text)
+                if text == "EventFunction<Unknown: 9>:EventMember<Unknown: 4660>"
+        ));
+
+        let named_edit = FieldValue::String(Cow::Borrowed("getitemvalue:form"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&named_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(0x3146_0004))
+        ));
+        let negative_edit = FieldValue::String(Cow::Borrowed("GetIsID:-1"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&negative_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(-65_536))
+        ));
+        let no_separator = FieldValue::String(Cow::Borrowed("GetItemValue"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&no_separator),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(0))
+        ));
+
+        let numeric_edit_value = FieldValue::UInt(0xFFFF_0000);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::Display,
+                Some(&numeric_edit_value),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "GetIsID:65535"
         ));
         Ok(())
     }
