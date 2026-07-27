@@ -769,6 +769,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectNoteData));
         registry.register(Arc::new(SelectSoundDescriptorData));
         registry.register(Arc::new(SelectAudioEffectData));
+        registry.register(Arc::new(SelectStarfieldComponentData));
+        registry.register(Arc::new(SelectStarfieldComponentDat2));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -3947,6 +3949,10 @@ struct SelectSoundDescriptorData;
 
 struct SelectAudioEffectData;
 
+struct SelectStarfieldComponentData;
+
+struct SelectStarfieldComponentDat2;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4176,6 +4182,70 @@ impl SemanticHandler for SelectAudioEffectData {
         };
         Ok(HandlerOutput::Integer(selected))
     }
+}
+
+impl SemanticHandler for SelectStarfieldComponentData {
+    fn id(&self) -> &'static str {
+        "select.starfield_component_data"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let component = source_subrecord_text(&invocation, Signature(*b"BFCB"), self.id())?;
+        let selected = match component {
+            Some("BGSStarDataComponent_Component") => 1,
+            Some("BGSOrbitedDataComponent_Component") => 2,
+            Some("BGSOrbitalDataComponent_Component") => 3,
+            Some("BGSBlockEditorMetaData_Component") => 4,
+            Some("UniqueOverlayList_Component") => 5,
+            Some("UniquePatternPlacementInfo_Component") => 6,
+            _ => 0,
+        };
+        Ok(HandlerOutput::Integer(selected))
+    }
+}
+
+impl SemanticHandler for SelectStarfieldComponentDat2 {
+    fn id(&self) -> &'static str {
+        "select.starfield_component_dat2"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let component = source_subrecord_text(&invocation, Signature(*b"BFCB"), self.id())?;
+        Ok(HandlerOutput::Integer(i64::from(
+            component == Some("BlockHeightAdjustment_Component"),
+        )))
+    }
+}
+
+fn source_subrecord_text<'a>(
+    invocation: &HandlerInvocation<'a>,
+    signature: Signature,
+    handler: &str,
+) -> Result<Option<&'a str>> {
+    let Some(bytes) = source_subrecord_bytes(invocation, signature, handler)? else {
+        return Ok(None);
+    };
+    let bytes = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+    std::str::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("{signature} text is not valid UTF-8: {error}"),
+        })
 }
 
 fn source_subrecord_bytes<'a>(
@@ -9042,6 +9112,59 @@ mod tests {
             assert!(matches!(
                 handlers.invoke_with_subrecord(
                     &binding,
+                    context,
+                    HandlerSubrecordSource::ReadOnly {
+                        record: &record,
+                        index: source_index,
+                    },
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
+        Ok(())
+    }
+
+    /// Selects Starfield component payloads from each repeat-local BFCB name.
+    #[test]
+    fn starfield_component_selectors_use_exact_subrecord_position() -> TestResult {
+        // given
+        let data_binding = test_metadata_binding(
+            "union.select",
+            "select.starfield_component_data",
+            serde_json::json!({}),
+        );
+        let dat2_binding = test_metadata_binding(
+            "union.select",
+            "select.starfield_component_dat2",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"PLAN"), FormId::NULL, 0, SchemaGame::Starfield);
+        let record = test_record(
+            *b"PLAN",
+            &[
+                (*b"BFCB", b"BGSStarDataComponent_Component\0".to_vec()),
+                (*b"DATA", vec![0; 8]),
+                (*b"BFCB", b"UniqueOverlayList_Component\0".to_vec()),
+                (*b"DATA", vec![0; 8]),
+                (*b"BFCB", b"BlockHeightAdjustment_Component\0".to_vec()),
+                (*b"DAT2", vec![0; 8]),
+            ],
+        )?;
+
+        // when / then
+        for (binding, source_index, expected) in [
+            (&data_binding, 1_usize, 1_i64),
+            (&data_binding, 3, 5),
+            (&dat2_binding, 5, 1),
+        ] {
+            assert!(matches!(
+                handlers.invoke_with_subrecord(
+                    binding,
                     context,
                     HandlerSubrecordSource::ReadOnly {
                         record: &record,
