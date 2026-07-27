@@ -345,6 +345,7 @@ pub trait NextObjectIdResolver: Send + Sync {
 pub struct FormLinkInfo {
     value: String,
     short_name: String,
+    signature: Option<Signature>,
     editor_id: Option<String>,
     quest_aliases: Option<Vec<QuestAliasInfo>>,
     quest_stages: Option<Vec<QuestStageInfo>>,
@@ -358,6 +359,7 @@ impl FormLinkInfo {
         Self {
             value: value.into(),
             short_name: short_name.into(),
+            signature: None,
             editor_id: None,
             quest_aliases: None,
             quest_stages: None,
@@ -369,6 +371,12 @@ impl FormLinkInfo {
     /// Adds the exact editor ID used by xEdit's link-dependent callbacks.
     pub fn with_editor_id(mut self, editor_id: impl Into<String>) -> Self {
         self.editor_id = Some(editor_id.into());
+        self
+    }
+
+    /// Adds the resolved main-record signature used by link-dependent union selectors.
+    pub fn with_signature(mut self, signature: Signature) -> Self {
+        self.signature = Some(signature);
         self
     }
 
@@ -404,6 +412,11 @@ impl FormLinkInfo {
     /// Returns the compact xEdit main-record name.
     pub fn short_name(&self) -> &str {
         &self.short_name
+    }
+
+    /// Returns the resolved main-record signature when one is available.
+    pub fn signature(&self) -> Option<Signature> {
+        self.signature
     }
 
     /// Returns the linked record's editor ID when one is available.
@@ -729,6 +742,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ModelInfoCounts));
         registry.register(Arc::new(ModelInfoArrayCount));
         registry.register(Arc::new(SelectCtdaParameter { table: None }));
+        registry.register(Arc::new(SelectCoedOwner { resolver: None }));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -806,6 +820,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(ResolveVmadObjectAliasLink {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(SelectCoedOwner {
             resolver: Some(resolver),
         }));
     }
@@ -3853,6 +3870,10 @@ struct SelectCtdaParameter {
     table: Option<Arc<ConditionFunctionTable>>,
 }
 
+struct SelectCoedOwner {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -3927,6 +3948,66 @@ impl SemanticHandler for SelectCtdaParameter {
             )?;
         }
         Ok(HandlerOutput::Integer(i64::from(variant)))
+    }
+}
+
+impl SemanticHandler for SelectCoedOwner {
+    fn id(&self) -> &'static str {
+        "select.coed_owner"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let bytes = match invocation.value {
+            Some(FieldValue::Bytes(value)) => value.as_ref(),
+            _ => {
+                return Err(coed_owner_error(
+                    "owner union selection requires payload bytes",
+                ))
+            }
+        };
+        let offset = invocation
+            .context
+            .configuration
+            .get("owner_offset")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| coed_owner_error("owner_offset is missing or invalid"))?;
+        let end = offset
+            .checked_add(4)
+            .ok_or_else(|| coed_owner_error("owner offset overflowed"))?;
+        let form_id = bytes
+            .get(offset..end)
+            .and_then(|value| value.try_into().ok())
+            .map(u32::from_le_bytes)
+            .map(FormId)
+            .ok_or_else(|| coed_owner_error("owner FormID exceeds the callback payload"))?;
+        let Some(record) = self.resolver.as_deref().and_then(|resolver| {
+            resolver.resolve_form_id(
+                handler_record_context(&invocation.context),
+                form_id,
+                &[Signature(*b"NPC_"), Signature(*b"FACT")],
+            )
+        }) else {
+            return Ok(HandlerOutput::Integer(0));
+        };
+        let signature = record.signature().ok_or_else(|| {
+            coed_owner_error("FormID resolver did not supply the owner record signature")
+        })?;
+        let selected = if signature == Signature(*b"NPC_") {
+            1
+        } else if signature == Signature(*b"FACT") {
+            2
+        } else {
+            0
+        };
+        Ok(HandlerOutput::Integer(selected))
     }
 }
 
@@ -4038,6 +4119,13 @@ fn configured_integer_error(handler: &str, prefix: &str, message: &str) -> Seman
 fn ctda_parameter_error(message: impl Into<String>) -> SemanticError {
     SemanticError::Handler {
         handler: "select.ctda_parameter".to_owned(),
+        message: message.into(),
+    }
+}
+
+fn coed_owner_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "select.coed_owner".to_owned(),
         message: message.into(),
     }
 }
@@ -6530,13 +6618,19 @@ mod tests {
             match form_id {
                 FormId(0x1234) => Some(
                     FormLinkInfo::new("[00001234] Example Faction", "Example Item [MISC:00001234]")
+                        .with_signature(Signature(*b"FACT"))
                         .with_editor_id("ExampleActorValue"),
+                ),
+                FormId(0x2468) => Some(
+                    FormLinkInfo::new("[00002468] Example Actor", "Example Actor [NPC_:00002468]")
+                        .with_signature(Signature(*b"NPC_")),
                 ),
                 FormId(0x3456) => Some(
                     FormLinkInfo::new(
                         "Example Terminal [TERM:00003456]",
                         "Example Terminal [TERM:00003456]",
                     )
+                    .with_signature(Signature(*b"TERM"))
                     .with_script_variables(ScriptVariableMetadata::resolved(
                         "ExampleScript [SCPT:00007890]",
                         vec![
@@ -6550,6 +6644,7 @@ mod tests {
                         "Example Quest [QUST:00005678]",
                         "Example Quest [QUST:00005678]",
                     )
+                    .with_signature(Signature(*b"QUST"))
                     .with_quest_aliases(vec![
                         QuestAliasInfo::new(7, "Target"),
                         QuestAliasInfo::new(12, ""),
@@ -8591,6 +8686,37 @@ mod tests {
             ));
         };
         assert!(matches!(&fields[0].value, FieldValue::Array(values) if values.is_empty()));
+        Ok(())
+    }
+
+    /// Selects COED owner data from the resolved owner record signature.
+    #[test]
+    fn coed_owner_selector_matches_xedit_links() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.coed_owner",
+            serde_json::json!({ "owner_offset": 0 }),
+        );
+        let context =
+            HandlerRecordContext::new(Signature(*b"CONT"), FormId::NULL, 0, SchemaGame::Fallout4);
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+
+        // when / then
+        for (form_id, expected) in [(0x2468_u32, 1_i64), (0x1234, 2), (0x9999, 0)] {
+            let payload = FieldValue::Bytes(Cow::Owned(form_id.to_le_bytes().to_vec()));
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::UnionSelection,
+                    Some(&payload),
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
         Ok(())
     }
 
