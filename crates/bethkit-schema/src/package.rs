@@ -980,6 +980,14 @@ fn validate_expression_fields(
         | Expression::BitCount { value } => {
             validate_expression_fields(value, visible_fields, expression_path, limits)?;
         }
+        Expression::IntegerLookup { value, cases, .. } => {
+            validate_expression_fields(value, visible_fields, expression_path, limits)?;
+            if cases.windows(2).any(|pair| pair[0].input >= pair[1].input) {
+                return Err(SchemaError::InvalidGraph(format!(
+                    "integer lookup at {expression_path} must have strictly increasing inputs"
+                )));
+            }
+        }
         Expression::And { values } | Expression::Or { values } => {
             for value in values {
                 validate_expression_fields(value, visible_fields, expression_path, limits)?;
@@ -1084,6 +1092,36 @@ mod tests {
 
         let result =
             validate_expression_field_order(&node, &BTreeSet::new(), &SchemaLoadLimits::default());
+
+        assert!(matches!(result, Err(SchemaError::InvalidGraph(_))));
+        Ok(())
+    }
+
+    /// Rejects ambiguous integer lookup tables with duplicate or unsorted inputs.
+    #[test]
+    fn integer_lookup_inputs_must_be_strictly_increasing(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let expression = Expression::IntegerLookup {
+            value: Box::new(Expression::Int { value: 1 }),
+            cases: vec![
+                crate::IntegerLookupCase {
+                    input: 2,
+                    output: 20,
+                },
+                crate::IntegerLookupCase {
+                    input: 1,
+                    output: 10,
+                },
+            ],
+            default: 0,
+        };
+
+        let result = validate_expression_fields(
+            &expression,
+            &BTreeSet::new(),
+            "TEST/value",
+            &SchemaLoadLimits::default(),
+        );
 
         assert!(matches!(result, Err(SchemaError::InvalidGraph(_))));
         Ok(())

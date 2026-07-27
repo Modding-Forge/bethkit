@@ -49,6 +49,15 @@ impl EvalValue {
     }
 }
 
+/// One deterministic integer lookup entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegerLookupCase {
+    /// Input value matched by this entry.
+    pub input: i64,
+    /// Output value returned for a matching input.
+    pub output: i64,
+}
+
 /// Declarative condition expression supported by schema packages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -159,6 +168,15 @@ pub enum Expression {
     BitCount {
         /// Integer operand.
         value: Box<Expression>,
+    },
+    /// Maps an integer operand through a deterministic lookup table.
+    IntegerLookup {
+        /// Integer operand used as the lookup key.
+        value: Box<Expression>,
+        /// Input-to-output mappings stored in strictly increasing input order.
+        cases: Vec<IntegerLookupCase>,
+        /// Result used when the input is absent from `cases`.
+        default: i64,
     },
     /// Selects one of two equally typed values from a boolean condition.
     Select {
@@ -302,6 +320,25 @@ impl Expression {
             Self::BitCount { value } => {
                 let raw: i64 = value.evaluate_inner(context, remaining)?.as_int()?;
                 Ok(EvalValue::Int(i64::from((raw as u64).count_ones())))
+            }
+            Self::IntegerLookup {
+                value,
+                cases,
+                default,
+            } => {
+                let key: i64 = value.evaluate_inner(context, remaining)?.as_int()?;
+                for case in cases {
+                    if *remaining == 0 {
+                        return Err(SchemaError::Expression(
+                            "operation budget exhausted".to_owned(),
+                        ));
+                    }
+                    *remaining -= 1;
+                    if case.input == key {
+                        return Ok(EvalValue::Int(case.output));
+                    }
+                }
+                Ok(EvalValue::Int(*default))
             }
             Self::Select {
                 condition,
@@ -451,6 +488,43 @@ mod tests {
         };
 
         assert_eq!(expression.evaluate(&context, 16)?, EvalValue::Int(6));
+        Ok(())
+    }
+
+    /// Maps present keys and returns the configured default for absent keys.
+    #[test]
+    fn integer_lookup_maps_known_and_unknown_values(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let cases = vec![
+            IntegerLookupCase {
+                input: 12,
+                output: 1,
+            },
+            IntegerLookupCase {
+                input: 17,
+                output: 2,
+            },
+        ];
+        let known = Expression::IntegerLookup {
+            value: Box::new(Expression::Int { value: 17 }),
+            cases: cases.clone(),
+            default: 0,
+        };
+        let unknown = Expression::IntegerLookup {
+            value: Box::new(Expression::Int { value: 99 }),
+            cases,
+            default: 0,
+        };
+        let field_values = BTreeMap::new();
+        let context = EvalContext {
+            payload: &[],
+            field_values: &field_values,
+            form_version: 0,
+            record_signature: SchemaSignature(*b"MGEF"),
+        };
+
+        assert_eq!(known.evaluate(&context, 4)?, EvalValue::Int(2));
+        assert_eq!(unknown.evaluate(&context, 4)?, EvalValue::Int(0));
         Ok(())
     }
 }

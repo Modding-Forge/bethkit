@@ -14,7 +14,7 @@ mod package;
 mod registry;
 
 pub use error::{Result, SchemaError};
-pub use expression::{EvalContext, EvalValue, Expression};
+pub use expression::{EvalContext, EvalValue, Expression, IntegerLookupCase};
 pub use model::{
     ArrayCount, BuiltInOperation, ByteOrder, CallbackBinding, CallbackClass,
     CallbackImplementation, ConditionFunction, ConditionFunctionTable, ConflictPriority,
