@@ -11,18 +11,26 @@ use bethkit_schema::{
     PrimitiveType, SchemaNode, SchemaNodeKind, UnionSelector,
 };
 
+use crate::handler::HandlerInvocationAccess;
 use crate::value::{float_to_raw, handler_to_owned_value};
 use crate::{
     grammar::{interpret_writable, RepeatScope},
     FieldValue, HandlerMutation, HandlerOutput, HandlerPhase, HandlerRecordContext,
-    HandlerSubrecordSource, OwnedFieldValue, ParsedEditValue, Result, SemanticContext,
-    SemanticError, SemanticHandlerRegistry,
+    OwnedFieldValue, ParsedEditValue, Result, SemanticContext, SemanticError,
+    SemanticHandlerRegistry,
 };
 
 #[derive(Clone)]
 struct ChangedField {
     path: String,
     repeat_scopes: Vec<RepeatScope>,
+}
+
+#[derive(Clone, Copy)]
+struct UnionSelectionContext<'a> {
+    field_values: &'a BTreeMap<String, i64>,
+    source_subrecord_index: Option<usize>,
+    value_scope: Option<&'a FieldValue<'static>>,
 }
 
 /// Lossless editor for one record.
@@ -447,6 +455,17 @@ impl RecordEditor {
         field_values: &BTreeMap<String, i64>,
         source_subrecord_index: Option<usize>,
     ) -> Result<Vec<u8>> {
+        self.encode_node_with_scope(node, value, field_values, source_subrecord_index, None)
+    }
+
+    fn encode_node_with_scope(
+        &self,
+        node: &SchemaNode,
+        value: &OwnedFieldValue,
+        field_values: &BTreeMap<String, i64>,
+        source_subrecord_index: Option<usize>,
+        value_scope: Option<&FieldValue<'static>>,
+    ) -> Result<Vec<u8>> {
         match &node.kind {
             SchemaNodeKind::Primitive { primitive } => {
                 encode_primitive(primitive, value, self.localized, &node.path)
@@ -466,13 +485,38 @@ impl RecordEditor {
                     ));
                 }
                 let mut output: Vec<u8> = Vec::new();
+                let mut scope_values: Vec<crate::NamedValue<'static>> =
+                    Vec::with_capacity(fields.len());
                 for (field, value) in fields.iter().zip(values) {
-                    output.extend(self.encode_node_with_fields(
+                    let scope = FieldValue::Struct(scope_values.clone());
+                    let encoded = self.encode_node_with_scope(
                         field,
                         value,
                         field_values,
                         source_subrecord_index,
-                    )?);
+                        Some(&scope),
+                    )?;
+                    let handler_value = if matches!(&field.kind, SchemaNodeKind::Union { .. }) {
+                        FieldValue::Bytes(Cow::Owned(encoded.clone()))
+                    } else {
+                        self.owned_to_handler_value_with_fields(
+                            field,
+                            value,
+                            field_values,
+                            source_subrecord_index,
+                        )?
+                    };
+                    scope_values.push(crate::NamedValue {
+                        node_id: field.id,
+                        path: field.path.clone(),
+                        name: field.name.clone(),
+                        span: crate::ByteSpan {
+                            start: output.len(),
+                            end: output.len() + encoded.len(),
+                        },
+                        value: handler_value,
+                    });
+                    output.extend(encoded);
                 }
                 Ok(output)
             }
@@ -528,11 +572,12 @@ impl RecordEditor {
                     | ArrayCount::Remainder => {}
                 }
                 for value in values {
-                    output.extend(self.encode_node_with_fields(
+                    output.extend(self.encode_node_with_scope(
                         element,
                         value,
                         field_values,
                         source_subrecord_index,
+                        value_scope,
                     )?);
                 }
                 Ok(output)
@@ -543,10 +588,19 @@ impl RecordEditor {
                     selector,
                     variants,
                     value,
+                    UnionSelectionContext {
+                        field_values,
+                        source_subrecord_index,
+                        value_scope,
+                    },
+                )?;
+                self.encode_node_with_scope(
+                    variant,
+                    value,
                     field_values,
                     source_subrecord_index,
-                )?;
-                self.encode_node_with_fields(variant, value, field_values, source_subrecord_index)
+                    value_scope,
+                )
             }
             SchemaNodeKind::Custom { decoder, .. } => self
                 .decoders
@@ -554,11 +608,12 @@ impl RecordEditor {
                 .ok_or_else(|| SemanticError::MissingDecoder(decoder.clone()))?
                 .encode(value),
             SchemaNodeKind::Terminated { terminator, child } => {
-                let mut output = self.encode_node_with_fields(
+                let mut output = self.encode_node_with_scope(
                     child,
                     value,
                     field_values,
                     source_subrecord_index,
+                    value_scope,
                 )?;
                 output.push(*terminator);
                 Ok(output)
@@ -705,8 +760,17 @@ impl RecordEditor {
                 (OwnedFieldValue::Array(updated), mutations)
             }
             (SchemaNodeKind::Union { selector, variants }, _) => {
-                let variant =
-                    self.select_union_variant(node, selector, variants, value, field_values, None)?;
+                let variant = self.select_union_variant(
+                    node,
+                    selector,
+                    variants,
+                    value,
+                    UnionSelectionContext {
+                        field_values,
+                        source_subrecord_index: None,
+                        value_scope: None,
+                    },
+                )?;
                 self.apply_after_set_tree_with_fields(variant, value, old_value, field_values)?
             }
             (
@@ -946,8 +1010,11 @@ impl RecordEditor {
                     selector,
                     variants,
                     current,
-                    field_values,
-                    None,
+                    UnionSelectionContext {
+                        field_values,
+                        source_subrecord_index: None,
+                        value_scope: None,
+                    },
                 )?;
                 return self.nested_value_at_with_fields(
                     variant,
@@ -1051,8 +1118,11 @@ impl RecordEditor {
                     selector,
                     variants,
                     current,
-                    field_values,
-                    None,
+                    UnionSelectionContext {
+                        field_values,
+                        source_subrecord_index: None,
+                        value_scope: None,
+                    },
                 )?;
                 if self.set_nested_value_with_fields(
                     variant,
@@ -1136,8 +1206,11 @@ impl RecordEditor {
                     selector,
                     variants,
                     current,
-                    field_values,
-                    None,
+                    UnionSelectionContext {
+                        field_values,
+                        source_subrecord_index: None,
+                        value_scope: None,
+                    },
                 )?;
                 if self.reset_nested_value_with_fields(
                     variant,
@@ -1296,13 +1369,21 @@ impl RecordEditor {
         selector: &UnionSelector,
         variants: &'a [SchemaNode],
         value: &OwnedFieldValue,
-        field_values: &BTreeMap<String, i64>,
-        source_subrecord_index: Option<usize>,
+        context: UnionSelectionContext<'_>,
     ) -> Result<&'a SchemaNode> {
+        let UnionSelectionContext {
+            field_values,
+            source_subrecord_index,
+            value_scope,
+        } = context;
         for (index, variant) in variants.iter().enumerate() {
-            let Ok(encoded) =
-                self.encode_node_with_fields(variant, value, field_values, source_subrecord_index)
-            else {
+            let Ok(encoded) = self.encode_node_with_scope(
+                variant,
+                value,
+                field_values,
+                source_subrecord_index,
+                value_scope,
+            ) else {
                 continue;
             };
             let selected = match selector {
@@ -1336,22 +1417,23 @@ impl RecordEditor {
                     };
                     let raw_value = FieldValue::Bytes(Cow::Owned(encoded));
                     let output = if let Some(source_subrecord_index) = source_subrecord_index {
-                        self.handlers.invoke_with_subrecord(
+                        self.handlers.invoke_with_records(
                             binding,
                             self.handler_record(),
-                            HandlerSubrecordSource::Writable {
-                                record: &self.record,
-                                index: source_subrecord_index,
-                            },
+                            HandlerInvocationAccess::writable_subrecord_with_scope(
+                                &self.record,
+                                source_subrecord_index,
+                                value_scope,
+                            ),
                             HandlerPhase::UnionSelection,
                             Some(&raw_value),
                             None,
                         )?
                     } else {
-                        self.handlers.invoke_with_writable_record(
+                        self.handlers.invoke_with_records(
                             binding,
                             self.handler_record(),
-                            &self.record,
+                            HandlerInvocationAccess::writable_with_scope(&self.record, value_scope),
                             HandlerPhase::UnionSelection,
                             Some(&raw_value),
                             None,
@@ -1462,8 +1544,11 @@ impl RecordEditor {
                     selector,
                     variants,
                     value,
-                    field_values,
-                    source_subrecord_index,
+                    UnionSelectionContext {
+                        field_values,
+                        source_subrecord_index,
+                        value_scope: None,
+                    },
                 )?;
                 self.owned_to_handler_value_with_fields(
                     variant,
@@ -3646,6 +3731,142 @@ mod tests {
         assert_eq!(
             editor.encode_node_at(&union, &OwnedFieldValue::UInt(7), Some(0))?,
             vec![7, 0]
+        );
+        Ok(())
+    }
+
+    /// Supplies updated sibling strings while encoding callback-selected unions.
+    #[test]
+    fn callback_union_encoding_receives_sibling_scope() -> Result<()> {
+        let script_name_path = "TEST/data/0:ScriptName";
+        let union_path = "TEST/data/1:Script";
+        let bytes = |id, length| SchemaNode {
+            id: SchemaNodeId(id),
+            path: format!("{union_path}/variants/{id}"),
+            name: format!("Variant {id}"),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::Bytes {
+                    length: Some(length),
+                },
+            },
+        };
+        let node = SchemaNode {
+            id: SchemaNodeId(30),
+            path: "TEST/data".to_owned(),
+            name: "Data".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    SchemaNode {
+                        id: SchemaNodeId(31),
+                        path: script_name_path.to_owned(),
+                        name: "ScriptName".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::String {
+                                string: StringType {
+                                    encoding: "utf8".to_owned(),
+                                    localized: false,
+                                    zero_terminated: false,
+                                    fixed_length: None,
+                                    length_prefix: Some(StringLengthPrefix {
+                                        width: 1,
+                                        offset: 1,
+                                    }),
+                                    trailing_terminator: None,
+                                    allowed_values: Vec::new(),
+                                },
+                            },
+                        },
+                    },
+                    SchemaNode {
+                        id: SchemaNodeId(32),
+                        path: union_path.to_owned(),
+                        name: "Script".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Union {
+                            selector: UnionSelector::Callback {
+                                callback_id: "union.select".to_owned(),
+                            },
+                            variants: vec![bytes(33, 1), bytes(34, 0)],
+                        },
+                    },
+                ],
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "select.empty_string".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: node.clone(),
+            }],
+            vec![CallbackBinding {
+                path: union_path.to_owned(),
+                callback_id: "union.select".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "00".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "select.empty_string".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({ "path": script_name_path }),
+                    },
+                },
+            }],
+        )?;
+        let editor = RecordEditor {
+            registry: bethkit_schema::SchemaRegistry::new(Arc::new(package)),
+            decoders: crate::DecoderRegistry::builtin(),
+            handlers: crate::SemanticHandlerRegistry::builtin(),
+            record: WritableRecord {
+                signature: Signature(*b"TEST"),
+                flags: bethkit_core::RecordFlags::empty(),
+                form_id: bethkit_core::FormId::NULL,
+                form_version: 44,
+                subrecords: Vec::new(),
+            },
+            localized: false,
+            decoded_values: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            editor.encode_node_at(
+                &node,
+                &OwnedFieldValue::Struct(vec![
+                    OwnedFieldValue::String("Q".to_owned()),
+                    OwnedFieldValue::Bytes(vec![7]),
+                ]),
+                Some(0),
+            )?,
+            vec![1, b'Q', 7]
+        );
+        assert_eq!(
+            editor.encode_node_at(
+                &node,
+                &OwnedFieldValue::Struct(vec![
+                    OwnedFieldValue::String(String::new()),
+                    OwnedFieldValue::Bytes(Vec::new()),
+                ]),
+                Some(0),
+            )?,
+            vec![0]
         );
         Ok(())
     }

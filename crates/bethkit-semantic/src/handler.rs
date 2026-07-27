@@ -701,6 +701,41 @@ impl<'a> HandlerInvocationAccess<'a> {
             source_subrecord_index: None,
         }
     }
+
+    pub(crate) fn read_only_subrecord_with_scope(
+        record: &'a Record,
+        index: usize,
+        value_scope: Option<&'a FieldValue<'static>>,
+    ) -> Self {
+        Self {
+            source: HandlerRecordSource::ReadOnly(record),
+            value_scope,
+            source_subrecord_index: Some(index),
+        }
+    }
+
+    pub(crate) fn writable_subrecord_with_scope(
+        record: &'a WritableRecord,
+        index: usize,
+        value_scope: Option<&'a FieldValue<'static>>,
+    ) -> Self {
+        Self {
+            source: HandlerRecordSource::Writable(record),
+            value_scope,
+            source_subrecord_index: Some(index),
+        }
+    }
+
+    pub(crate) fn writable_with_scope(
+        record: &'a WritableRecord,
+        value_scope: Option<&'a FieldValue<'static>>,
+    ) -> Self {
+        Self {
+            source: HandlerRecordSource::Writable(record),
+            value_scope,
+            source_subrecord_index: None,
+        }
+    }
 }
 
 impl Default for HandlerInvocationAccess<'_> {
@@ -787,6 +822,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectPerkEpf3));
         registry.register(Arc::new(SelectRecordFlag));
         registry.register(Arc::new(SelectBoneModifierType));
+        registry.register(Arc::new(SelectEmptyString));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -4202,6 +4238,8 @@ struct SelectRecordFlag;
 
 struct SelectBoneModifierType;
 
+struct SelectEmptyString;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4774,20 +4812,21 @@ impl SemanticHandler for SelectBoneModifierType {
         if invocation.phase != HandlerPhase::UnionSelection {
             return Ok(HandlerOutput::None);
         }
-        let Some(FieldValue::Bytes(payload)) = invocation.value else {
-            return Err(SemanticError::Handler {
+        let path = configured_text(self.id(), invocation.context.configuration, "path")?;
+        let type_name = invocation
+            .value_scope
+            .and_then(|scope| scoped_string(scope, path))
+            .ok_or_else(|| SemanticError::Handler {
                 handler: self.id().to_owned(),
-                message: "bone-modifier selector requires the DATA payload".to_owned(),
-            });
-        };
-        let type_name = prefixed_u32_string(payload, self.id())?;
-        let selected = if type_name.eq_ignore_ascii_case(b"LookAtChain") {
+                message: format!("bone-modifier selector cannot resolve sibling field {path}"),
+            })?;
+        let selected = if type_name.eq_ignore_ascii_case("LookAtChain") {
             1
-        } else if type_name.eq_ignore_ascii_case(b"MorphDriver") {
+        } else if type_name.eq_ignore_ascii_case("MorphDriver") {
             2
-        } else if type_name.eq_ignore_ascii_case(b"PoseDeformer") {
+        } else if type_name.eq_ignore_ascii_case("PoseDeformer") {
             3
-        } else if type_name.eq_ignore_ascii_case(b"SpringBone") {
+        } else if type_name.eq_ignore_ascii_case("SpringBone") {
             4
         } else {
             0
@@ -4796,33 +4835,29 @@ impl SemanticHandler for SelectBoneModifierType {
     }
 }
 
-fn prefixed_u32_string<'a>(payload: &'a [u8], handler: &str) -> Result<&'a [u8]> {
-    let length_bytes: [u8; 4] = payload
-        .get(..4)
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| SemanticError::Handler {
-            handler: handler.to_owned(),
-            message: "length-prefixed string is missing its u32 length".to_owned(),
-        })?;
-    let length =
-        usize::try_from(u32::from_le_bytes(length_bytes)).map_err(|_| SemanticError::Handler {
-            handler: handler.to_owned(),
-            message: "length-prefixed string exceeds platform size".to_owned(),
-        })?;
-    let end = 4_usize
-        .checked_add(length)
-        .ok_or_else(|| SemanticError::Handler {
-            handler: handler.to_owned(),
-            message: "length-prefixed string length overflowed".to_owned(),
-        })?;
-    let bytes = payload.get(4..end).ok_or_else(|| SemanticError::Handler {
-        handler: handler.to_owned(),
-        message: format!(
-            "length-prefixed string declares {length} bytes, payload has {}",
-            payload.len().saturating_sub(4)
-        ),
-    })?;
-    Ok(bytes.split(|byte| *byte == 0).next().unwrap_or_default())
+impl SemanticHandler for SelectEmptyString {
+    fn id(&self) -> &'static str {
+        "select.empty_string"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let path = configured_text(self.id(), invocation.context.configuration, "path")?;
+        let value = invocation
+            .value_scope
+            .and_then(|scope| scoped_string(scope, path))
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("string selector cannot resolve sibling field {path}"),
+            })?;
+        Ok(HandlerOutput::Integer(i64::from(value.is_empty())))
+    }
 }
 
 fn source_subrecord_text<'a>(
@@ -10396,10 +10431,11 @@ mod tests {
     #[test]
     fn bone_modifier_selector_matches_xedit_type_names() -> TestResult {
         // given
+        let path = "BMOD/data/0:Type";
         let binding = test_metadata_binding(
             "union.select",
             "select.bone_modifier_type",
-            serde_json::json!({}),
+            serde_json::json!({ "path": path }),
         );
         let handlers = SemanticHandlerRegistry::builtin();
         let context =
@@ -10413,29 +10449,70 @@ mod tests {
             ("SPRINGBONE", 4),
             ("Unknown", 0),
         ] {
-            let mut payload = Vec::from((type_name.len() as u32).to_le_bytes());
-            payload.extend_from_slice(type_name.as_bytes());
-            let value = FieldValue::Bytes(Cow::Owned(payload));
+            let scope = FieldValue::Struct(vec![crate::NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(1),
+                path: path.to_owned(),
+                name: "Type".to_owned(),
+                span: crate::ByteSpan { start: 0, end: 0 },
+                value: FieldValue::String(Cow::Borrowed(type_name)),
+            }]);
             assert!(matches!(
-                handlers.invoke(
+                handlers.invoke_with_value_scope(
                     &binding,
                     context,
                     HandlerPhase::UnionSelection,
-                    Some(&value),
                     None,
+                    None,
+                    Some(&scope),
                 )?,
                 HandlerOutput::Integer(selected) if selected == expected
             ));
         }
-        let truncated = FieldValue::Bytes(Cow::Owned(vec![8, 0, 0, 0, b'A']));
         assert!(handlers
-            .invoke(
-                &binding,
-                context,
-                HandlerPhase::UnionSelection,
-                Some(&truncated),
-                None,
-            )
+            .invoke(&binding, context, HandlerPhase::UnionSelection, None, None,)
+            .is_err());
+        Ok(())
+    }
+
+    /// Selects the empty-string variant from the exact configured sibling path.
+    #[test]
+    fn empty_string_selector_requires_the_configured_scope() -> TestResult {
+        // given
+        let path = "TEST/data/0:ScriptName";
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.empty_string",
+            serde_json::json!({ "path": path }),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Fallout4);
+        let scope = |value: &'static str| {
+            FieldValue::Struct(vec![crate::NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(1),
+                path: path.to_owned(),
+                name: "ScriptName".to_owned(),
+                span: crate::ByteSpan { start: 0, end: 0 },
+                value: FieldValue::String(Cow::Borrowed(value)),
+            }])
+        };
+
+        // when / then
+        for (value, expected) in [("", 1_i64), ("QuestScript", 0)] {
+            assert!(matches!(
+                handlers.invoke_with_value_scope(
+                    &binding,
+                    context,
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                    Some(&scope(value)),
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
+        assert!(handlers
+            .invoke(&binding, context, HandlerPhase::UnionSelection, None, None,)
             .is_err());
         Ok(())
     }

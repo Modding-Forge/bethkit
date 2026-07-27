@@ -11,12 +11,12 @@ use bethkit_schema::{
     PrimitiveType, SchemaNode, SchemaNodeKind, SchemaRecord, StringType, UnionSelector,
 };
 
+use crate::handler::HandlerInvocationAccess;
 use crate::value::float_from_raw;
 use crate::{
     grammar::interpret, ByteSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, FieldOrigin,
-    FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, HandlerSubrecordSource,
-    NamedValue, ParsedEditValue, Result, SemanticContext, SemanticError, SemanticLink,
-    ValidationReport, ValueFormat,
+    FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, NamedValue, ParsedEditValue,
+    Result, SemanticContext, SemanticError, SemanticLink, ValidationReport, ValueFormat,
 };
 
 /// One decoded top-level record field.
@@ -46,6 +46,13 @@ pub struct RecordView<'context, 'record> {
     record: &'record Record,
     schema: &'context SchemaRecord,
     localized: bool,
+}
+
+#[derive(Clone, Copy)]
+struct DecodeFrame<'scope, 'record> {
+    offset: usize,
+    source_subrecord_index: usize,
+    sibling_values: &'scope [NamedValue<'record>],
 }
 
 impl<'context, 'record> RecordView<'context, 'record> {
@@ -236,8 +243,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     };
                     let data: &'record [u8] = subrecord.as_bytes();
                     let mut field_values = BTreeMap::new();
+                    let frame = DecodeFrame {
+                        offset: 0,
+                        source_subrecord_index: index,
+                        sibling_values: &[],
+                    };
                     let (value, consumed): (FieldValue<'record>, usize) =
-                        self.decode_node(payload, data, data, 0, index, &mut field_values)?;
+                        self.decode_node(payload, data, data, frame, &mut field_values)?;
                     if consumed != data.len() {
                         return Err(SemanticError::Decode {
                             path: payload.path.clone(),
@@ -529,8 +541,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
         node: &SchemaNode,
         payload: &'a [u8],
         current: &'a [u8],
-        offset: usize,
-        source_subrecord_index: usize,
+        frame: DecodeFrame<'_, 'a>,
         field_values: &mut BTreeMap<String, i64>,
     ) -> Result<(FieldValue<'a>, usize)> {
         if !self.node_applies(node, payload, field_values)? {
@@ -562,8 +573,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             path: field.path.clone(),
                             name: field.name.clone(),
                             span: ByteSpan {
-                                start: offset + cursor,
-                                end: offset + cursor,
+                                start: frame.offset + cursor,
+                                end: frame.offset + cursor,
                             },
                             value: FieldValue::Absent,
                         });
@@ -574,21 +585,20 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             path: field.path.clone(),
                             message: "struct cursor exceeded payload".to_owned(),
                         })?;
-                    let (value, consumed): (FieldValue<'a>, usize) = self.decode_node(
-                        field,
-                        payload,
-                        remaining,
-                        offset + cursor,
-                        source_subrecord_index,
-                        field_values,
-                    )?;
+                    let child_frame = DecodeFrame {
+                        offset: frame.offset + cursor,
+                        source_subrecord_index: frame.source_subrecord_index,
+                        sibling_values: &values,
+                    };
+                    let (value, consumed): (FieldValue<'a>, usize) =
+                        self.decode_node(field, payload, remaining, child_frame, field_values)?;
                     values.push(NamedValue {
                         node_id: field.id,
                         path: field.path.clone(),
                         name: field.name.clone(),
                         span: ByteSpan {
-                            start: offset + cursor,
-                            end: offset + cursor + consumed,
+                            start: frame.offset + cursor,
+                            end: frame.offset + cursor + consumed,
                         },
                         value,
                     });
@@ -655,7 +665,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             node,
                             count,
                             payload,
-                            source_subrecord_index,
+                            frame.source_subrecord_index,
                             field_values,
                         )?),
                     ),
@@ -680,14 +690,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         path: node.path.clone(),
                         message: "array cursor exceeded payload".to_owned(),
                     })?;
-                    let (value, consumed) = self.decode_node(
-                        element,
-                        payload,
-                        remaining,
-                        offset + cursor,
-                        source_subrecord_index,
-                        field_values,
-                    )?;
+                    let child_frame = DecodeFrame {
+                        offset: frame.offset + cursor,
+                        source_subrecord_index: frame.source_subrecord_index,
+                        sibling_values: frame.sibling_values,
+                    };
+                    let (value, consumed) =
+                        self.decode_node(element, payload, remaining, child_frame, field_values)?;
                     if consumed == 0 {
                         return Err(SemanticError::Decode {
                             path: element.path.clone(),
@@ -720,22 +729,16 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     node,
                     selector,
                     payload,
-                    source_subrecord_index,
+                    frame.source_subrecord_index,
                     field_values,
+                    frame.sibling_values,
                 )?;
                 let variant: &SchemaNode =
                     variants.get(index).ok_or_else(|| SemanticError::Decode {
                         path: node.path.clone(),
                         message: format!("union variant {index} does not exist"),
                     })?;
-                self.decode_node(
-                    variant,
-                    payload,
-                    current,
-                    offset,
-                    source_subrecord_index,
-                    field_values,
-                )
+                self.decode_node(variant, payload, current, frame, field_values)
             }
             SchemaNodeKind::Custom { decoder, .. } => {
                 let decoded = self
@@ -757,14 +760,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 Ok((decoded.value, decoded.consumed))
             }
             SchemaNodeKind::Terminated { terminator, child } => {
-                let (value, body_size) = self.decode_node(
-                    child,
-                    payload,
-                    current,
-                    offset,
-                    source_subrecord_index,
-                    field_values,
-                )?;
+                let (value, body_size) =
+                    self.decode_node(child, payload, current, frame, field_values)?;
                 let actual = current
                     .get(body_size)
                     .ok_or_else(|| SemanticError::Decode {
@@ -832,6 +829,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
         payload: &[u8],
         source_subrecord_index: usize,
         field_values: &BTreeMap<String, i64>,
+        sibling_values: &[NamedValue<'_>],
     ) -> Result<usize> {
         let selected = match selector {
             UnionSelector::Expression(expression) => {
@@ -851,13 +849,17 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     }
                 }
             }
-            UnionSelector::Callback { callback_id } => self.invoke_integer_callback(
-                node,
-                callback_id,
-                payload,
-                source_subrecord_index,
-                HandlerPhase::UnionSelection,
-            )?,
+            UnionSelector::Callback { callback_id } => {
+                let value_scope = FieldValue::Struct(sibling_values.to_vec()).to_handler_value();
+                self.invoke_integer_callback(
+                    node,
+                    callback_id,
+                    payload,
+                    source_subrecord_index,
+                    HandlerPhase::UnionSelection,
+                    Some(&value_scope),
+                )?
+            }
         };
         if selected < 0 {
             return Err(SemanticError::Decode {
@@ -903,6 +905,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 payload,
                 source_subrecord_index,
                 HandlerPhase::ArrayCount,
+                None,
             )?,
             _ => {
                 return Err(SemanticError::Decode {
@@ -930,6 +933,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
         payload: &[u8],
         source_subrecord_index: usize,
         phase: HandlerPhase,
+        value_scope: Option<&FieldValue<'static>>,
     ) -> Result<i64> {
         let binding = self
             .context
@@ -945,7 +949,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 message: format!("schema node {} has no callback binding", node.path),
             })?;
         let value = FieldValue::Bytes(Cow::Owned(payload.to_vec()));
-        match self.context.handlers().invoke_with_subrecord(
+        match self.context.handlers().invoke_with_records(
             binding,
             HandlerRecordContext::new(
                 self.record.header.signature,
@@ -953,10 +957,11 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 self.record.header.form_version,
                 self.context.registry().package().manifest().game,
             ),
-            HandlerSubrecordSource::ReadOnly {
-                record: self.record,
-                index: source_subrecord_index,
-            },
+            HandlerInvocationAccess::read_only_subrecord_with_scope(
+                self.record,
+                source_subrecord_index,
+                value_scope,
+            ),
             phase,
             Some(&value),
             None,
@@ -1701,7 +1706,8 @@ mod tests {
     use bethkit_io::SliceCursor;
     use bethkit_schema::{
         BuiltInOperation, CallbackBinding, CallbackImplementation, HandlerRequirement,
-        SchemaManifest, SchemaPackage, SchemaSignature, ValidationStatus, PACKAGE_FORMAT_VERSION,
+        SchemaManifest, SchemaPackage, SchemaSignature, StringLengthPrefix, StringType,
+        ValidationStatus, PACKAGE_FORMAT_VERSION,
     };
 
     use super::*;
@@ -2029,6 +2035,160 @@ mod tests {
         let fields = context.view(&record, false)?.fields()?;
 
         assert!(matches!(fields[0].value, FieldValue::UInt(7)));
+        Ok(())
+    }
+
+    /// Supplies already decoded sibling strings to callback-selected unions.
+    #[test]
+    fn callback_union_decoding_receives_sibling_scope(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let script_name_path = "TEST/0:Data/payload/0:ScriptName";
+        let union_path = "TEST/0:Data/payload/1:Script";
+        let payload = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(2),
+            path: "TEST/0:Data/payload".to_owned(),
+            name: "Payload".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(3),
+                        path: script_name_path.to_owned(),
+                        name: "ScriptName".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::String {
+                                string: StringType {
+                                    encoding: "utf8".to_owned(),
+                                    localized: false,
+                                    zero_terminated: false,
+                                    fixed_length: None,
+                                    length_prefix: Some(StringLengthPrefix {
+                                        width: 1,
+                                        offset: 1,
+                                    }),
+                                    trailing_terminator: None,
+                                    allowed_values: Vec::new(),
+                                },
+                            },
+                        },
+                    },
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(4),
+                        path: union_path.to_owned(),
+                        name: "Script".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Union {
+                            selector: UnionSelector::Callback {
+                                callback_id: "union.select".to_owned(),
+                            },
+                            variants: vec![
+                                SchemaNode {
+                                    id: bethkit_schema::SchemaNodeId(5),
+                                    path: format!("{union_path}/variants/0:Data"),
+                                    name: "Data".to_owned(),
+                                    required: true,
+                                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Bytes { length: Some(1) },
+                                    },
+                                },
+                                SchemaNode {
+                                    id: bethkit_schema::SchemaNodeId(6),
+                                    path: format!("{union_path}/variants/1:Empty"),
+                                    name: "Empty".to_owned(),
+                                    required: true,
+                                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Unused { length: 0 },
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            },
+        };
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(1),
+                    path: "TEST/0:Data".to_owned(),
+                    name: "Data".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Subrecord {
+                        signature: SchemaSignature(*b"DATA"),
+                        payload: Box::new(payload),
+                    },
+                }],
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "select.empty_string".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root,
+            }],
+            vec![CallbackBinding {
+                path: union_path.to_owned(),
+                callback_id: "union.select".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "00".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "select.empty_string".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({ "path": script_name_path }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+
+        for (payload, expected_name, expected_bytes) in [
+            (&[0_u8][..], "", &[][..]),
+            (&[1_u8, b'Q', 7][..], "Q", &[7_u8][..]),
+        ] {
+            let record_bytes = test_record_bytes(b"TEST", b"DATA", payload);
+            let mut cursor = SliceCursor::new(&record_bytes);
+            let record = Record::parse_header(&mut cursor, &GameContext::sse())?;
+            let fields = context.view(&record, false)?.fields()?;
+            let FieldValue::Struct(values) = &fields[0].value else {
+                return Err("expected decoded sibling scope".into());
+            };
+            assert!(matches!(
+                &values[0].value,
+                FieldValue::String(value) if value == expected_name
+            ));
+            assert!(matches!(
+                &values[1].value,
+                FieldValue::Bytes(value) if value.as_ref() == expected_bytes
+            ));
+        }
         Ok(())
     }
 
