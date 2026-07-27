@@ -776,6 +776,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectOblivionObmeEfixParameter));
         registry.register(Arc::new(SelectGameSettingValue));
         registry.register(Arc::new(SelectLegacyNoteVoice));
+        registry.register(Arc::new(SelectPackageInputValue));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -4026,6 +4027,8 @@ struct SelectGameSettingValue;
 
 struct SelectLegacyNoteVoice;
 
+struct SelectPackageInputValue;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4390,6 +4393,31 @@ impl SemanticHandler for SelectLegacyNoteVoice {
             .and_then(|bytes| bytes.first())
             .copied();
         Ok(HandlerOutput::Integer(i64::from(note_type == Some(3))))
+    }
+}
+
+impl SemanticHandler for SelectPackageInputValue {
+    fn id(&self) -> &'static str {
+        "select.package_input_value"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let input_type =
+            source_subrecord_text(&invocation, Signature(*b"ANAM"), self.id())?.unwrap_or_default();
+        let selected = match input_type {
+            "Bool" => 1,
+            "Int" => 2,
+            "Float" | "ObjectList" => 3,
+            _ => 0,
+        };
+        Ok(HandlerOutput::Integer(selected))
     }
 }
 
@@ -9483,6 +9511,53 @@ mod tests {
                     HandlerOutput::Integer(selected) if selected == expected
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Selects package input layouts from the repeat-local ANAM type.
+    #[test]
+    fn package_input_value_selector_matches_xedit_type_mapping() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.package_input_value",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"PACK"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+
+        // when / then
+        for (input_type, expected) in [
+            ("Bool", 1_i64),
+            ("Int", 2),
+            ("Float", 3),
+            ("ObjectList", 3),
+            ("Target", 0),
+            ("", 0),
+        ] {
+            let record = test_record(
+                *b"PACK",
+                &[
+                    (*b"ANAM", [input_type.as_bytes(), &[0]].concat()),
+                    (*b"CNAM", vec![0; 4]),
+                ],
+            )?;
+            assert!(matches!(
+                handlers.invoke_with_subrecord(
+                    &binding,
+                    context,
+                    HandlerSubrecordSource::ReadOnly {
+                        record: &record,
+                        index: 1,
+                    },
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
         }
         Ok(())
     }
