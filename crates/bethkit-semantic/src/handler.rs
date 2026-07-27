@@ -290,6 +290,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
+        registry.register(Arc::new(ModelInfoArrayCount));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(CtdaTypeFormatter));
@@ -788,6 +789,56 @@ impl SemanticHandler for ModelInfoCounts {
             message: "model-info counter update requires a struct value".to_owned(),
         })?;
         Ok(HandlerOutput::Value(update_model_info_counts(value)?))
+    }
+}
+
+struct ModelInfoArrayCount;
+
+impl SemanticHandler for ModelInfoArrayCount {
+    fn id(&self) -> &'static str {
+        "array.model_info_header_count"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ArrayCount {
+            return Ok(HandlerOutput::None);
+        }
+        let header_index = invocation
+            .context
+            .configuration
+            .get("header_index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| model_info_array_error("header_index is missing or invalid"))?;
+        let bytes = match invocation.value {
+            Some(FieldValue::Bytes(value)) => value.as_ref(),
+            _ => return Err(model_info_array_error("array count requires payload bytes")),
+        };
+        let header_count = bytes
+            .get(..4)
+            .and_then(|value| value.try_into().ok())
+            .map(u32::from_le_bytes)
+            .map_or(0_usize, |value| value as usize);
+        if header_count <= header_index {
+            return Ok(HandlerOutput::Integer(0));
+        }
+        let offset = header_index
+            .checked_mul(4)
+            .and_then(|value| value.checked_add(4))
+            .ok_or_else(|| model_info_array_error("header offset overflowed"))?;
+        let end = offset
+            .checked_add(4)
+            .ok_or_else(|| model_info_array_error("header offset overflowed"))?;
+        let count = bytes
+            .get(offset..end)
+            .and_then(|value| value.try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(0);
+        Ok(HandlerOutput::Integer(i64::from(count)))
     }
 }
 
@@ -1436,6 +1487,13 @@ fn set_model_info_count(
 fn model_info_error(message: impl Into<String>) -> SemanticError {
     SemanticError::Handler {
         handler: "edit.model_info_counts".to_owned(),
+        message: message.into(),
+    }
+}
+
+fn model_info_array_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "array.model_info_header_count".to_owned(),
         message: message.into(),
     }
 }
@@ -2262,6 +2320,40 @@ mod tests {
                     }] if path == "TEST/0:Value Count"
                 )
         ));
+        Ok(())
+    }
+
+    /// Reads xEdit model-info array counts from the indexed header slot.
+    #[test]
+    fn model_info_array_count_reads_header_values() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/Textures".to_owned(),
+            callback_id: "array.count".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-model-info-count".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "array.model_info_header_count".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({ "header_index": 1 }),
+                },
+            },
+        };
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let payload = FieldValue::Bytes(Cow::Borrowed(&[
+            4, 0, 0, 0, 7, 0, 0, 0, 3, 0, 0, 0, 9, 0, 0, 0, 5, 0, 0, 0,
+        ]));
+
+        let output = SemanticHandlerRegistry::builtin().invoke(
+            &binding,
+            record,
+            HandlerPhase::ArrayCount,
+            Some(&payload),
+            None,
+        )?;
+
+        assert!(matches!(output, HandlerOutput::Integer(3)));
         Ok(())
     }
 
