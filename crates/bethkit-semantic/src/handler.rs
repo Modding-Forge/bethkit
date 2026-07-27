@@ -760,6 +760,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatWeatherClassification));
         registry.register(Arc::new(FixedHexIntegerFormatter));
         registry.register(Arc::new(ScaledInt4Formatter));
+        registry.register(Arc::new(HideFfffFormatter));
         registry.register(Arc::new(NextObjectIdFormatter { resolver: None }));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
@@ -3486,6 +3487,35 @@ impl SemanticHandler for FormatWeatherClassification {
 struct FixedHexIntegerFormatter;
 
 struct ScaledInt4Formatter;
+
+struct HideFfffFormatter;
+
+impl SemanticHandler for HideFfffFormatter {
+    fn id(&self) -> &'static str {
+        "format.hide_ffff"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let value = u64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                integer_formatter_error(self.id(), "FFFF formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| integer_formatter_error(self.id(), "FFFF value must be non-negative"))?;
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary if value == 0xffff => "None".to_owned(),
+            HandlerPhase::Display | HandlerPhase::Summary => value.to_string(),
+            HandlerPhase::SortKey => format!("{value:04X}"),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
 
 impl SemanticHandler for ScaledInt4Formatter {
     fn id(&self) -> &'static str {
@@ -9021,6 +9051,39 @@ mod tests {
                     None,
                 )?,
                 HandlerOutput::Value(FieldValue::UInt(value)) if value == expected as u64
+            ));
+        }
+        Ok(())
+    }
+
+    /// Matches xEdit's hidden-FFFF display and sort formatting.
+    #[test]
+    fn hide_ffff_formatter_matches_xedit() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.hide_ffff",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"REGN"), FormId::NULL, 0, SchemaGame::Oblivion);
+
+        // when / then
+        for (value, phase, expected) in [
+            (0xffff_u64, HandlerPhase::Display, "None"),
+            (42, HandlerPhase::Summary, "42"),
+            (42, HandlerPhase::SortKey, "002A"),
+        ] {
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    phase,
+                    Some(&FieldValue::UInt(value)),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected
             ));
         }
         Ok(())
