@@ -660,11 +660,135 @@ impl RecordEditor {
                         return Err(SemanticError::MissingOccurrence { path, occurrence });
                     }
                 }
+                HandlerMutation::SetIfEqual {
+                    path,
+                    occurrence,
+                    expected,
+                    value: replacement,
+                } => {
+                    if path != node.path
+                        && !path
+                            .strip_prefix(&node.path)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                    {
+                        remaining.push(HandlerMutation::SetIfEqual {
+                            path,
+                            occurrence,
+                            expected,
+                            value: replacement,
+                        });
+                        continue;
+                    }
+                    let mut target_occurrence = occurrence;
+                    let current =
+                        self.nested_value_at(node, value, &path, &mut target_occurrence)?;
+                    let Some(current) = current else {
+                        return Err(SemanticError::MissingOccurrence { path, occurrence });
+                    };
+                    if !owned_values_equal(current, &expected) {
+                        continue;
+                    }
+                    let mut target_occurrence = occurrence;
+                    let mut replacement = Some(replacement);
+                    if !self.set_nested_value(
+                        node,
+                        value,
+                        &path,
+                        &mut target_occurrence,
+                        &mut replacement,
+                    )? {
+                        return Err(SemanticError::MissingOccurrence { path, occurrence });
+                    }
+                }
                 mutation => remaining.push(mutation),
             }
         }
         *mutations = remaining;
         Ok(())
+    }
+
+    fn nested_value_at<'a>(
+        &self,
+        node: &SchemaNode,
+        value: &'a OwnedFieldValue,
+        target_path: &str,
+        occurrence: &mut usize,
+    ) -> Result<Option<&'a OwnedFieldValue>> {
+        let mut field_values = self.expression_field_values();
+        collect_owned_expression_field_values(node, value, &mut field_values);
+        self.nested_value_at_with_fields(node, value, target_path, occurrence, &field_values)
+    }
+
+    fn nested_value_at_with_fields<'a>(
+        &self,
+        node: &SchemaNode,
+        value: &'a OwnedFieldValue,
+        target_path: &str,
+        occurrence: &mut usize,
+        field_values: &BTreeMap<String, i64>,
+    ) -> Result<Option<&'a OwnedFieldValue>> {
+        if node.path == target_path {
+            if *occurrence == 0 {
+                return Ok(Some(value));
+            }
+            *occurrence = occurrence.saturating_sub(1);
+            return Ok(None);
+        }
+        match (&node.kind, value) {
+            (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
+                for (field, value) in fields.iter().zip(values) {
+                    if let Some(found) = self.nested_value_at_with_fields(
+                        field,
+                        value,
+                        target_path,
+                        occurrence,
+                        field_values,
+                    )? {
+                        return Ok(Some(found));
+                    }
+                }
+            }
+            (SchemaNodeKind::Array { element, .. }, OwnedFieldValue::Array(values)) => {
+                for value in values {
+                    if let Some(found) = self.nested_value_at_with_fields(
+                        element,
+                        value,
+                        target_path,
+                        occurrence,
+                        field_values,
+                    )? {
+                        return Ok(Some(found));
+                    }
+                }
+            }
+            (SchemaNodeKind::Union { selector, variants }, current) => {
+                let variant =
+                    self.select_union_variant(node, selector, variants, current, field_values)?;
+                return self.nested_value_at_with_fields(
+                    variant,
+                    current,
+                    target_path,
+                    occurrence,
+                    field_values,
+                );
+            }
+            (
+                SchemaNodeKind::Subrecord { payload, .. }
+                | SchemaNodeKind::Compressed { child: payload, .. }
+                | SchemaNodeKind::Terminated { child: payload, .. },
+                current,
+            ) => {
+                return self.nested_value_at_with_fields(
+                    payload,
+                    current,
+                    target_path,
+                    occurrence,
+                    field_values,
+                );
+            }
+            _ => {}
+        }
+        Ok(None)
     }
 
     fn set_nested_value(
@@ -957,6 +1081,21 @@ impl RecordEditor {
                         self.apply_nested_set(record, decoded_values, &path, occurrence, value)?;
                     }
                 }
+                HandlerMutation::SetIfEqual {
+                    path,
+                    occurrence,
+                    expected,
+                    value,
+                } => {
+                    self.apply_nested_set_if_equal(
+                        record,
+                        decoded_values,
+                        &path,
+                        occurrence,
+                        &expected,
+                        value,
+                    )?;
+                }
                 HandlerMutation::Insert { path, value } => {
                     let (signature, encoded) = self.encode_path(&path, &value)?;
                     let node = self.find_node(&path)?;
@@ -1188,6 +1327,83 @@ impl RecordEditor {
         })
     }
 
+    fn apply_nested_set_if_equal(
+        &self,
+        record: &mut WritableRecord,
+        decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+        path: &str,
+        occurrence: usize,
+        expected: &OwnedFieldValue,
+        value: OwnedFieldValue,
+    ) -> Result<()> {
+        let schema = self
+            .registry
+            .get(record.signature)
+            .ok_or_else(|| SemanticError::MissingRecordSchema(record.signature.to_string()))?;
+        let parent = find_containing_subrecord(&schema.root, path)
+            .ok_or_else(|| SemanticError::MissingPath(path.to_owned()))?
+            .clone();
+        let parent_occurrences = decoded_values
+            .keys()
+            .filter_map(|(candidate, occurrence)| {
+                (candidate == &parent.path).then_some(*occurrence)
+            })
+            .collect::<Vec<_>>();
+        let mut remaining_occurrence = occurrence;
+        for parent_occurrence in parent_occurrences {
+            let key = (parent.path.clone(), parent_occurrence);
+            let current =
+                decoded_values
+                    .get(&key)
+                    .ok_or_else(|| SemanticError::MissingOccurrence {
+                        path: parent.path.clone(),
+                        occurrence: parent_occurrence,
+                    })?;
+            let mut updated = handler_to_owned_value(current.to_handler_value(), &parent.path)?;
+            let local_occurrence = remaining_occurrence;
+            let mut probed_occurrence = remaining_occurrence;
+            let Some(current) =
+                self.nested_value_at(&parent, &updated, path, &mut probed_occurrence)?
+            else {
+                remaining_occurrence = probed_occurrence;
+                continue;
+            };
+            if !owned_values_equal(current, expected) {
+                return Ok(());
+            }
+            let mut target_occurrence = local_occurrence;
+            let mut replacement = Some(value);
+            if !self.set_nested_value(
+                &parent,
+                &mut updated,
+                path,
+                &mut target_occurrence,
+                &mut replacement,
+            )? {
+                return Err(SemanticError::MissingOccurrence {
+                    path: path.to_owned(),
+                    occurrence,
+                });
+            }
+            let (signature, encoded) = self.encode_path(&parent.path, &updated)?;
+            let index = self.assigned_subrecord_index(record, &parent.path, parent_occurrence)?;
+            if record.subrecords[index].signature != signature {
+                return Err(SemanticError::Encode {
+                    path: parent.path,
+                    message: "assigned subrecord signature does not match schema".to_owned(),
+                });
+            }
+            record.subrecords[index].data = encoded;
+            let decoded = self.owned_to_handler_value(&parent, &updated)?;
+            decoded_values.insert(key, decoded);
+            return Ok(());
+        }
+        Err(SemanticError::MissingOccurrence {
+            path: path.to_owned(),
+            occurrence,
+        })
+    }
+
     fn changed_field_at(&self, record: &WritableRecord, index: usize) -> Result<ChangedField> {
         let grammar = self.grammar_for(record)?;
         let path = grammar
@@ -1338,6 +1554,22 @@ impl RecordEditor {
                             occurrence,
                         )?,
                         path,
+                        value,
+                    },
+                    HandlerMutation::SetIfEqual {
+                        path,
+                        occurrence,
+                        expected,
+                        value,
+                    } => HandlerMutation::SetIfEqual {
+                        occurrence: self.global_occurrence(
+                            &grammar,
+                            repeat_scope,
+                            &path,
+                            occurrence,
+                        )?,
+                        path,
+                        expected,
                         value,
                     },
                     HandlerMutation::Remove { path, occurrence } => HandlerMutation::Remove {
@@ -1642,6 +1874,18 @@ fn handler_values_equal(left: &FieldValue<'_>, right: &FieldValue<'_>) -> bool {
         }
         (FieldValue::Absent, FieldValue::Absent) => true,
         _ => false,
+    }
+}
+
+fn owned_values_equal(left: &OwnedFieldValue, right: &OwnedFieldValue) -> bool {
+    match (left, right) {
+        (OwnedFieldValue::Int(left), OwnedFieldValue::UInt(right)) => {
+            u64::try_from(*left).is_ok_and(|left| left == *right)
+        }
+        (OwnedFieldValue::UInt(left), OwnedFieldValue::Int(right)) => {
+            u64::try_from(*right).is_ok_and(|right| *left == right)
+        }
+        _ => left == right,
     }
 }
 
@@ -3000,6 +3244,40 @@ mod tests {
                 OwnedFieldValue::Bytes(vec![9, 8, 7]),
             ])
         );
+        Ok(())
+    }
+
+    /// Applies a nested conditional set only while the expected value still matches.
+    #[test]
+    fn conditional_mutation_preserves_changed_nested_fields() -> Result<()> {
+        let editor = editor_with_nested_counter()?;
+        let mut record = clone_record(&editor.record);
+        let mut decoded_values = editor.decoded_values.clone();
+        let path = "TEST/0:IDLC/payload/0:Animation Count";
+
+        editor.apply_mutations_with_values(
+            &mut record,
+            &mut decoded_values,
+            vec![HandlerMutation::SetIfEqual {
+                path: path.to_owned(),
+                occurrence: 0,
+                expected: OwnedFieldValue::UInt(1),
+                value: OwnedFieldValue::UInt(7),
+            }],
+        )?;
+        assert_eq!(record.subrecords[0].data, vec![7, 0xaa, 0xbb, 0xcc]);
+
+        editor.apply_mutations_with_values(
+            &mut record,
+            &mut decoded_values,
+            vec![HandlerMutation::SetIfEqual {
+                path: path.to_owned(),
+                occurrence: 0,
+                expected: OwnedFieldValue::UInt(1),
+                value: OwnedFieldValue::UInt(9),
+            }],
+        )?;
+        assert_eq!(record.subrecords[0].data, vec![7, 0xaa, 0xbb, 0xcc]);
         Ok(())
     }
 

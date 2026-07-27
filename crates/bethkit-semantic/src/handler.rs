@@ -160,6 +160,17 @@ pub enum HandlerMutation {
         /// Replacement value.
         value: OwnedFieldValue,
     },
+    /// Replace a field occurrence only when it still has an expected value.
+    SetIfEqual {
+        /// Stable schema path.
+        path: String,
+        /// Zero-based occurrence.
+        occurrence: usize,
+        /// Expected current value.
+        expected: OwnedFieldValue,
+        /// Replacement value.
+        value: OwnedFieldValue,
+    },
     /// Insert a new field.
     Insert {
         /// Stable schema path.
@@ -352,6 +363,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
+        registry.register(Arc::new(MagicEffectSecondAvWeightAfterSet));
         registry.register(Arc::new(RefreshSiblingUnions));
         registry.register(Arc::new(InvalidateConflicts));
         registry.register(Arc::new(CtdaTypeFormatter));
@@ -1686,6 +1698,49 @@ fn has_ordered_list_suffix(value: &str) -> bool {
     value
         .get(value.len().saturating_sub("OrderedList".len())..)
         .is_some_and(|suffix| suffix.eq_ignore_ascii_case("OrderedList"))
+}
+
+struct MagicEffectSecondAvWeightAfterSet;
+
+impl SemanticHandler for MagicEffectSecondAvWeightAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.magic_effect_second_av_weight"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(value) = invocation.value else {
+            return Ok(HandlerOutput::None);
+        };
+        let FieldValue::Float(value) = value else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "second actor-value weight callback requires a float".to_owned(),
+            });
+        };
+        if *value == 0.0 {
+            return Ok(HandlerOutput::None);
+        }
+        let archetype_path = configured_text(
+            self.id(),
+            invocation.context.configuration,
+            "archetype_path",
+        )?;
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::SetIfEqual {
+                path: archetype_path.to_owned(),
+                occurrence: 0,
+                expected: OwnedFieldValue::UInt(0),
+                value: OwnedFieldValue::UInt(0xff),
+            },
+        ]))
+    }
 }
 
 struct RefreshSiblingUnions;
@@ -3571,6 +3626,60 @@ mod tests {
         let container_replay =
             handlers.invoke(&binding, record, HandlerPhase::AfterSet, None, None)?;
         assert!(matches!(container_replay, HandlerOutput::None));
+        Ok(())
+    }
+
+    /// Protects a zero MGEF archetype when the second actor-value weight is nonzero.
+    #[test]
+    fn magic_effect_weight_protects_unset_archetype() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "MGEF/6:Data/payload/15:Second AV Weight".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-mgef-second-av-weight".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.magic_effect_second_av_weight".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "archetype_path": "MGEF/6:Data/payload/16:Archetype"
+                    }),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let record =
+            HandlerRecordContext::new(Signature(*b"MGEF"), FormId::NULL, 0, SchemaGame::Fallout4);
+
+        let protected = handlers.invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::Float(0.25)),
+            Some(&FieldValue::Float(0.0)),
+        )?;
+        assert!(matches!(
+            protected,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::SetIfEqual {
+                        path,
+                        occurrence: 0,
+                        expected: OwnedFieldValue::UInt(0),
+                        value: OwnedFieldValue::UInt(0xff),
+                    }] if path == "MGEF/6:Data/payload/16:Archetype"
+                )
+        ));
+
+        let zero = handlers.invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::Float(-0.0)),
+            Some(&FieldValue::Float(0.25)),
+        )?;
+        assert!(matches!(zero, HandlerOutput::None));
         Ok(())
     }
 
