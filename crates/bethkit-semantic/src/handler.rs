@@ -778,6 +778,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectLegacyNoteVoice));
         registry.register(Arc::new(SelectPackageInputValue));
         registry.register(Arc::new(SelectMorrowindGlobalValue));
+        registry.register(Arc::new(SelectOblivionMiscActorValue));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -4032,6 +4033,8 @@ struct SelectPackageInputValue;
 
 struct SelectMorrowindGlobalValue;
 
+struct SelectOblivionMiscActorValue;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4446,6 +4449,30 @@ impl SemanticHandler for SelectMorrowindGlobalValue {
             _ => 0,
         };
         Ok(HandlerOutput::Integer(selected))
+    }
+}
+
+impl SemanticHandler for SelectOblivionMiscActorValue {
+    fn id(&self) -> &'static str {
+        "select.oblivion_misc_actor_value"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let flags = invocation
+            .source_record
+            .map(|record| record.header.flags)
+            .or_else(|| invocation.source_writable_record.map(|record| record.flags))
+            .unwrap_or_else(RecordFlags::empty);
+        Ok(HandlerOutput::Integer(i64::from(
+            flags.bits() & 0x0000_00c0 == 0x0000_00c0,
+        )))
     }
 }
 
@@ -9616,6 +9643,41 @@ mod tests {
                     HandlerSubrecordSource::ReadOnly {
                         record: &record,
                         index: 1,
+                    },
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
+        Ok(())
+    }
+
+    /// Selects Oblivion MISC actor-value layouts from record flags.
+    #[test]
+    fn oblivion_misc_actor_value_selector_requires_both_xedit_flags() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.oblivion_misc_actor_value",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"MISC"), FormId::NULL, 0, SchemaGame::Oblivion);
+
+        // when / then
+        for (flags, expected) in [(0_u32, 0_i64), (0x40, 0), (0x80, 0), (0xc0, 1)] {
+            let mut record = test_record(*b"MISC", &[(*b"DATA", vec![0; 8])])?;
+            record.header.flags = RecordFlags::from_bits_retain(flags);
+            assert!(matches!(
+                handlers.invoke_with_subrecord(
+                    &binding,
+                    context,
+                    HandlerSubrecordSource::ReadOnly {
+                        record: &record,
+                        index: 0,
                     },
                     HandlerPhase::UnionSelection,
                     None,
