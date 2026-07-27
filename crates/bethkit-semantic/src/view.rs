@@ -178,7 +178,17 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         unreachable!("definition was filtered to subrecord nodes");
                     };
                     let data: &'record [u8] = subrecord.as_bytes();
-                    let value: FieldValue<'record> = self.decode_node(payload, data, data, 0)?;
+                    let (value, consumed): (FieldValue<'record>, usize) =
+                        self.decode_node(payload, data, data, 0)?;
+                    if consumed != data.len() {
+                        return Err(SemanticError::Decode {
+                            path: payload.path.clone(),
+                            message: format!(
+                                "{} payload bytes were not consumed",
+                                data.len().saturating_sub(consumed)
+                            ),
+                        });
+                    }
                     fields.push(Field {
                         node_id: node.id,
                         path: node.path.clone(),
@@ -464,14 +474,25 @@ impl<'context, 'record> RecordView<'context, 'record> {
         payload: &'a [u8],
         current: &'a [u8],
         offset: usize,
-    ) -> Result<FieldValue<'a>> {
+    ) -> Result<(FieldValue<'a>, usize)> {
         if !self.node_applies(node, payload)? {
-            return Ok(FieldValue::Absent);
+            return Ok((FieldValue::Absent, 0));
         }
 
-        let decoded = match &node.kind {
+        let (decoded, consumed) = match &node.kind {
             SchemaNodeKind::Primitive { primitive } => {
-                decode_primitive(primitive, current, self.localized, &node.path)
+                let consumed = node_data_size(node, current, self.localized)?;
+                let data = current
+                    .get(..consumed)
+                    .ok_or_else(|| SemanticError::Decode {
+                        path: node.path.clone(),
+                        message: format!(
+                            "primitive needs {consumed} bytes, only {} remain",
+                            current.len()
+                        ),
+                    })?;
+                decode_primitive(primitive, data, self.localized, &node.path)
+                    .map(|value| (value, consumed))
             }
             SchemaNodeKind::Struct { fields } => {
                 let mut values: Vec<NamedValue<'a>> = Vec::with_capacity(fields.len());
@@ -495,19 +516,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             path: field.path.clone(),
                             message: "struct cursor exceeded payload".to_owned(),
                         })?;
-                    let consumed: usize = self.node_data_size(field, payload, remaining)?;
-                    let field_data: &'a [u8] =
-                        remaining
-                            .get(..consumed)
-                            .ok_or_else(|| SemanticError::Decode {
-                                path: field.path.clone(),
-                                message: format!(
-                                    "field needs {consumed} bytes, only {} remain",
-                                    remaining.len()
-                                ),
-                            })?;
-                    let value: FieldValue<'a> =
-                        self.decode_node(field, payload, field_data, offset + cursor)?;
+                    let (value, consumed): (FieldValue<'a>, usize) =
+                        self.decode_node(field, payload, remaining, offset + cursor)?;
                     values.push(NamedValue {
                         node_id: field.id,
                         path: field.path.clone(),
@@ -525,16 +535,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             message: "struct cursor overflowed".to_owned(),
                         })?;
                 }
-                if cursor != current.len() {
-                    return Err(SemanticError::Decode {
-                        path: node.path.clone(),
-                        message: format!(
-                            "{} payload bytes were not consumed",
-                            current.len().saturating_sub(cursor)
-                        ),
-                    });
-                }
-                Ok(FieldValue::Struct(values))
+                Ok((FieldValue::Struct(values), cursor))
             }
             SchemaNodeKind::Array { element, count } => {
                 let (prefix_size, element_count): (usize, Option<usize>) = match count {
@@ -608,7 +609,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         path: node.path.clone(),
                         message: "array cursor exceeded payload".to_owned(),
                     })?;
-                    let consumed = self.node_data_size(element, payload, remaining)?;
+                    let (value, consumed) =
+                        self.decode_node(element, payload, remaining, offset + cursor)?;
                     if consumed == 0 {
                         return Err(SemanticError::Decode {
                             path: element.path.clone(),
@@ -622,34 +624,19 @@ impl<'context, 'record> RecordView<'context, 'record> {
                                 path: node.path.clone(),
                                 message: "array cursor overflowed".to_owned(),
                             })?;
-                    let element_data =
-                        current
-                            .get(cursor..end)
-                            .ok_or_else(|| SemanticError::Decode {
-                                path: element.path.clone(),
-                                message: format!(
-                                    "array element needs {consumed} bytes, only {} remain",
-                                    remaining.len()
-                                ),
-                            })?;
-                    values.push(self.decode_node(
-                        element,
-                        payload,
-                        element_data,
-                        offset + cursor,
-                    )?);
+                    if end > current.len() {
+                        return Err(SemanticError::Decode {
+                            path: element.path.clone(),
+                            message: format!(
+                                "array element needs {consumed} bytes, only {} remain",
+                                remaining.len()
+                            ),
+                        });
+                    }
+                    values.push(value);
                     cursor = end;
                 }
-                if cursor != current.len() {
-                    return Err(SemanticError::Decode {
-                        path: node.path.clone(),
-                        message: format!(
-                            "{} array payload bytes were not consumed",
-                            current.len().saturating_sub(cursor)
-                        ),
-                    });
-                }
-                Ok(FieldValue::Array(values))
+                Ok((FieldValue::Array(values), cursor))
             }
             SchemaNodeKind::Union { selector, variants } => {
                 let index = self.select_union_index(node, selector, payload)?;
@@ -667,23 +654,26 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     .get(decoder)
                     .ok_or_else(|| SemanticError::MissingDecoder(decoder.clone()))?
                     .decode(current)?;
-                if decoded.consumed != current.len() {
+                if decoded.consumed > current.len() {
                     return Err(SemanticError::Decode {
                         path: node.path.clone(),
                         message: format!(
-                            "custom decoder consumed {} of {} payload bytes",
+                            "custom decoder consumed {} bytes, only {} remain",
                             decoded.consumed,
                             current.len()
                         ),
                     });
                 }
-                Ok(decoded.value)
+                Ok((decoded.value, decoded.consumed))
             }
             SchemaNodeKind::Terminated { terminator, child } => {
-                let (actual, body) = current.split_last().ok_or_else(|| SemanticError::Decode {
-                    path: node.path.clone(),
-                    message: "terminated value is missing its terminator".to_owned(),
-                })?;
+                let (value, body_size) = self.decode_node(child, payload, current, offset)?;
+                let actual = current
+                    .get(body_size)
+                    .ok_or_else(|| SemanticError::Decode {
+                        path: node.path.clone(),
+                        message: "terminated value is missing its terminator".to_owned(),
+                    })?;
                 if actual != terminator {
                     return Err(SemanticError::Decode {
                         path: node.path.clone(),
@@ -692,7 +682,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         ),
                     });
                 }
-                self.decode_node(child, payload, body, offset)
+                let consumed = body_size
+                    .checked_add(1)
+                    .ok_or_else(|| SemanticError::Decode {
+                        path: node.path.clone(),
+                        message: "terminated value size overflowed".to_owned(),
+                    })?;
+                Ok((value, consumed))
             }
             SchemaNodeKind::Compressed { .. } => Err(SemanticError::Decode {
                 path: node.path.clone(),
@@ -713,7 +709,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
         let normalized = self
             .context
             .apply_normalizers(&node.path, self.record, decoded)?;
-        apply_float_read_semantics(node, normalized)
+        apply_float_read_semantics(node, normalized).map(|value| (value, consumed))
     }
 
     fn select_union_index(
@@ -842,12 +838,6 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 message: "callback returned a non-integer result".to_owned(),
             }),
         }
-    }
-
-    fn node_data_size(&self, node: &SchemaNode, payload: &[u8], data: &[u8]) -> Result<usize> {
-        node_data_size_with_resolver(node, data, self.localized, &mut |node, count| {
-            self.resolve_array_count(node, count, payload)
-        })
     }
 
     fn node_applies(&self, node: &SchemaNode, payload: &[u8]) -> Result<bool> {
@@ -1306,7 +1296,6 @@ fn read_string_length(width: u8, data: &[u8], path: &str) -> Result<usize> {
     })
 }
 
-#[cfg(test)]
 fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usize> {
     node_data_size_with_resolver(node, data, localized, &mut |node, _| {
         Err(SemanticError::Decode {
