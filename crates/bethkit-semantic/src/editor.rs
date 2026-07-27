@@ -97,6 +97,7 @@ impl RecordEditor {
         let mut candidate = clone_record(&self.record);
         candidate.subrecords[index].data = encoded;
         self.apply_mutations(&mut candidate, mutations)?;
+        self.apply_record_after_set(&mut candidate)?;
         self.record = candidate;
         self.decoded_values
             .insert((path.to_owned(), occurrence), decoded);
@@ -191,6 +192,7 @@ impl RecordEditor {
             },
         );
         self.apply_mutations(&mut candidate, mutations)?;
+        self.apply_record_after_set(&mut candidate)?;
         self.record = candidate;
         self.decoded_values
             .insert((path.to_owned(), occurrence), decoded);
@@ -213,6 +215,7 @@ impl RecordEditor {
         let index = self.assigned_subrecord_index(&self.record, path, occurrence)?;
         let mut candidate = clone_record(&self.record);
         candidate.subrecords.remove(index);
+        self.apply_record_after_set(&mut candidate)?;
         self.record = candidate;
         self.remove_decoded_occurrence(path, occurrence);
         Ok(())
@@ -915,6 +918,50 @@ impl RecordEditor {
             }
         }
         Ok(())
+    }
+
+    fn apply_record_after_set(&self, record: &mut WritableRecord) -> Result<()> {
+        let record_path = record.signature.to_string();
+        let mut mutations = Vec::new();
+        for binding in self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| binding.path == record_path && binding.callback_id == "def.after_set")
+        {
+            if !matches!(
+                binding.implementation,
+                CallbackImplementation::BuiltIn { .. }
+                    | CallbackImplementation::CustomHandler { .. }
+            ) {
+                return Err(SemanticError::Handler {
+                    handler: binding.callback_id.clone(),
+                    message: "record-level after-set callback is not executable".to_owned(),
+                });
+            }
+            match self.handlers.invoke_with_writable_record(
+                binding,
+                self.handler_record(),
+                record,
+                HandlerPhase::AfterSet,
+                None,
+                None,
+            )? {
+                HandlerOutput::None => {}
+                HandlerOutput::Mutations(handler_mutations) => {
+                    mutations.extend(handler_mutations);
+                }
+                _ => {
+                    return Err(SemanticError::Handler {
+                        handler: binding.callback_id.clone(),
+                        message: "record-level after-set callback returned an invalid result"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+        self.apply_mutations(record, mutations)
     }
 
     fn apply_record_metadata_mutations(&mut self, mutations: Vec<HandlerMutation>) -> Result<()> {
@@ -1875,8 +1922,15 @@ mod tests {
             }
         }
 
-        let package = SchemaPackage::new(
-            test_manifest(),
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "edit.sync_record_counts".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
             vec![SchemaRecord {
                 signature: SchemaSignature(*b"TEST"),
                 name: "Test".to_owned(),
@@ -1942,6 +1996,27 @@ mod tests {
                                 },
                             },
                         ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "TEST".to_owned(),
+                callback_id: "def.after_set".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "22".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "edit.sync_record_counts".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "counters": [{
+                                "counter_path": "TEST/2:Value Count",
+                                "counter_required": false,
+                                "value_signature": "VALU",
+                                "mode": "u32_payload_count",
+                                "only_when_missing": true
+                            }]
+                        }),
                     },
                 },
             }],
@@ -2059,6 +2134,32 @@ mod tests {
                 Signature(*b"AAAA"),
                 Signature(*b"VALU")
             ]
+        );
+        Ok(())
+    }
+
+    /// Dispatches record callbacks after removal and commits their cleanup atomically.
+    #[test]
+    fn editor_dispatches_record_after_set_callbacks() -> Result<()> {
+        let mut editor = editor_with_reused_signature()?;
+
+        editor.record.subrecords.insert(
+            2,
+            WritableSubRecord {
+                signature: Signature(*b"VCNT"),
+                data: 2_u32.to_le_bytes().to_vec(),
+            },
+        );
+
+        editor.remove("TEST/3:Values", 0)?;
+        assert_eq!(
+            editor
+                .record
+                .subrecords
+                .iter()
+                .map(|subrecord| subrecord.signature)
+                .collect::<Vec<_>>(),
+            vec![Signature(*b"AAAA"), Signature(*b"AAAA")]
         );
         Ok(())
     }

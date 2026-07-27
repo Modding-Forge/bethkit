@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bethkit_core::{FormId, Record, RecordFlags, Signature};
+use bethkit_core::{FormId, Record, RecordFlags, Signature, WritableRecord};
 use bethkit_schema::{CallbackBinding, CallbackImplementation, ConflictPriority, SchemaGame};
 
 use crate::{FieldValue, OwnedFieldValue, Result, SemanticError};
@@ -224,6 +224,8 @@ pub struct HandlerInvocation<'a> {
     pub old_value: Option<&'a FieldValue<'static>>,
     /// Original main record for callbacks that inspect sibling subrecords.
     pub source_record: Option<&'a Record>,
+    /// Transactional writable record for record-level editor callbacks.
+    pub source_writable_record: Option<&'a WritableRecord>,
 }
 
 /// Versioned implementation of one stable semantic handler.
@@ -296,6 +298,13 @@ pub struct SemanticHandlerRegistry {
     handlers: BTreeMap<String, Arc<dyn SemanticHandler>>,
 }
 
+#[derive(Clone, Copy)]
+enum HandlerRecordSource<'a> {
+    None,
+    ReadOnly(&'a Record),
+    Writable(&'a WritableRecord),
+}
+
 impl SemanticHandlerRegistry {
     /// Creates an empty handler registry.
     pub fn new() -> Self {
@@ -328,6 +337,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(CtdaTypeFormatter));
         registry.register(Arc::new(IntegerLookupFormatter));
         registry.register(Arc::new(SynchronizeCountAfterSet));
+        registry.register(Arc::new(SynchronizeRecordCountsAfterSet));
         registry.register(Arc::new(InvalidModelInfoValidation));
         registry.register(Arc::new(WwiseGuidFormatter { resolver: None }));
         registry
@@ -387,7 +397,14 @@ impl SemanticHandlerRegistry {
         value: Option<&FieldValue<'static>>,
         old_value: Option<&FieldValue<'static>>,
     ) -> Result<HandlerOutput> {
-        self.invoke_with_source_record(binding, record, None, phase, value, old_value)
+        self.invoke_with_records(
+            binding,
+            record,
+            HandlerRecordSource::None,
+            phase,
+            value,
+            old_value,
+        )
     }
 
     /// Executes a binding with access to the original main record.
@@ -405,6 +422,50 @@ impl SemanticHandlerRegistry {
         binding: &'a CallbackBinding,
         record: HandlerRecordContext,
         source_record: Option<&'a Record>,
+        phase: HandlerPhase,
+        value: Option<&'a FieldValue<'static>>,
+        old_value: Option<&'a FieldValue<'static>>,
+    ) -> Result<HandlerOutput> {
+        self.invoke_with_records(
+            binding,
+            record,
+            source_record.map_or(HandlerRecordSource::None, HandlerRecordSource::ReadOnly),
+            phase,
+            value,
+            old_value,
+        )
+    }
+
+    /// Executes a record-level editor binding against a transactional record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the binding is not executable or the
+    /// selected handler rejects the invocation.
+    pub fn invoke_with_writable_record<'a>(
+        &self,
+        binding: &'a CallbackBinding,
+        record: HandlerRecordContext,
+        source_record: &'a WritableRecord,
+        phase: HandlerPhase,
+        value: Option<&'a FieldValue<'static>>,
+        old_value: Option<&'a FieldValue<'static>>,
+    ) -> Result<HandlerOutput> {
+        self.invoke_with_records(
+            binding,
+            record,
+            HandlerRecordSource::Writable(source_record),
+            phase,
+            value,
+            old_value,
+        )
+    }
+
+    fn invoke_with_records<'a>(
+        &self,
+        binding: &'a CallbackBinding,
+        record: HandlerRecordContext,
+        source: HandlerRecordSource<'a>,
         phase: HandlerPhase,
         value: Option<&'a FieldValue<'static>>,
         old_value: Option<&'a FieldValue<'static>>,
@@ -444,7 +505,14 @@ impl SemanticHandlerRegistry {
                 phase,
                 value,
                 old_value,
-                source_record,
+                source_record: match source {
+                    HandlerRecordSource::ReadOnly(record) => Some(record),
+                    HandlerRecordSource::None | HandlerRecordSource::Writable(_) => None,
+                },
+                source_writable_record: match source {
+                    HandlerRecordSource::Writable(record) => Some(record),
+                    HandlerRecordSource::None | HandlerRecordSource::ReadOnly(_) => None,
+                },
             })
     }
 }
@@ -1760,6 +1828,119 @@ impl SemanticHandler for SynchronizeCountAfterSet {
                 remove_when_zero: !required,
             },
         ]))
+    }
+}
+
+struct SynchronizeRecordCountsAfterSet;
+
+impl SemanticHandler for SynchronizeRecordCountsAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.sync_record_counts"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "record counter synchronization requires a writable record".to_owned(),
+            })?;
+        let counters = invocation
+            .context
+            .configuration
+            .get("counters")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "record counter synchronization requires a counters array".to_owned(),
+            })?;
+        let mut mutations = Vec::with_capacity(counters.len());
+        for counter in counters {
+            if counter
+                .get("counter_missing")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                continue;
+            }
+            let path = configured_text(self.id(), counter, "counter_path")?.to_owned();
+            let required = counter
+                .get("counter_required")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "record counter entry requires counter_required".to_owned(),
+                })?;
+            let value_signature = configured_signature(self.id(), counter, "value_signature")?;
+            let mode = configured_text(self.id(), counter, "mode")?;
+            let only_when_missing = counter
+                .get("only_when_missing")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if only_when_missing
+                && record
+                    .subrecords
+                    .iter()
+                    .any(|subrecord| subrecord.signature == value_signature)
+            {
+                continue;
+            }
+            let count = match mode {
+                "subrecord_count" => record
+                    .subrecords
+                    .iter()
+                    .filter(|subrecord| subrecord.signature == value_signature)
+                    .count(),
+                "u32_payload_count" => {
+                    let mut count = 0_usize;
+                    for subrecord in record
+                        .subrecords
+                        .iter()
+                        .filter(|subrecord| subrecord.signature == value_signature)
+                    {
+                        if subrecord.data.len() % std::mem::size_of::<u32>() != 0 {
+                            return Err(SemanticError::Handler {
+                                handler: self.id().to_owned(),
+                                message: format!(
+                                    "{value_signature} payload length {} is not divisible by four",
+                                    subrecord.data.len()
+                                ),
+                            });
+                        }
+                        count = count
+                            .checked_add(subrecord.data.len() / std::mem::size_of::<u32>())
+                            .ok_or_else(|| SemanticError::Handler {
+                                handler: self.id().to_owned(),
+                                message: "record counter value overflowed usize".to_owned(),
+                            })?;
+                    }
+                    count
+                }
+                _ => {
+                    return Err(SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: format!("unsupported record counter mode {mode:?}"),
+                    });
+                }
+            };
+            mutations.push(HandlerMutation::SynchronizeCount {
+                path,
+                occurrence: 0,
+                value: u64::try_from(count).map_err(|_| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "record counter value exceeds u64".to_owned(),
+                })?,
+                remove_when_zero: !required,
+            });
+        }
+        Ok(HandlerOutput::Mutations(mutations))
     }
 }
 
@@ -3338,6 +3519,86 @@ mod tests {
         Ok(())
     }
 
+    /// Counts record values while preserving xEdit's missing-container cleanup behavior.
+    #[test]
+    fn synchronize_record_counts_handler_reads_transactional_record(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let binding = CallbackBinding {
+            path: "TEST".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-record-counts".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.sync_record_counts".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "counters": [
+                            {
+                                "counter_path": "TEST/0:Keyword Count",
+                                "counter_required": false,
+                                "value_signature": "KWDA",
+                                "mode": "u32_payload_count",
+                                "only_when_missing": true
+                            },
+                            {
+                                "counter_path": "TEST/2:Condition Count",
+                                "counter_required": true,
+                                "value_signature": "LVLO",
+                                "mode": "subrecord_count"
+                            }
+                        ]
+                    }),
+                },
+            },
+        };
+        let record = WritableRecord {
+            signature: Signature(*b"TEST"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"KWDA"),
+                    data: vec![0_u8; 12],
+                },
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"CTDA"),
+                    data: vec![0_u8; 32],
+                },
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"CTDA"),
+                    data: vec![0_u8; 32],
+                },
+            ],
+        };
+        let context =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+
+        let output = SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+            &binding,
+            context,
+            &record,
+            HandlerPhase::AfterSet,
+            None,
+            None,
+        )?;
+
+        let HandlerOutput::Mutations(mutations) = output else {
+            return Err("record counter handler returned no mutations".into());
+        };
+        assert!(matches!(
+            mutations.as_slice(),
+            [HandlerMutation::SynchronizeCount {
+                path,
+                value: 0,
+                remove_when_zero: false,
+                ..
+            }] if path == "TEST/2:Condition Count"
+        ));
+        Ok(())
+    }
+
     /// Reads xEdit model-info array counts from the indexed header slot.
     #[test]
     fn model_info_array_count_reads_header_values() -> Result<()> {
@@ -3404,6 +3665,7 @@ mod tests {
             value: None,
             old_value: None,
             source_record: None,
+            source_writable_record: None,
         })?;
 
         assert!(matches!(
@@ -3458,6 +3720,7 @@ mod tests {
             value: Some(&value),
             old_value: None,
             source_record: None,
+            source_writable_record: None,
         })?;
         match output {
             HandlerOutput::Text(value) => Ok(value),
@@ -3502,6 +3765,7 @@ mod tests {
             value: Some(value),
             old_value: None,
             source_record: None,
+            source_writable_record: None,
         })
     }
 
