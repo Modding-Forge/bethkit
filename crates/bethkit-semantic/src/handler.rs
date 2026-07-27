@@ -348,6 +348,8 @@ pub struct FormLinkInfo {
     editor_id: Option<String>,
     quest_aliases: Option<Vec<QuestAliasInfo>>,
     quest_stages: Option<Vec<QuestStageInfo>>,
+    quest_objectives: Option<Vec<QuestObjectiveInfo>>,
+    script_variables: Option<ScriptVariableMetadata>,
 }
 
 impl FormLinkInfo {
@@ -359,6 +361,8 @@ impl FormLinkInfo {
             editor_id: None,
             quest_aliases: None,
             quest_stages: None,
+            quest_objectives: None,
+            script_variables: None,
         }
     }
 
@@ -377,6 +381,18 @@ impl FormLinkInfo {
     /// Marks the resolved record as a quest and supplies its effective stages.
     pub fn with_quest_stages(mut self, stages: Vec<QuestStageInfo>) -> Self {
         self.quest_stages = Some(stages);
+        self
+    }
+
+    /// Marks the resolved record as a quest and supplies its effective objectives.
+    pub fn with_quest_objectives(mut self, objectives: Vec<QuestObjectiveInfo>) -> Self {
+        self.quest_objectives = Some(objectives);
+        self
+    }
+
+    /// Supplies the effective legacy script state used by condition variable callbacks.
+    pub fn with_script_variables(mut self, metadata: ScriptVariableMetadata) -> Self {
+        self.script_variables = Some(metadata);
         self
     }
 
@@ -403,6 +419,16 @@ impl FormLinkInfo {
     /// Returns effective quest stages, or `None` when the record is not a quest.
     pub fn quest_stages(&self) -> Option<&[QuestStageInfo]> {
         self.quest_stages.as_deref()
+    }
+
+    /// Returns effective quest objectives, or `None` when the record is not a quest.
+    pub fn quest_objectives(&self) -> Option<&[QuestObjectiveInfo]> {
+        self.quest_objectives.as_deref()
+    }
+
+    /// Returns effective legacy script metadata when the resolver supplied it.
+    pub fn script_variables(&self) -> Option<&ScriptVariableMetadata> {
+        self.script_variables.as_ref()
     }
 }
 
@@ -457,6 +483,86 @@ impl QuestStageInfo {
     /// Returns the first log-entry text used by xEdit's stage formatter.
     pub fn log_entry(&self) -> &str {
         &self.log_entry
+    }
+}
+
+/// xEdit-compatible metadata for one effective quest objective.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestObjectiveInfo {
+    index: i64,
+    display_text: String,
+}
+
+impl QuestObjectiveInfo {
+    /// Creates quest-objective metadata.
+    pub fn new(index: i64, display_text: impl Into<String>) -> Self {
+        Self {
+            index,
+            display_text: display_text.into(),
+        }
+    }
+
+    /// Returns the numeric objective index.
+    pub fn index(&self) -> i64 {
+        self.index
+    }
+
+    /// Returns the objective display text used by xEdit.
+    pub fn display_text(&self) -> &str {
+        &self.display_text
+    }
+}
+
+/// xEdit-compatible metadata for one effective legacy script local variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptVariableInfo {
+    index: i64,
+    name: String,
+}
+
+impl ScriptVariableInfo {
+    /// Creates local-variable metadata.
+    pub fn new(index: i64, name: impl Into<String>) -> Self {
+        Self {
+            index,
+            name: name.into(),
+        }
+    }
+
+    /// Returns the numeric script-local index.
+    pub fn index(&self) -> i64 {
+        self.index
+    }
+
+    /// Returns the script-local name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Effective script-reference state used by legacy xEdit condition callbacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptVariableMetadata {
+    /// The resolved main record contains no `SCRI` subrecord.
+    MissingReference,
+    /// The `SCRI` subrecord does not resolve to a valid script.
+    InvalidReference,
+    /// The script resolves and exposes its winning local-variable table.
+    Resolved {
+        /// xEdit name of the effective script record.
+        script_name: String,
+        /// Effective local variables.
+        variables: Vec<ScriptVariableInfo>,
+    },
+}
+
+impl ScriptVariableMetadata {
+    /// Creates metadata for one resolved effective script.
+    pub fn resolved(script_name: impl Into<String>, variables: Vec<ScriptVariableInfo>) -> Self {
+        Self::Resolved {
+            script_name: script_name.into(),
+            variables,
+        }
     }
 }
 
@@ -604,6 +710,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatObjectProperty { resolver: None }));
         registry.register(Arc::new(FormatVmadObjectAlias { resolver: None }));
         registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
+        registry.register(Arc::new(FormatCtdaVariableName { resolver: None }));
+        registry.register(Arc::new(FormatCtdaQuestObjective { resolver: None }));
         registry.register(Arc::new(OverlayCtdaQuest { resolver: None }));
         registry.register(Arc::new(FormatCtdaContextQuestStage { resolver: None }));
         registry.register(Arc::new(FormatCtdaConditionAlias { resolver: None }));
@@ -680,6 +788,12 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatCtdaQuestStage {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatCtdaVariableName {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatCtdaQuestObjective {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(OverlayCtdaQuest {
@@ -1862,6 +1976,14 @@ struct FormatCtdaQuestStage {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatCtdaVariableName {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+struct FormatCtdaQuestObjective {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 struct OverlayCtdaQuest {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
@@ -2036,6 +2158,125 @@ impl SemanticHandler for FormatCtdaQuestStage {
             });
         Ok(HandlerOutput::Text(format_ctda_quest_stage(
             stage,
+            invocation.phase,
+            quest.as_ref(),
+        )))
+    }
+}
+
+impl SemanticHandler for FormatCtdaVariableName {
+    fn id(&self) -> &'static str {
+        "format.ctda_variable_name"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(input)) = invocation.value else {
+                return Err(ctda_variable_name_error(
+                    "condition variable edit parsing requires text",
+                ));
+            };
+            if let Ok(value) = parse_delphi_integer(input, self.id()) {
+                if value != 0 {
+                    return Ok(HandlerOutput::Value(FieldValue::Int(value)));
+                }
+            }
+            let record =
+                resolve_ctda_parameter_link(&invocation, self.resolver.as_deref(), self.id())?
+                    .ok_or_else(|| {
+                        ctda_variable_name_error(
+                            "\"Parameter #1\" does not reference a valid main record",
+                        )
+                    })?;
+            let metadata = record.script_variables().ok_or_else(|| {
+                ctda_variable_name_error(
+                    "FormID resolver did not supply legacy script-variable metadata",
+                )
+            })?;
+            let variables = match metadata {
+                ScriptVariableMetadata::MissingReference => {
+                    return Err(ctda_variable_name_error(format!(
+                        "\"{}\" does not contain a SCRI subrecord",
+                        record.short_name()
+                    )))
+                }
+                ScriptVariableMetadata::InvalidReference => {
+                    return Err(ctda_variable_name_error(format!(
+                        "\"{}\" does not have a valid script",
+                        record.short_name()
+                    )))
+                }
+                ScriptVariableMetadata::Resolved { variables, .. } => variables,
+            };
+            let name = input.trim();
+            let variable = variables
+                .iter()
+                .find(|variable| variable.name().eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    ctda_variable_name_error(format!(
+                        "Variable \"{input}\" was not found in \"{}\"",
+                        record.short_name()
+                    ))
+                })?;
+            return Ok(HandlerOutput::Value(FieldValue::Int(variable.index())));
+        }
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                ctda_variable_name_error("condition variable formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| ctda_variable_name_error("condition variable index exceeds i64"))?;
+        if invocation.phase == HandlerPhase::SortKey {
+            return Ok(HandlerOutput::Text(format!("{:08X}", value as u64)));
+        }
+        let record = resolve_ctda_parameter_link(&invocation, self.resolver.as_deref(), self.id())?;
+        Ok(HandlerOutput::Text(format_ctda_variable_name(
+            value,
+            invocation.phase,
+            record.as_ref(),
+        )?))
+    }
+}
+
+impl SemanticHandler for FormatCtdaQuestObjective {
+    fn id(&self) -> &'static str {
+        "format.ctda_quest_objective"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(input)) = invocation.value else {
+                return Err(ctda_quest_objective_error(
+                    "condition quest-objective edit parsing requires text",
+                ));
+            };
+            let value = parse_prefixed_u32(input, self.id())?;
+            return Ok(HandlerOutput::Value(FieldValue::Int(i64::from(value))));
+        }
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                ctda_quest_objective_error(
+                    "condition quest-objective formatting requires an integer",
+                )
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| ctda_quest_objective_error("condition quest objective exceeds i64"))?;
+        if invocation.phase == HandlerPhase::SortKey {
+            return Ok(HandlerOutput::Text(format!("{:08X}", value as u64)));
+        }
+        let quest = resolve_ctda_parameter_link(&invocation, self.resolver.as_deref(), self.id())?;
+        Ok(HandlerOutput::Text(format_ctda_quest_objective(
+            value,
             invocation.phase,
             quest.as_ref(),
         )))
@@ -2272,15 +2513,153 @@ fn format_ctda_quest_stage(
     }
 }
 
+fn resolve_ctda_parameter_link(
+    invocation: &HandlerInvocation<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+    handler: &str,
+) -> Result<Option<FormLinkInfo>> {
+    let parameter_path =
+        configured_text(handler, invocation.context.configuration, "parameter_path")?;
+    Ok(invocation
+        .value_scope
+        .and_then(|scope| scoped_form_id(scope, parameter_path))
+        .and_then(|(form_id, targets)| {
+            resolver.and_then(|resolver| {
+                resolver.resolve_form_id(
+                    handler_record_context(&invocation.context),
+                    form_id,
+                    targets,
+                )
+            })
+        }))
+}
+
+fn format_ctda_variable_name(
+    value: i64,
+    phase: HandlerPhase,
+    record: Option<&FormLinkInfo>,
+) -> Result<String> {
+    let unresolved = match phase {
+        HandlerPhase::Display => {
+            format!("{value} <Warning: Could not resolve Parameter 1>")
+        }
+        HandlerPhase::Summary | HandlerPhase::EditValue => value.to_string(),
+        HandlerPhase::Validation => "<Warning: Could not resolve Parameter 1>".to_owned(),
+        _ => String::new(),
+    };
+    let Some(record) = record else {
+        return Ok(unresolved);
+    };
+    let metadata = record.script_variables().ok_or_else(|| {
+        ctda_variable_name_error("FormID resolver did not supply legacy script-variable metadata")
+    })?;
+    let warning = match metadata {
+        ScriptVariableMetadata::MissingReference => {
+            format!(
+                "\"{}\" does not contain a SCRI subrecord",
+                record.short_name()
+            )
+        }
+        ScriptVariableMetadata::InvalidReference => {
+            format!("\"{}\" does not have a valid script", record.short_name())
+        }
+        ScriptVariableMetadata::Resolved {
+            script_name,
+            variables,
+        } => {
+            if let Some(variable) = variables.iter().find(|variable| variable.index() == value) {
+                return Ok(match phase {
+                    HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+                        variable.name().to_owned()
+                    }
+                    HandlerPhase::Validation => String::new(),
+                    _ => unresolved,
+                });
+            }
+            format!("Variable Index not found in \"{script_name}\"")
+        }
+    };
+    Ok(match phase {
+        HandlerPhase::Display => format!("{value} <Warning: {warning}>"),
+        HandlerPhase::Summary | HandlerPhase::EditValue => value.to_string(),
+        HandlerPhase::Validation => format!("<Warning: {warning}>"),
+        _ => unresolved,
+    })
+}
+
+fn format_ctda_quest_objective(
+    value: i64,
+    phase: HandlerPhase,
+    quest: Option<&FormLinkInfo>,
+) -> String {
+    let unresolved = match phase {
+        HandlerPhase::Display => {
+            format!("{value} <Warning: Could not resolve Parameter 1>")
+        }
+        HandlerPhase::Summary | HandlerPhase::EditValue => value.to_string(),
+        HandlerPhase::Validation => "<Warning: Could not resolve Parameter 1>".to_owned(),
+        _ => String::new(),
+    };
+    let Some(quest) = quest else {
+        return unresolved;
+    };
+    let Some(objectives) = quest.quest_objectives() else {
+        return match phase {
+            HandlerPhase::Display => format!(
+                "{value} <Warning: \"{}\" is not a Quest record>",
+                quest.short_name()
+            ),
+            HandlerPhase::Summary | HandlerPhase::EditValue => value.to_string(),
+            HandlerPhase::Validation => {
+                format!(
+                    "<Warning: \"{}\" is not a Quest record>",
+                    quest.short_name()
+                )
+            }
+            _ => unresolved,
+        };
+    };
+    if let Some(objective) = objectives
+        .iter()
+        .find(|objective| objective.index() == value)
+    {
+        return match phase {
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+                format_indexed_label(objective.index(), objective.display_text())
+            }
+            HandlerPhase::Validation => String::new(),
+            _ => unresolved,
+        };
+    }
+    match phase {
+        HandlerPhase::Display => format!(
+            "{value} <Warning: Quest Objective not found in \"{}\">",
+            quest.value()
+        ),
+        HandlerPhase::Summary | HandlerPhase::EditValue => value.to_string(),
+        HandlerPhase::Validation => {
+            format!(
+                "<Warning: Quest Objective not found in \"{}\">",
+                quest.value()
+            )
+        }
+        _ => unresolved,
+    }
+}
+
 fn format_quest_stage_label(stage: &QuestStageInfo) -> String {
-    let mut text = stage.index().to_string();
+    format_indexed_label(stage.index(), stage.log_entry())
+}
+
+fn format_indexed_label(index: i64, label: &str) -> String {
+    let mut text = index.to_string();
     while text.len() < 3 {
         text.insert(0, '0');
     }
-    let log_entry = stage.log_entry().trim();
-    if !log_entry.is_empty() {
+    let label = label.trim();
+    if !label.is_empty() {
         text.push(' ');
-        text.push_str(log_entry);
+        text.push_str(label);
     }
     text
 }
@@ -2423,6 +2802,20 @@ fn parse_prefixed_u32(value: &str, handler: &str) -> Result<u32> {
 fn ctda_quest_stage_error(message: impl Into<String>) -> SemanticError {
     SemanticError::Handler {
         handler: "format.ctda_quest_stage".to_owned(),
+        message: message.into(),
+    }
+}
+
+fn ctda_variable_name_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.ctda_variable_name".to_owned(),
+        message: message.into(),
+    }
+}
+
+fn ctda_quest_objective_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.ctda_quest_objective".to_owned(),
         message: message.into(),
     }
 }
@@ -6139,6 +6532,19 @@ mod tests {
                     FormLinkInfo::new("[00001234] Example Faction", "Example Item [MISC:00001234]")
                         .with_editor_id("ExampleActorValue"),
                 ),
+                FormId(0x3456) => Some(
+                    FormLinkInfo::new(
+                        "Example Terminal [TERM:00003456]",
+                        "Example Terminal [TERM:00003456]",
+                    )
+                    .with_script_variables(ScriptVariableMetadata::resolved(
+                        "ExampleScript [SCPT:00007890]",
+                        vec![
+                            ScriptVariableInfo::new(2, "FirstVariable"),
+                            ScriptVariableInfo::new(7, "TargetVariable"),
+                        ],
+                    )),
+                ),
                 FormId(0x5678) => Some(
                     FormLinkInfo::new(
                         "Example Quest [QUST:00005678]",
@@ -6151,6 +6557,10 @@ mod tests {
                     .with_quest_stages(vec![
                         QuestStageInfo::new(10, " First objective "),
                         QuestStageInfo::new(20, ""),
+                    ])
+                    .with_quest_objectives(vec![
+                        QuestObjectiveInfo::new(10, " Reach the target "),
+                        QuestObjectiveInfo::new(20, ""),
                     ]),
                 ),
                 _ => None,
@@ -7143,6 +7553,147 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::Int(10))
+        ));
+        Ok(())
+    }
+
+    /// Resolves legacy CTDA variable indices through parameter one's effective script.
+    #[test]
+    fn ctda_variable_name_formatter_matches_xedit() -> TestResult {
+        // given
+        let parameter_path = "TEST/CTDA/Parameter #1";
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.ctda_variable_name",
+            serde_json::json!({ "parameter_path": parameter_path }),
+        );
+        let scope = FieldValue::Struct(vec![crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: parameter_path.to_owned(),
+            name: "Parameter #1".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 4 },
+            value: FieldValue::FormId {
+                value: FormId(0x3456),
+                targets: vec![],
+            },
+        }]);
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::FalloutNv);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                record,
+                HandlerPhase::Display,
+                Some(&FieldValue::Int(7)),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "TargetVariable"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                record,
+                HandlerPhase::Display,
+                Some(&FieldValue::Int(9)),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text)
+                if text
+                    == "9 <Warning: Variable Index not found in \
+                        \"ExampleScript [SCPT:00007890]\">"
+        ));
+        let edit = FieldValue::String(Cow::Borrowed(" targetvariable "));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&edit),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Value(FieldValue::Int(7))
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::SortKey,
+                Some(&FieldValue::Int(-1)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "FFFFFFFFFFFFFFFF"
+        ));
+        Ok(())
+    }
+
+    /// Resolves Fallout New Vegas CTDA objective indices through parameter one.
+    #[test]
+    fn ctda_quest_objective_formatter_matches_xedit() -> TestResult {
+        // given
+        let parameter_path = "TEST/CTDA/Parameter #1";
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.ctda_quest_objective",
+            serde_json::json!({ "parameter_path": parameter_path }),
+        );
+        let scope = FieldValue::Struct(vec![crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: parameter_path.to_owned(),
+            name: "Parameter #1".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 4 },
+            value: FieldValue::FormId {
+                value: FormId(0x5678),
+                targets: vec![Signature(*b"QUST")],
+            },
+        }]);
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::FalloutNv);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                record,
+                HandlerPhase::Summary,
+                Some(&FieldValue::Int(10)),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "010 Reach the target"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                record,
+                HandlerPhase::Validation,
+                Some(&FieldValue::Int(30)),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text)
+                if text
+                    == "<Warning: Quest Objective not found in \
+                        \"Example Quest [QUST:00005678]\">"
+        ));
+        let edit = FieldValue::String(Cow::Borrowed("020 Optional objective"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(20))
         ));
         Ok(())
     }
