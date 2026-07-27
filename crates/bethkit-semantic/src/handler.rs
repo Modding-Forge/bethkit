@@ -777,6 +777,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectGameSettingValue));
         registry.register(Arc::new(SelectLegacyNoteVoice));
         registry.register(Arc::new(SelectPackageInputValue));
+        registry.register(Arc::new(SelectMorrowindGlobalValue));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -4029,6 +4030,8 @@ struct SelectLegacyNoteVoice;
 
 struct SelectPackageInputValue;
 
+struct SelectMorrowindGlobalValue;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4415,6 +4418,31 @@ impl SemanticHandler for SelectPackageInputValue {
             "Bool" => 1,
             "Int" => 2,
             "Float" | "ObjectList" => 3,
+            _ => 0,
+        };
+        Ok(HandlerOutput::Integer(selected))
+    }
+}
+
+impl SemanticHandler for SelectMorrowindGlobalValue {
+    fn id(&self) -> &'static str {
+        "select.morrowind_global_value"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let value_type = source_subrecord_bytes(&invocation, Signature(*b"FNAM"), self.id())?
+            .and_then(|bytes| bytes.first())
+            .copied();
+        let selected = match value_type {
+            Some(b'l') => 1,
+            Some(b'f') => 2,
             _ => 0,
         };
         Ok(HandlerOutput::Integer(selected))
@@ -9543,6 +9571,43 @@ mod tests {
                     (*b"ANAM", [input_type.as_bytes(), &[0]].concat()),
                     (*b"CNAM", vec![0; 4]),
                 ],
+            )?;
+            assert!(matches!(
+                handlers.invoke_with_subrecord(
+                    &binding,
+                    context,
+                    HandlerSubrecordSource::ReadOnly {
+                        record: &record,
+                        index: 1,
+                    },
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
+        Ok(())
+    }
+
+    /// Selects Morrowind global layouts from the FNAM type byte.
+    #[test]
+    fn morrowind_global_value_selector_matches_xedit_type_mapping() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.morrowind_global_value",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"GLOB"), FormId::NULL, 0, SchemaGame::Morrowind);
+
+        // when / then
+        for (value_type, expected) in [(b's', 0_i64), (b'l', 1), (b'f', 2), (b'x', 0)] {
+            let record = test_record(
+                *b"GLOB",
+                &[(*b"FNAM", vec![value_type]), (*b"FLTV", vec![0; 4])],
             )?;
             assert!(matches!(
                 handlers.invoke_with_subrecord(
