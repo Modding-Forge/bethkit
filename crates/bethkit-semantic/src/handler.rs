@@ -771,6 +771,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectAudioEffectData));
         registry.register(Arc::new(SelectStarfieldComponentData));
         registry.register(Arc::new(SelectStarfieldComponentDat2));
+        registry.register(Arc::new(SelectOblivionObmeEfitParameter));
+        registry.register(Arc::new(SelectOblivionObmeEfixParameter));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -3953,6 +3955,10 @@ struct SelectStarfieldComponentData;
 
 struct SelectStarfieldComponentDat2;
 
+struct SelectOblivionObmeEfitParameter;
+
+struct SelectOblivionObmeEfixParameter;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4229,6 +4235,49 @@ impl SemanticHandler for SelectStarfieldComponentDat2 {
             component == Some("BlockHeightAdjustment_Component"),
         )))
     }
+}
+
+impl SemanticHandler for SelectOblivionObmeEfitParameter {
+    fn id(&self) -> &'static str {
+        "select.oblivion_obme_efit_parameter"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        select_oblivion_obme_parameter(invocation, 4, self.id())
+    }
+}
+
+impl SemanticHandler for SelectOblivionObmeEfixParameter {
+    fn id(&self) -> &'static str {
+        "select.oblivion_obme_efix_parameter"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        select_oblivion_obme_parameter(invocation, 5, self.id())
+    }
+}
+
+fn select_oblivion_obme_parameter(
+    invocation: HandlerInvocation<'_>,
+    parameter_offset: usize,
+    handler: &str,
+) -> Result<HandlerOutput> {
+    if invocation.phase != HandlerPhase::UnionSelection {
+        return Ok(HandlerOutput::None);
+    }
+    let selected = source_subrecord_bytes(&invocation, Signature(*b"EFME"), handler)?
+        .and_then(|bytes| bytes.get(parameter_offset))
+        .copied()
+        .unwrap_or_default();
+    Ok(HandlerOutput::Integer(i64::from(selected)))
 }
 
 fn source_subrecord_text<'a>(
@@ -9161,6 +9210,60 @@ mod tests {
             (&data_binding, 1_usize, 1_i64),
             (&data_binding, 3, 5),
             (&dat2_binding, 5, 1),
+        ] {
+            assert!(matches!(
+                handlers.invoke_with_subrecord(
+                    binding,
+                    context,
+                    HandlerSubrecordSource::ReadOnly {
+                        record: &record,
+                        index: source_index,
+                    },
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
+        Ok(())
+    }
+
+    /// Selects each Oblivion OBME parameter from its repeat-local EFME metadata.
+    #[test]
+    fn oblivion_obme_parameter_selectors_use_exact_subrecord_position() -> TestResult {
+        // given
+        let efit_binding = test_metadata_binding(
+            "union.select",
+            "select.oblivion_obme_efit_parameter",
+            serde_json::json!({}),
+        );
+        let efix_binding = test_metadata_binding(
+            "union.select",
+            "select.oblivion_obme_efix_parameter",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"ALCH"), FormId::NULL, 0, SchemaGame::Oblivion);
+        let record = test_record(
+            *b"ALCH",
+            &[
+                (*b"EFME", vec![0, 0, 0, 0, 1, 2]),
+                (*b"EFIT", vec![0; 24]),
+                (*b"EFIX", vec![0; 20]),
+                (*b"EFME", vec![0, 0, 0, 0, 3, 1]),
+                (*b"EFIT", vec![0; 24]),
+                (*b"EFIX", vec![0; 20]),
+            ],
+        )?;
+
+        // when / then
+        for (binding, source_index, expected) in [
+            (&efit_binding, 1_usize, 1_i64),
+            (&efix_binding, 2, 2),
+            (&efit_binding, 4, 3),
+            (&efix_binding, 5, 1),
         ] {
             assert!(matches!(
                 handlers.invoke_with_subrecord(
