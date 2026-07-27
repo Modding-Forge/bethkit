@@ -786,6 +786,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectPerkEntryPointData));
         registry.register(Arc::new(SelectPerkEpf3));
         registry.register(Arc::new(SelectRecordFlag));
+        registry.register(Arc::new(SelectBoneModifierType));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -4199,6 +4200,8 @@ struct SelectPerkEpf3;
 
 struct SelectRecordFlag;
 
+struct SelectBoneModifierType;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4756,6 +4759,70 @@ impl SemanticHandler for SelectRecordFlag {
             flags.bits() & mask == mask,
         )))
     }
+}
+
+impl SemanticHandler for SelectBoneModifierType {
+    fn id(&self) -> &'static str {
+        "select.bone_modifier_type"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(FieldValue::Bytes(payload)) = invocation.value else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "bone-modifier selector requires the DATA payload".to_owned(),
+            });
+        };
+        let type_name = prefixed_u32_string(payload, self.id())?;
+        let selected = if type_name.eq_ignore_ascii_case(b"LookAtChain") {
+            1
+        } else if type_name.eq_ignore_ascii_case(b"MorphDriver") {
+            2
+        } else if type_name.eq_ignore_ascii_case(b"PoseDeformer") {
+            3
+        } else if type_name.eq_ignore_ascii_case(b"SpringBone") {
+            4
+        } else {
+            0
+        };
+        Ok(HandlerOutput::Integer(selected))
+    }
+}
+
+fn prefixed_u32_string<'a>(payload: &'a [u8], handler: &str) -> Result<&'a [u8]> {
+    let length_bytes: [u8; 4] = payload
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "length-prefixed string is missing its u32 length".to_owned(),
+        })?;
+    let length =
+        usize::try_from(u32::from_le_bytes(length_bytes)).map_err(|_| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "length-prefixed string exceeds platform size".to_owned(),
+        })?;
+    let end = 4_usize
+        .checked_add(length)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "length-prefixed string length overflowed".to_owned(),
+        })?;
+    let bytes = payload.get(4..end).ok_or_else(|| SemanticError::Handler {
+        handler: handler.to_owned(),
+        message: format!(
+            "length-prefixed string declares {length} bytes, payload has {}",
+            payload.len().saturating_sub(4)
+        ),
+    })?;
+    Ok(bytes.split(|byte| *byte == 0).next().unwrap_or_default())
 }
 
 fn source_subrecord_text<'a>(
@@ -10322,6 +10389,54 @@ mod tests {
             )?,
             HandlerOutput::Integer(0)
         ));
+        Ok(())
+    }
+
+    /// Selects every Starfield bone-modifier payload from its prefixed type name.
+    #[test]
+    fn bone_modifier_selector_matches_xedit_type_names() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.bone_modifier_type",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"BMOD"), FormId::NULL, 0, SchemaGame::Starfield);
+
+        // when / then
+        for (type_name, expected) in [
+            ("LookAtChain", 1_i64),
+            ("morphdriver", 2),
+            ("PoseDeformer", 3),
+            ("SPRINGBONE", 4),
+            ("Unknown", 0),
+        ] {
+            let mut payload = Vec::from((type_name.len() as u32).to_le_bytes());
+            payload.extend_from_slice(type_name.as_bytes());
+            let value = FieldValue::Bytes(Cow::Owned(payload));
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::UnionSelection,
+                    Some(&value),
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
+        let truncated = FieldValue::Bytes(Cow::Owned(vec![8, 0, 0, 0, b'A']));
+        assert!(handlers
+            .invoke(
+                &binding,
+                context,
+                HandlerPhase::UnionSelection,
+                Some(&truncated),
+                None,
+            )
+            .is_err());
         Ok(())
     }
 
