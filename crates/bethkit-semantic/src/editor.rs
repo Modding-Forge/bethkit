@@ -857,6 +857,7 @@ impl RecordEditor {
                 &path,
                 &mut target_occurrence,
                 field_values,
+                &[],
             )? {
                 return Err(SemanticError::MissingOccurrence { path, occurrence });
             }
@@ -1164,10 +1165,11 @@ impl RecordEditor {
         target_path: &str,
         occurrence: &mut usize,
         field_values: &BTreeMap<String, i64>,
+        array_indices: &[usize],
     ) -> Result<bool> {
         if node.path == target_path {
             if *occurrence == 0 {
-                *value = self.default_value_for_node(node, field_values, 0)?;
+                *value = self.default_value_for_node(node, field_values, 0, array_indices)?;
                 return Ok(true);
             }
             *occurrence = occurrence.saturating_sub(1);
@@ -1182,19 +1184,23 @@ impl RecordEditor {
                         target_path,
                         occurrence,
                         field_values,
+                        array_indices,
                     )? {
                         return Ok(true);
                     }
                 }
             }
             (SchemaNodeKind::Array { element, .. }, OwnedFieldValue::Array(values)) => {
-                for value in values {
+                for (index, value) in values.iter_mut().enumerate() {
+                    let mut child_array_indices = array_indices.to_vec();
+                    child_array_indices.push(index);
                     if self.reset_nested_value_with_fields(
                         element,
                         value,
                         target_path,
                         occurrence,
                         field_values,
+                        &child_array_indices,
                     )? {
                         return Ok(true);
                     }
@@ -1218,6 +1224,7 @@ impl RecordEditor {
                     target_path,
                     occurrence,
                     field_values,
+                    array_indices,
                 )? {
                     return Ok(true);
                 }
@@ -1234,6 +1241,7 @@ impl RecordEditor {
                     target_path,
                     occurrence,
                     field_values,
+                    array_indices,
                 )? {
                     return Ok(true);
                 }
@@ -1248,6 +1256,7 @@ impl RecordEditor {
         node: &SchemaNode,
         field_values: &BTreeMap<String, i64>,
         depth: usize,
+        array_indices: &[usize],
     ) -> Result<OwnedFieldValue> {
         if depth >= 128 {
             return Err(encode_error(
@@ -1256,13 +1265,15 @@ impl RecordEditor {
             ));
         }
         let next_depth = depth.saturating_add(1);
-        match &node.kind {
-            SchemaNodeKind::Primitive { primitive } => Ok(self.default_primitive_value(primitive)),
+        let value = match &node.kind {
+            SchemaNodeKind::Primitive { primitive } => self.default_primitive_value(primitive),
             SchemaNodeKind::Struct { fields } => fields
                 .iter()
-                .map(|field| self.default_value_for_node(field, field_values, next_depth))
+                .map(|field| {
+                    self.default_value_for_node(field, field_values, next_depth, array_indices)
+                })
                 .collect::<Result<Vec<_>>>()
-                .map(OwnedFieldValue::Struct),
+                .map(OwnedFieldValue::Struct)?,
             SchemaNodeKind::Array { element, count } => {
                 let count = match count {
                     ArrayCount::Fixed { count } => usize::try_from(*count).map_err(|_| {
@@ -1271,34 +1282,90 @@ impl RecordEditor {
                     _ => 0,
                 };
                 (0..count)
-                    .map(|_| self.default_value_for_node(element, field_values, next_depth))
+                    .map(|index| {
+                        let mut child_array_indices = array_indices.to_vec();
+                        child_array_indices.push(index);
+                        self.default_value_for_node(
+                            element,
+                            field_values,
+                            next_depth,
+                            &child_array_indices,
+                        )
+                    })
                     .collect::<Result<Vec<_>>>()
-                    .map(OwnedFieldValue::Array)
+                    .map(OwnedFieldValue::Array)?
             }
             SchemaNodeKind::Union { selector, variants } => {
                 let variant =
                     self.select_default_union_variant(node, selector, variants, field_values)?;
-                self.default_value_for_node(variant, field_values, next_depth)
+                self.default_value_for_node(variant, field_values, next_depth, array_indices)?
             }
             SchemaNodeKind::Subrecord { payload, .. } => {
-                self.default_value_for_node(payload, field_values, next_depth)
+                self.default_value_for_node(payload, field_values, next_depth, array_indices)?
             }
             SchemaNodeKind::Compressed { child, .. } | SchemaNodeKind::Terminated { child, .. } => {
-                self.default_value_for_node(child, field_values, next_depth)
+                self.default_value_for_node(child, field_values, next_depth, array_indices)?
             }
-            SchemaNodeKind::Custom { decoder, .. } => Err(SemanticError::Encode {
-                path: node.path.clone(),
-                message: format!("custom decoder {decoder} has no schema-native default"),
-            }),
+            SchemaNodeKind::Custom { decoder, .. } => {
+                return Err(SemanticError::Encode {
+                    path: node.path.clone(),
+                    message: format!("custom decoder {decoder} has no schema-native default"),
+                });
+            }
             SchemaNodeKind::Sequence { .. }
             | SchemaNodeKind::Choice { .. }
             | SchemaNodeKind::SelectedChoice { .. }
             | SchemaNodeKind::Repeat { .. }
-            | SchemaNodeKind::Reference { .. } => Err(SemanticError::Encode {
-                path: node.path.clone(),
-                message: "this schema node has no editable default value".to_owned(),
-            }),
+            | SchemaNodeKind::Reference { .. } => {
+                return Err(SemanticError::Encode {
+                    path: node.path.clone(),
+                    message: "this schema node has no editable default value".to_owned(),
+                });
+            }
+        };
+        self.apply_default_value_callbacks(node, value, field_values, array_indices)
+    }
+
+    fn apply_default_value_callbacks(
+        &self,
+        node: &SchemaNode,
+        mut value: OwnedFieldValue,
+        field_values: &BTreeMap<String, i64>,
+        array_indices: &[usize],
+    ) -> Result<OwnedFieldValue> {
+        for binding in self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| {
+                binding.path == node.path && binding.callback_id == "value.set_default"
+            })
+        {
+            let handler_value =
+                self.owned_to_handler_value_with_fields(node, &value, field_values, None)?;
+            match self.handlers.invoke_with_records(
+                binding,
+                self.handler_record(),
+                HandlerInvocationAccess::writable_with_scope(&self.record, None)
+                    .with_array_indices(array_indices),
+                HandlerPhase::DefaultValue,
+                Some(&handler_value),
+                None,
+            )? {
+                HandlerOutput::Value(updated) => {
+                    value = handler_to_owned_value(updated, &node.path)?;
+                }
+                HandlerOutput::None => {}
+                _ => {
+                    return Err(SemanticError::Handler {
+                        handler: binding.callback_id.clone(),
+                        message: "default-value handler returned an invalid result".to_owned(),
+                    });
+                }
+            }
         }
+        Ok(value)
     }
 
     fn default_primitive_value(&self, primitive: &PrimitiveType) -> OwnedFieldValue {
@@ -3646,6 +3713,180 @@ mod tests {
             )?,
             vec![2, 0x7c, 1, 2]
         );
+        Ok(())
+    }
+
+    /// Resets a nested LGDI star slot using its outer array position.
+    #[test]
+    fn default_callback_receives_nested_array_indices() -> Result<()> {
+        let star_path = "LGDI/0:Data/payload/element/element/0:Star Slot";
+        let star_slot = SchemaNode {
+            id: SchemaNodeId(5),
+            path: star_path.to_owned(),
+            name: "Star Slot".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::Enumeration {
+                    integer: IntegerType {
+                        width: 4,
+                        signed: false,
+                        byte_order: ByteOrder::LittleEndian,
+                    },
+                    values: (0_i64..5)
+                        .map(|value| (value, format!("Slot {value}")))
+                        .collect(),
+                },
+            },
+        };
+        let entry = SchemaNode {
+            id: SchemaNodeId(4),
+            path: "LGDI/0:Data/payload/element/element".to_owned(),
+            name: "Entry".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    star_slot,
+                    SchemaNode {
+                        id: SchemaNodeId(6),
+                        path: "LGDI/0:Data/payload/element/element/1:Value".to_owned(),
+                        name: "Value".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::Integer {
+                                integer: IntegerType {
+                                    width: 1,
+                                    signed: false,
+                                    byte_order: ByteOrder::LittleEndian,
+                                },
+                            },
+                        },
+                    },
+                ],
+            },
+        };
+        let inner = SchemaNode {
+            id: SchemaNodeId(3),
+            path: "LGDI/0:Data/payload/element".to_owned(),
+            name: "Slot".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Array {
+                element: Box::new(entry),
+                count: ArrayCount::Remainder,
+            },
+        };
+        let outer = SchemaNode {
+            id: SchemaNodeId(2),
+            path: "LGDI/0:Data/payload".to_owned(),
+            name: "Slots".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Array {
+                element: Box::new(inner),
+                count: ArrayCount::Fixed { count: 5 },
+            },
+        };
+        let root = SchemaNode {
+            id: SchemaNodeId(0),
+            path: "LGDI".to_owned(),
+            name: "Leveled Item".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: SchemaNodeId(1),
+                    path: "LGDI/0:Data".to_owned(),
+                    name: "Data".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Subrecord {
+                        signature: SchemaSignature(*b"DATA"),
+                        payload: Box::new(outer.clone()),
+                    },
+                }],
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Starfield;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "default.star_slot_outer_index".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"LGDI"),
+                name: "Leveled Item".to_owned(),
+                root,
+            }],
+            vec![CallbackBinding {
+                path: star_path.to_owned(),
+                callback_id: "value.set_default".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "00".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "default.star_slot_outer_index".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::Value::Null,
+                    },
+                },
+            }],
+        )?;
+        let editor = RecordEditor {
+            registry: bethkit_schema::SchemaRegistry::new(Arc::new(package)),
+            decoders: crate::DecoderRegistry::builtin(),
+            handlers: SemanticHandlerRegistry::builtin(),
+            record: WritableRecord {
+                signature: Signature(*b"LGDI"),
+                flags: bethkit_core::RecordFlags::empty(),
+                form_id: bethkit_core::FormId::NULL,
+                form_version: 0,
+                subrecords: Vec::new(),
+            },
+            localized: false,
+            decoded_values: BTreeMap::new(),
+        };
+        let mut groups = vec![OwnedFieldValue::Array(Vec::new()); 5];
+        groups[3] = OwnedFieldValue::Array(vec![OwnedFieldValue::Struct(vec![
+            OwnedFieldValue::Int(0),
+            OwnedFieldValue::UInt(99),
+        ])]);
+        let mut value = OwnedFieldValue::Array(groups);
+        let mut occurrence = 0;
+
+        let reset = editor.reset_nested_value_with_fields(
+            &outer,
+            &mut value,
+            star_path,
+            &mut occurrence,
+            &BTreeMap::new(),
+            &[],
+        )?;
+
+        assert!(reset);
+        let OwnedFieldValue::Array(groups) = value else {
+            return Err(encode_error(star_path, "expected outer array"));
+        };
+        let OwnedFieldValue::Array(entries) = &groups[3] else {
+            return Err(encode_error(star_path, "expected slot group"));
+        };
+        let OwnedFieldValue::Struct(fields) = &entries[0] else {
+            return Err(encode_error(star_path, "expected slot entry"));
+        };
+        assert_eq!(fields[0], OwnedFieldValue::Int(3));
         Ok(())
     }
 

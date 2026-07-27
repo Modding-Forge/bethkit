@@ -55,6 +55,8 @@ pub enum HandlerPhase {
     ArrayCount,
     /// Dynamic inclusion of the next element in a schema array.
     ArrayElementInclusion,
+    /// Schema-native value initialization for a newly created or reset field.
+    DefaultValue,
     /// Validation equivalent to xEdit's `ctCheck`.
     Validation,
     /// Transactional callback after a value is changed.
@@ -820,6 +822,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(WorldspaceOffsetColumnCount));
         registry.register(Arc::new(OblivionPathGridConnectionCount));
         registry.register(Arc::new(StarSlotArrayElementInclusion));
+        registry.register(Arc::new(StarSlotDefaultValue));
         registry.register(Arc::new(SelectCtdaParameter { table: None }));
         registry.register(Arc::new(SelectCoedOwner { resolver: None }));
         registry.register(Arc::new(SelectNoteData));
@@ -3241,6 +3244,7 @@ fn unresolved_vmad_alias(raw: i64, phase: HandlerPhase, game: SchemaGame) -> Res
         | HandlerPhase::UnionSelection
         | HandlerPhase::ArrayCount
         | HandlerPhase::ArrayElementInclusion
+        | HandlerPhase::DefaultValue
         | HandlerPhase::AfterSet
         | HandlerPhase::ReferenceResolution
         | HandlerPhase::Conflict
@@ -4277,6 +4281,42 @@ impl SemanticHandler for StarSlotArrayElementInclusion {
             })?;
         let include = usize::try_from(star_slot).is_ok_and(|slot| slot == outer_index);
         Ok(HandlerOutput::Integer(i64::from(include)))
+    }
+}
+
+struct StarSlotDefaultValue;
+
+impl SemanticHandler for StarSlotDefaultValue {
+    fn id(&self) -> &'static str {
+        "default.star_slot_outer_index"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::DefaultValue {
+            return Ok(HandlerOutput::None);
+        }
+        let outer_index_position =
+            invocation
+                .array_indices
+                .len()
+                .checked_sub(2)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "star-slot default requires outer and inner array indices".to_owned(),
+                })?;
+        let outer_index = invocation.array_indices[outer_index_position];
+        let value = i64::try_from(outer_index).map_err(|_| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "star-slot outer array index exceeds i64".to_owned(),
+        })?;
+        Ok(HandlerOutput::Value(FieldValue::Enumeration {
+            value,
+            name: None,
+        }))
     }
 }
 
@@ -12221,6 +12261,49 @@ mod tests {
         })?;
 
         assert!(matches!(output, HandlerOutput::Integer(1)));
+        Ok(())
+    }
+
+    /// Initializes Starfield LGDI star slots from their outer group position.
+    #[test]
+    fn star_slot_default_uses_outer_array_index() -> TestResult {
+        let binding = test_metadata_binding(
+            "value.set_default",
+            "default.star_slot_outer_index",
+            serde_json::json!({}),
+        );
+        let indices = [3_usize, 7_usize];
+        let value = FieldValue::Enumeration {
+            value: 0,
+            name: Some("First Star Slot".to_owned()),
+        };
+
+        let output = StarSlotDefaultValue.invoke(HandlerInvocation {
+            context: HandlerContext {
+                binding: &binding,
+                record_signature: Signature(*b"LGDI"),
+                form_id: FormId::NULL,
+                form_version: 0,
+                game: SchemaGame::Starfield,
+                configuration: match &binding.implementation {
+                    CallbackImplementation::BuiltIn { operation } => &operation.configuration,
+                    _ => unreachable!("test binding is built-in"),
+                },
+            },
+            phase: HandlerPhase::DefaultValue,
+            value: Some(&value),
+            old_value: None,
+            value_scope: None,
+            source_record: None,
+            source_writable_record: None,
+            source_subrecord_index: None,
+            array_indices: &indices,
+        })?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::Value(FieldValue::Enumeration { value: 3, .. })
+        ));
         Ok(())
     }
 
