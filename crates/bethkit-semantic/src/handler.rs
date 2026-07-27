@@ -326,6 +326,7 @@ pub struct FormLinkInfo {
     short_name: String,
     editor_id: Option<String>,
     quest_aliases: Option<Vec<QuestAliasInfo>>,
+    quest_stages: Option<Vec<QuestStageInfo>>,
 }
 
 impl FormLinkInfo {
@@ -336,6 +337,7 @@ impl FormLinkInfo {
             short_name: short_name.into(),
             editor_id: None,
             quest_aliases: None,
+            quest_stages: None,
         }
     }
 
@@ -348,6 +350,12 @@ impl FormLinkInfo {
     /// Marks the resolved record as a quest and supplies its effective aliases.
     pub fn with_quest_aliases(mut self, aliases: Vec<QuestAliasInfo>) -> Self {
         self.quest_aliases = Some(aliases);
+        self
+    }
+
+    /// Marks the resolved record as a quest and supplies its effective stages.
+    pub fn with_quest_stages(mut self, stages: Vec<QuestStageInfo>) -> Self {
+        self.quest_stages = Some(stages);
         self
     }
 
@@ -369,6 +377,11 @@ impl FormLinkInfo {
     /// Returns effective quest aliases, or `None` when the record is not a quest.
     pub fn quest_aliases(&self) -> Option<&[QuestAliasInfo]> {
         self.quest_aliases.as_deref()
+    }
+
+    /// Returns effective quest stages, or `None` when the record is not a quest.
+    pub fn quest_stages(&self) -> Option<&[QuestStageInfo]> {
+        self.quest_stages.as_deref()
     }
 }
 
@@ -396,6 +409,33 @@ impl QuestAliasInfo {
     /// Returns the alias editor ID, which may be empty.
     pub fn editor_id(&self) -> &str {
         &self.editor_id
+    }
+}
+
+/// xEdit-compatible metadata for one effective quest stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestStageInfo {
+    index: i64,
+    log_entry: String,
+}
+
+impl QuestStageInfo {
+    /// Creates quest-stage metadata.
+    pub fn new(index: i64, log_entry: impl Into<String>) -> Self {
+        Self {
+            index,
+            log_entry: log_entry.into(),
+        }
+    }
+
+    /// Returns the numeric stage index.
+    pub fn index(&self) -> i64 {
+        self.index
+    }
+
+    /// Returns the first log-entry text used by xEdit's stage formatter.
+    pub fn log_entry(&self) -> &str {
+        &self.log_entry
     }
 }
 
@@ -505,6 +545,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatFactionRelation { resolver: None }));
         registry.register(Arc::new(FormatObjectProperty { resolver: None }));
         registry.register(Arc::new(FormatVmadObjectAlias { resolver: None }));
+        registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
         registry.register(Arc::new(ResolveVmadObjectAliasLink { resolver: None }));
         registry.register(Arc::new(FormatLandscapePosition));
         registry.register(Arc::new(FormatClimateMoons));
@@ -563,6 +604,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatVmadObjectAlias {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatCtdaQuestStage {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(ResolveVmadObjectAliasLink {
@@ -1715,6 +1759,59 @@ struct ResolveVmadObjectAliasLink {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatCtdaQuestStage {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for FormatCtdaQuestStage {
+    fn id(&self) -> &'static str {
+        "format.ctda_quest_stage"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(ctda_quest_stage_error(
+                    "condition quest-stage edit parsing requires text",
+                ));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Int(parse_prefixed_i32(
+                value,
+            )?)));
+        }
+        let stage = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                ctda_quest_stage_error("condition quest-stage formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| ctda_quest_stage_error("condition quest stage exceeds i64"))?;
+        let quest_path =
+            configured_text(self.id(), invocation.context.configuration, "quest_path")?;
+        let quest = invocation
+            .value_scope
+            .and_then(|scope| scoped_form_id(scope, quest_path))
+            .and_then(|(form_id, targets)| {
+                self.resolver.as_deref().and_then(|resolver| {
+                    resolver.resolve_form_id(
+                        handler_record_context(&invocation.context),
+                        form_id,
+                        targets,
+                    )
+                })
+            });
+        Ok(HandlerOutput::Text(format_ctda_quest_stage(
+            stage,
+            invocation.phase,
+            quest.as_ref(),
+        )))
+    }
+}
+
 impl SemanticHandler for ResolveVmadObjectAliasLink {
     fn id(&self) -> &'static str {
         "resolve.vmad_object_alias"
@@ -1765,6 +1862,105 @@ impl SemanticHandler for ResolveVmadObjectAliasLink {
             quest_form_id,
             alias_index: raw,
         }))
+    }
+}
+
+fn format_ctda_quest_stage(
+    stage: i64,
+    phase: HandlerPhase,
+    quest: Option<&FormLinkInfo>,
+) -> String {
+    if phase == HandlerPhase::SortKey {
+        return format!("{:08X}", stage as u64);
+    }
+    if stage < 0 {
+        return match phase {
+            HandlerPhase::Display | HandlerPhase::Summary => format!("{stage} NONE"),
+            HandlerPhase::EditValue => stage.to_string(),
+            HandlerPhase::Validation => String::new(),
+            _ => String::new(),
+        };
+    }
+    let unresolved = match phase {
+        HandlerPhase::Display => {
+            format!("{stage} <Warning: Could not resolve Quest in Parameter #1>")
+        }
+        HandlerPhase::Summary | HandlerPhase::EditValue => stage.to_string(),
+        HandlerPhase::Validation => "<Warning: Could not resolve Quest in Parameter #1>".to_owned(),
+        _ => String::new(),
+    };
+    let Some(quest) = quest else {
+        return unresolved;
+    };
+    let Some(stages) = quest.quest_stages() else {
+        return match phase {
+            HandlerPhase::Display => format!(
+                "{stage} <Warning: \"{}\" is not a Quest record>",
+                quest.short_name()
+            ),
+            HandlerPhase::Summary | HandlerPhase::EditValue => stage.to_string(),
+            HandlerPhase::Validation => {
+                format!(
+                    "<Warning: \"{}\" is not a Quest record>",
+                    quest.short_name()
+                )
+            }
+            _ => unresolved,
+        };
+    };
+    let Some(found) = stages.iter().find(|candidate| candidate.index() == stage) else {
+        return match phase {
+            HandlerPhase::Display => format!(
+                "{stage} <Warning: Quest Stage not found in \"{}\">",
+                quest.value()
+            ),
+            HandlerPhase::Summary | HandlerPhase::EditValue => stage.to_string(),
+            HandlerPhase::Validation => {
+                format!("<Warning: Quest Stage not found in \"{}\">", quest.value())
+            }
+            _ => unresolved,
+        };
+    };
+    match phase {
+        HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+            format_quest_stage_label(found)
+        }
+        HandlerPhase::Validation => String::new(),
+        _ => unresolved,
+    }
+}
+
+fn format_quest_stage_label(stage: &QuestStageInfo) -> String {
+    let mut text = stage.index().to_string();
+    while text.len() < 3 {
+        text.insert(0, '0');
+    }
+    let log_entry = stage.log_entry().trim();
+    if !log_entry.is_empty() {
+        text.push(' ');
+        text.push_str(log_entry);
+    }
+    text
+}
+
+fn parse_prefixed_i32(value: &str) -> Result<i64> {
+    let value = value.trim();
+    let end = value
+        .char_indices()
+        .take_while(|(_, value)| *value == '-' || value.is_ascii_digit())
+        .map(|(index, value)| index + value.len_utf8())
+        .last()
+        .unwrap_or(0);
+    value[..end]
+        .parse::<i32>()
+        .map(i64::from)
+        .map_err(|error| ctda_quest_stage_error(format!("invalid quest stage: {error}")))
+}
+
+fn ctda_quest_stage_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.ctda_quest_stage".to_owned(),
+        message: message.into(),
     }
 }
 
@@ -5273,6 +5469,10 @@ mod tests {
                     .with_quest_aliases(vec![
                         QuestAliasInfo::new(7, "Target"),
                         QuestAliasInfo::new(12, ""),
+                    ])
+                    .with_quest_stages(vec![
+                        QuestStageInfo::new(10, " First objective "),
+                        QuestStageInfo::new(20, ""),
                     ]),
                 ),
                 _ => None,
@@ -6166,6 +6366,97 @@ mod tests {
                 Some(&scope),
             )?,
             HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Formats CTDA quest stages through the quest selected in parameter one.
+    #[test]
+    fn ctda_quest_stage_formatter_matches_xedit(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let quest_path = "TEST/CTDA/Parameter #1";
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.ctda_quest_stage",
+            serde_json::json!({ "quest_path": quest_path }),
+        );
+        let scope = FieldValue::Struct(vec![crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: quest_path.to_owned(),
+            name: "Parameter #1".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 4 },
+            value: FieldValue::FormId {
+                value: FormId(0x5678),
+                targets: vec![Signature(*b"QUST")],
+            },
+        }]);
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Starfield);
+        let stage = FieldValue::Int(10);
+        let missing = FieldValue::Int(30);
+        let none = FieldValue::Int(-1);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                record,
+                HandlerPhase::Display,
+                Some(&stage),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "010 First objective"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                record,
+                HandlerPhase::Display,
+                Some(&missing),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text)
+                if text
+                    == "30 <Warning: Quest Stage not found in \
+                        \"Example Quest [QUST:00005678]\">"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                record,
+                HandlerPhase::Summary,
+                Some(&none),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "-1 NONE"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                record,
+                HandlerPhase::EditValue,
+                Some(&none),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "-1"
+        ));
+        let edit = FieldValue::String(Cow::Borrowed("010 First objective"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(10))
         ));
         Ok(())
     }

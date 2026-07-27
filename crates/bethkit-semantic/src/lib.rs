@@ -27,9 +27,9 @@ pub use editor::RecordEditor;
 pub use error::{Result, SemanticError};
 pub use handler::{
     FormLinkInfo, FormLinkResolver, HandlerContext, HandlerInvocation, HandlerMutation,
-    HandlerOutput, HandlerPhase, HandlerRecordContext, QuestAliasInfo, RecordGridCell,
-    RecordIndexKey, ResourceHashResolver, SemanticHandler, SemanticHandlerRegistry, SemanticLink,
-    ValueFormat, WwiseGuidInfo, WwiseGuidResolver,
+    HandlerOutput, HandlerPhase, HandlerRecordContext, QuestAliasInfo, QuestStageInfo,
+    RecordGridCell, RecordIndexKey, ResourceHashResolver, SemanticHandler, SemanticHandlerRegistry,
+    SemanticLink, ValueFormat, WwiseGuidInfo, WwiseGuidResolver,
 };
 pub use validation::{Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationReport};
 pub use value::{ByteSpan, FieldOrigin, FieldValue, NamedValue, OwnedFieldValue};
