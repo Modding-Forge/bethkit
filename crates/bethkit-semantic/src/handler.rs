@@ -291,6 +291,7 @@ pub trait ResourceHashResolver: Send + Sync {
 pub struct FormLinkInfo {
     value: String,
     short_name: String,
+    editor_id: Option<String>,
 }
 
 impl FormLinkInfo {
@@ -299,7 +300,14 @@ impl FormLinkInfo {
         Self {
             value: value.into(),
             short_name: short_name.into(),
+            editor_id: None,
         }
+    }
+
+    /// Adds the exact editor ID used by xEdit's link-dependent callbacks.
+    pub fn with_editor_id(mut self, editor_id: impl Into<String>) -> Self {
+        self.editor_id = Some(editor_id.into());
+        self
     }
 
     /// Returns the normal xEdit value text for the linked record.
@@ -310,6 +318,11 @@ impl FormLinkInfo {
     /// Returns the compact xEdit main-record name.
     pub fn short_name(&self) -> &str {
         &self.short_name
+    }
+
+    /// Returns the linked record's editor ID when one is available.
+    pub fn editor_id(&self) -> Option<&str> {
+        self.editor_id.as_deref()
     }
 }
 
@@ -403,6 +416,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatScriptSummary));
         registry.register(Arc::new(FormatItemSummary { resolver: None }));
         registry.register(Arc::new(FormatFactionRelation { resolver: None }));
+        registry.register(Arc::new(FormatObjectProperty { resolver: None }));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
@@ -445,6 +459,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatFactionRelation {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatObjectProperty {
             resolver: Some(resolver),
         }));
     }
@@ -1495,6 +1512,39 @@ impl SemanticHandler for FormatFactionRelation {
             message: "faction relation summary requires a value".to_owned(),
         })?;
         let Some(text) = format_faction_relation(
+            value,
+            self.resolver.as_deref(),
+            handler_record_context(&invocation.context),
+        )?
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct FormatObjectProperty {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for FormatObjectProperty {
+    fn id(&self) -> &'static str {
+        "format.object_property"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::Summary {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "object property summary requires a value".to_owned(),
+        })?;
+        let Some(text) = format_object_property(
             value,
             self.resolver.as_deref(),
             handler_record_context(&invocation.context),
@@ -3565,6 +3615,44 @@ fn format_faction_relation(
     )))
 }
 
+fn format_object_property(
+    value: &FieldValue<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+    source: HandlerRecordContext,
+) -> Result<Option<String>> {
+    let fields = struct_fields(value, "format.object_property")?;
+    let [actor_value, property_value, ..] = fields else {
+        return Err(summary_error(
+            "format.object_property",
+            "object property requires actor value and value fields",
+        ));
+    };
+    let FieldValue::FormId { value, targets } = &actor_value.value else {
+        return Err(summary_error(
+            "format.object_property",
+            "object property requires a FormID as its first field",
+        ));
+    };
+    let FieldValue::Float(property_value) = property_value.value else {
+        return Err(summary_error(
+            "format.object_property",
+            "object property requires a floating-point second field",
+        ));
+    };
+    let Some(link) =
+        resolver.and_then(|resolver| resolver.resolve_form_id(source, *value, targets))
+    else {
+        return Ok(None);
+    };
+    let Some(editor_id) = link.editor_id() else {
+        return Ok(None);
+    };
+    Ok(Some(format!(
+        "{editor_id} = {}",
+        format_delphi_general(property_value, 5)
+    )))
+}
+
 fn struct_fields<'a>(
     value: &'a FieldValue<'a>,
     handler: &str,
@@ -3640,6 +3728,68 @@ fn format_numeric_component(
     }
 }
 
+fn format_delphi_general(value: f64, precision: usize) -> String {
+    if value.is_nan() {
+        return "NAN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "-INF".to_owned()
+        } else {
+            "INF".to_owned()
+        };
+    }
+
+    let negative = value.is_sign_negative();
+    let value = value.abs();
+    let fractional_digits = precision.saturating_sub(1);
+    let scientific = format!("{value:.fractional_digits$e}");
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("Rust scientific float formatting always contains an exponent");
+    let exponent: i32 = exponent
+        .parse()
+        .expect("Rust scientific float formatting always has an integer exponent");
+    let mut digits: String = mantissa
+        .chars()
+        .filter(|character| *character != '.')
+        .collect();
+    while digits.len() > 1 && digits.ends_with('0') {
+        digits.pop();
+    }
+
+    let decimal_position = exponent + 1;
+    let use_exponent = decimal_position > precision as i32 || decimal_position < -3;
+    let mut formatted = if use_exponent {
+        let mut formatted = String::new();
+        formatted.push(digits.remove(0));
+        if !digits.is_empty() {
+            formatted.push('.');
+            formatted.push_str(&digits);
+        }
+        formatted.push('E');
+        if exponent < 0 {
+            formatted.push('-');
+        }
+        formatted.push_str(&format!("{:03}", exponent.unsigned_abs()));
+        formatted
+    } else if decimal_position > 0 {
+        let decimal_position = decimal_position as usize;
+        if digits.len() <= decimal_position {
+            digits.push_str(&"0".repeat(decimal_position - digits.len()));
+        } else {
+            digits.insert(decimal_position, '.');
+        }
+        digits
+    } else {
+        format!("0.{}{}", "0".repeat((-decimal_position) as usize), digits)
+    };
+    if negative {
+        formatted.insert(0, '-');
+    }
+    formatted
+}
+
 fn normalize_xedit_radians(value: f64) -> f64 {
     let two_pi = std::f64::consts::TAU;
     let mut result = value;
@@ -3679,6 +3829,8 @@ mod tests {
 
     use super::*;
 
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     struct TestResourceHashResolver;
 
     impl ResourceHashResolver for TestResourceHashResolver {
@@ -3702,6 +3854,7 @@ mod tests {
         ) -> Option<FormLinkInfo> {
             (form_id == FormId(0x1234)).then(|| {
                 FormLinkInfo::new("[00001234] Example Faction", "Example Item [MISC:00001234]")
+                    .with_editor_id("ExampleActorValue")
             })
         }
     }
@@ -4377,8 +4530,7 @@ mod tests {
 
     /// Matches xEdit's count and short-name item summary.
     #[test]
-    fn item_summary_uses_resolved_short_name() -> std::result::Result<(), Box<dyn std::error::Error>>
-    {
+    fn item_summary_uses_resolved_short_name() -> TestResult {
         let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: format!("TEST/{name}"),
@@ -4455,6 +4607,64 @@ mod tests {
             )?,
             Some("+2 [00001234] Example Faction".to_owned())
         );
+        Ok(())
+    }
+
+    /// Matches xEdit's resolved actor-value object-property summary.
+    #[test]
+    fn object_property_summary_uses_editor_id_and_delphi_general_format(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: format!("TEST/{name}"),
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let value = FieldValue::Struct(vec![
+            field(
+                "Actor Value",
+                FieldValue::FormId {
+                    value: FormId(0x1234),
+                    targets: vec![Signature(*b"AVIF")],
+                },
+            ),
+            field("Value", FieldValue::Float(12.345_67)),
+        ]);
+        let source =
+            HandlerRecordContext::new(Signature(*b"ACTI"), FormId::NULL, 0, SchemaGame::Fallout4);
+
+        // when
+        let result = format_object_property(&value, Some(&TestFormLinkResolver), source)?;
+
+        // then
+        assert_eq!(result, Some("ExampleActorValue = 12.346".to_owned()));
+        Ok(())
+    }
+
+    /// Matches Delphi's five-significant-digit `ffGeneral` thresholds and special values.
+    #[test]
+    fn delphi_general_formatter_matches_xedit_boundaries(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let cases = [
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (99_999.0, "99999"),
+            (100_000.0, "1E005"),
+            (0.000_1, "0.0001"),
+            (0.000_01, "1E-005"),
+            (12_300_000_000.0, "1.23E010"),
+            (f64::INFINITY, "INF"),
+            (f64::NEG_INFINITY, "-INF"),
+        ];
+
+        // when / then
+        for (value, expected) in cases {
+            assert_eq!(format_delphi_general(value, 5), expected);
+        }
+        assert_eq!(format_delphi_general(f64::NAN, 5), "NAN");
         Ok(())
     }
 
@@ -4563,8 +4773,11 @@ mod tests {
             display,
             HandlerOutput::Text(text)
                 if text
-                    == "Play_Test {00112233-4455-6677-8899-AABBCCDDEEFF} \
-                        \"\\Events\\Default Work Unit\\Play_Test_With_A_Long_Object_Path_123456789\""
+                    == concat!(
+                        "Play_Test {00112233-4455-6677-8899-AABBCCDDEEFF} ",
+                        "\"\\Events\\Default Work Unit\\",
+                        "Play_Test_With_A_Long_Object_Path_123456789\""
+                    )
         ));
         let summary = invoke_wwise(Some(Arc::clone(&resolver)), HandlerPhase::Summary, &value)?;
         assert!(matches!(
@@ -4985,7 +5198,10 @@ mod tests {
                                 "signature": "MODB"
                             },
                             {
-                                "path": "RACE/14:Head Data/1:Parts/repeat/0:Part/1:Model/2:Textures",
+                                "path": concat!(
+                                    "RACE/14:Head Data/1:Parts/repeat/0:Part/",
+                                    "1:Model/2:Textures"
+                                ),
                                 "signature": "MODT"
                             }
                         ],
