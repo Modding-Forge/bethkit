@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bethkit_core::{FormId, Signature};
+use bethkit_core::{FormId, Record, RecordFlags, Signature};
 use bethkit_schema::{CallbackBinding, CallbackImplementation, ConflictPriority, SchemaGame};
 
 use crate::{FieldValue, OwnedFieldValue, Result, SemanticError};
@@ -202,6 +202,8 @@ pub struct HandlerInvocation<'a> {
     pub value: Option<&'a FieldValue<'static>>,
     /// Previous decoded value for stateful editor callbacks.
     pub old_value: Option<&'a FieldValue<'static>>,
+    /// Original main record for callbacks that inspect sibling subrecords.
+    pub source_record: Option<&'a Record>,
 }
 
 /// Versioned implementation of one stable semantic handler.
@@ -286,6 +288,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(NormalizeRadians));
         registry.register(Arc::new(ModelInfoConflictPriority));
         registry.register(Arc::new(IgnoreEmptyConflictPriority));
+        registry.register(Arc::new(CellWaterConflictPriority));
         registry.register(Arc::new(FormatRgb));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
@@ -355,6 +358,28 @@ impl SemanticHandlerRegistry {
         value: Option<&FieldValue<'static>>,
         old_value: Option<&FieldValue<'static>>,
     ) -> Result<HandlerOutput> {
+        self.invoke_with_source_record(binding, record, None, phase, value, old_value)
+    }
+
+    /// Executes a binding with access to the original main record.
+    ///
+    /// Record-dependent callbacks must use this entry point. The regular
+    /// [`Self::invoke`] method deliberately supplies no source record so a
+    /// handler cannot silently depend on data its caller did not provide.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the binding is not executable or the
+    /// selected handler rejects the invocation.
+    pub fn invoke_with_source_record<'a>(
+        &self,
+        binding: &'a CallbackBinding,
+        record: HandlerRecordContext,
+        source_record: Option<&'a Record>,
+        phase: HandlerPhase,
+        value: Option<&'a FieldValue<'static>>,
+        old_value: Option<&'a FieldValue<'static>>,
+    ) -> Result<HandlerOutput> {
         let empty_configuration = serde_json::Value::Null;
         let (id, minimum_version, configuration) = match &binding.implementation {
             CallbackImplementation::BuiltIn { operation } => (
@@ -390,6 +415,7 @@ impl SemanticHandlerRegistry {
                 phase,
                 value,
                 old_value,
+                source_record,
             })
     }
 }
@@ -453,6 +479,52 @@ impl SemanticHandler for IgnoreEmptyConflictPriority {
             message: "empty-value conflict priority requires a value".to_owned(),
         })?;
         Ok(HandlerOutput::ConflictPriority(if is_empty_value(value) {
+            ConflictPriority::Ignore
+        } else {
+            ConflictPriority::Normal
+        }))
+    }
+}
+
+struct CellWaterConflictPriority;
+
+impl SemanticHandler for CellWaterConflictPriority {
+    fn id(&self) -> &'static str {
+        "conflict.cell_water_height"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::Conflict {
+            return Ok(HandlerOutput::None);
+        }
+        let record = invocation
+            .source_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "CELL water conflict priority requires the source record".to_owned(),
+            })?;
+        if record.header.signature != Signature(*b"CELL")
+            || invocation.context.record_signature != record.header.signature
+            || invocation.context.form_id != record.header.form_id
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "CELL water conflict priority received mismatched record metadata"
+                    .to_owned(),
+            });
+        }
+        if record.header.flags.contains(RecordFlags::DELETED) {
+            return Ok(HandlerOutput::ConflictPriority(ConflictPriority::Normal));
+        }
+        let Some(data) = record.get(Signature::DATA)? else {
+            return Ok(HandlerOutput::ConflictPriority(ConflictPriority::Normal));
+        };
+        let interior = data.as_bytes().first().is_some_and(|flags| flags & 1 != 0);
+        Ok(HandlerOutput::ConflictPriority(if interior {
             ConflictPriority::Ignore
         } else {
             ConflictPriority::Normal
@@ -1679,6 +1751,78 @@ mod tests {
         )));
     }
 
+    /// Matches xEdit's `wbCELLXCLWGetConflictPriority` interior-cell rule.
+    #[test]
+    fn cell_water_height_ignores_interior_cells() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "CELL/Water Height".to_owned(),
+            callback_id: "def.conflict_priority".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-cell-water-conflict".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "conflict.cell_water_height".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let interior = test_cell_record(1, false)?;
+        let exterior = test_cell_record(0, false)?;
+        let deleted = test_cell_record(1, true)?;
+
+        for (record, expected) in [
+            (&interior, ConflictPriority::Ignore),
+            (&exterior, ConflictPriority::Normal),
+            (&deleted, ConflictPriority::Normal),
+        ] {
+            let context = HandlerRecordContext::new(
+                record.header.signature,
+                record.header.form_id,
+                record.header.form_version,
+                SchemaGame::SkyrimSe,
+            );
+            let output = handlers.invoke_with_source_record(
+                &binding,
+                context,
+                Some(record),
+                HandlerPhase::Conflict,
+                None,
+                None,
+            )?;
+            assert!(matches!(
+                output,
+                HandlerOutput::ConflictPriority(priority) if priority == expected
+            ));
+        }
+        Ok(())
+    }
+
+    fn test_cell_record(data_flags: u16, deleted: bool) -> Result<Record> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"CELL");
+        bytes.extend_from_slice(&8_u32.to_le_bytes());
+        let record_flags = if deleted {
+            RecordFlags::DELETED.bits()
+        } else {
+            0
+        };
+        bytes.extend_from_slice(&record_flags.to_le_bytes());
+        bytes.extend_from_slice(&0x0102_0304_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&44_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(b"DATA");
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&data_flags.to_le_bytes());
+        let mut cursor = bethkit_io::SliceCursor::new(&bytes);
+        Ok(Record::parse_header(
+            &mut cursor,
+            &bethkit_core::GameContext::sse(),
+        )?)
+    }
+
     /// Matches xEdit's `wbRGBAToStr` output without replacing typed values.
     #[test]
     fn rgb_formatter_preserves_rgb_and_rgba_shape() -> Result<()> {
@@ -2388,6 +2532,7 @@ mod tests {
             phase: HandlerPhase::Validation,
             value: None,
             old_value: None,
+            source_record: None,
         })?;
 
         assert!(matches!(
@@ -2441,6 +2586,7 @@ mod tests {
             phase,
             value: Some(&value),
             old_value: None,
+            source_record: None,
         })?;
         match output {
             HandlerOutput::Text(value) => Ok(value),
@@ -2484,6 +2630,7 @@ mod tests {
             phase,
             value: Some(value),
             old_value: None,
+            source_record: None,
         })
     }
 

@@ -157,9 +157,10 @@ impl SemanticContext {
             ) {
                 continue;
             }
-            priority = match self.handlers.invoke(
+            priority = match self.handlers.invoke_with_source_record(
                 binding,
                 self.handler_record(record),
+                Some(record),
                 HandlerPhase::Conflict,
                 value,
                 None,
