@@ -238,6 +238,13 @@ pub enum HandlerOutput {
     None,
     /// Transformed semantic value.
     Value(FieldValue<'static>),
+    /// Parsed edit value plus transactional sibling mutations.
+    ParsedValue {
+        /// Typed value written to the callback's own schema node.
+        value: FieldValue<'static>,
+        /// Sibling edits produced while parsing the text.
+        mutations: Vec<HandlerMutation>,
+    },
     /// Boolean decision such as visibility, sorting, or inclusion.
     Boolean(bool),
     /// Integer result such as a union selection.
@@ -571,6 +578,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatVmadObjectAlias { resolver: None }));
         registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
         registry.register(Arc::new(FormatCtdaConditionAlias { resolver: None }));
+        registry.register(Arc::new(FormatCtdaStringParameter));
         registry.register(Arc::new(ResolveVmadObjectAliasLink { resolver: None }));
         registry.register(Arc::new(FormatLandscapePosition));
         registry.register(Arc::new(FormatClimateMoons));
@@ -1795,6 +1803,61 @@ struct FormatCtdaConditionAlias {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatCtdaStringParameter;
+
+impl SemanticHandler for FormatCtdaStringParameter {
+    fn id(&self) -> &'static str {
+        "format.ctda_string_parameter"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let string_path =
+            configured_text(self.id(), invocation.context.configuration, "string_path")?;
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(ctda_string_parameter_error(
+                    "condition string edit parsing requires text",
+                ));
+            };
+            return Ok(HandlerOutput::ParsedValue {
+                value: FieldValue::UInt(0),
+                mutations: vec![HandlerMutation::SynchronizePresence {
+                    path: string_path.to_owned(),
+                    occurrence: 0,
+                    present: true,
+                    value: OwnedFieldValue::String(value.to_string()),
+                }],
+            });
+        }
+        let raw = callback_integer(
+            invocation.value.ok_or_else(|| {
+                ctda_string_parameter_error(
+                    "condition string parameter formatting requires an integer",
+                )
+            })?,
+            self.id(),
+        )?;
+        let text = match invocation.phase {
+            HandlerPhase::Display
+            | HandlerPhase::Summary
+            | HandlerPhase::SortKey
+            | HandlerPhase::EditValue
+            | HandlerPhase::NativeValue => invocation
+                .value_scope
+                .and_then(|scope| scoped_string(scope, string_path))
+                .unwrap_or_default()
+                .to_owned(),
+            HandlerPhase::Validation | HandlerPhase::ReferenceResolution => String::new(),
+            _ => raw.to_string(),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
 impl SemanticHandler for FormatCtdaConditionAlias {
     fn id(&self) -> &'static str {
         "format.ctda_condition_alias"
@@ -2087,6 +2150,29 @@ fn resolve_condition_quest_subrecord(
         .and_then(|resolver| resolver.resolve_form_id(source, form_id, &[Signature(*b"QUST")])))
 }
 
+fn scoped_string<'a>(value: &'a FieldValue<'static>, target_path: &str) -> Option<&'a str> {
+    match value {
+        FieldValue::Struct(values) => {
+            for value in values {
+                if value.path == target_path {
+                    if let FieldValue::String(value) = &value.value {
+                        return Some(value.as_ref());
+                    }
+                    return None;
+                }
+                if let Some(found) = scoped_string(&value.value, target_path) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        FieldValue::Array(values) => values
+            .iter()
+            .find_map(|value| scoped_string(value, target_path)),
+        _ => None,
+    }
+}
+
 fn format_unresolved_condition_alias(raw: i64, phase: HandlerPhase) -> String {
     match phase {
         HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => raw.to_string(),
@@ -2097,6 +2183,13 @@ fn format_unresolved_condition_alias(raw: i64, phase: HandlerPhase) -> String {
 fn ctda_condition_alias_error(message: impl Into<String>) -> SemanticError {
     SemanticError::Handler {
         handler: "format.ctda_condition_alias".to_owned(),
+        message: message.into(),
+    }
+}
+
+fn ctda_string_parameter_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.ctda_string_parameter".to_owned(),
         message: message.into(),
     }
 }
@@ -6662,6 +6755,64 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::Int(-2))
+        ));
+        Ok(())
+    }
+
+    /// Reads and transactionally updates CTDA string parameter subrecords.
+    #[test]
+    fn ctda_string_parameter_formatter_matches_xedit(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let string_path = "TEST/Condition/CIS1";
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.ctda_string_parameter",
+            serde_json::json!({ "string_path": string_path }),
+        );
+        let scope = FieldValue::Struct(vec![crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: string_path.to_owned(),
+            name: "Parameter #1".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 5 },
+            value: FieldValue::String(Cow::Borrowed("Hello")),
+        }]);
+        let handlers = SemanticHandlerRegistry::builtin();
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Starfield);
+        let value = FieldValue::UInt(0);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                record,
+                HandlerPhase::Display,
+                Some(&value),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "Hello"
+        ));
+        let edit = FieldValue::String(Cow::Borrowed("Updated"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&edit),
+                None,
+            )?,
+            HandlerOutput::ParsedValue {
+                value: FieldValue::UInt(0),
+                mutations,
+            } if mutations
+                == vec![HandlerMutation::SynchronizePresence {
+                    path: string_path.to_owned(),
+                    occurrence: 0,
+                    present: true,
+                    value: OwnedFieldValue::String("Updated".to_owned()),
+                }]
         ));
         Ok(())
     }

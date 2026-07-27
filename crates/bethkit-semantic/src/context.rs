@@ -25,6 +25,34 @@ pub struct SemanticContext {
     handlers: SemanticHandlerRegistry,
 }
 
+/// Typed result of parsing text accepted by an xEdit edit control.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedEditValue {
+    value: OwnedFieldValue,
+    mutations: Vec<crate::HandlerMutation>,
+}
+
+impl ParsedEditValue {
+    pub(crate) fn new(value: OwnedFieldValue, mutations: Vec<crate::HandlerMutation>) -> Self {
+        Self { value, mutations }
+    }
+
+    /// Returns the typed value for the callback's own schema node.
+    pub fn value(&self) -> &OwnedFieldValue {
+        &self.value
+    }
+
+    /// Returns transactional sibling mutations produced by the parser.
+    pub fn mutations(&self) -> &[crate::HandlerMutation] {
+        &self.mutations
+    }
+
+    /// Consumes the result into its typed value and sibling mutations.
+    pub fn into_parts(self) -> (OwnedFieldValue, Vec<crate::HandlerMutation>) {
+        (self.value, self.mutations)
+    }
+}
+
 impl SemanticContext {
     /// Creates a context and verifies all package decoder requirements.
     ///
@@ -387,11 +415,38 @@ impl SemanticContext {
         record: &Record,
         path: &str,
         text: &str,
-    ) -> Result<Option<OwnedFieldValue>> {
+    ) -> Result<Option<ParsedEditValue>> {
+        self.parse_edit_value_with_scope(record, path, text, None)
+    }
+
+    /// Parses edited text using the value's decoded sibling container.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when a bound transform rejects the
+    /// input or returns an invalid result.
+    pub fn parse_edit_value_in_scope(
+        &self,
+        record: &Record,
+        path: &str,
+        text: &str,
+        scope: &FieldValue<'_>,
+    ) -> Result<Option<ParsedEditValue>> {
+        self.parse_edit_value_with_scope(record, path, text, Some(scope))
+    }
+
+    fn parse_edit_value_with_scope(
+        &self,
+        record: &Record,
+        path: &str,
+        text: &str,
+        scope: Option<&FieldValue<'_>>,
+    ) -> Result<Option<ParsedEditValue>> {
         let input = FieldValue::String(Cow::Owned(text.to_owned()));
+        let handler_scope = scope.map(FieldValue::to_handler_value);
         let mut parsed = self
             .string_enumeration(record, path)
-            .map(|_| OwnedFieldValue::String(text.to_owned()));
+            .map(|_| ParsedEditValue::new(OwnedFieldValue::String(text.to_owned()), Vec::new()));
         for binding in self
             .registry
             .package()
@@ -413,16 +468,28 @@ impl SemanticContext {
             ) {
                 continue;
             }
-            match self.handlers.invoke(
+            match self.handlers.invoke_with_records(
                 binding,
                 self.handler_record(record),
+                HandlerInvocationAccess::read_only_with_scope(record, handler_scope.as_ref()),
                 HandlerPhase::ParseEditValue,
                 Some(&input),
                 None,
             )? {
                 HandlerOutput::None => {}
                 HandlerOutput::Value(value) => {
-                    parsed = Some(handler_to_owned_value(value, path)?);
+                    parsed = Some(ParsedEditValue::new(
+                        handler_to_owned_value(value, path)?,
+                        parsed.map(|parsed| parsed.mutations).unwrap_or_default(),
+                    ));
+                }
+                HandlerOutput::ParsedValue { value, mutations } => {
+                    let mut combined = parsed.map(|parsed| parsed.mutations).unwrap_or_default();
+                    combined.extend(mutations);
+                    parsed = Some(ParsedEditValue::new(
+                        handler_to_owned_value(value, path)?,
+                        combined,
+                    ));
                 }
                 _ => {
                     return Err(SemanticError::Handler {

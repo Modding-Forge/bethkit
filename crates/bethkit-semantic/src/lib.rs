@@ -21,7 +21,7 @@ pub use analysis::{
 pub use cleaning::{
     plan_cleaning, CleaningAction, CleaningActionKind, CleaningPlan, CleaningPolicy,
 };
-pub use context::SemanticContext;
+pub use context::{ParsedEditValue, SemanticContext};
 pub use decoder::{CustomDecoder, DecodedPayload, DecoderRegistry};
 pub use editor::RecordEditor;
 pub use error::{Result, SemanticError};

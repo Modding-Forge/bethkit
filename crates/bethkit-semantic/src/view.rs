@@ -14,8 +14,8 @@ use bethkit_schema::{
 use crate::value::float_from_raw;
 use crate::{
     grammar::interpret, ByteSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, FieldOrigin,
-    FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, NamedValue, Result,
-    SemanticContext, SemanticError, SemanticLink, ValidationReport, ValueFormat,
+    FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, NamedValue, ParsedEditValue,
+    Result, SemanticContext, SemanticError, SemanticLink, ValidationReport, ValueFormat,
 };
 
 /// One decoded top-level record field.
@@ -150,12 +150,24 @@ impl<'context, 'record> RecordView<'context, 'record> {
     ///
     /// Returns [`SemanticError::Handler`] when the bound transform rejects
     /// the text or returns an invalid result.
-    pub fn parse_edit_value(
+    pub fn parse_edit_value(&self, path: &str, text: &str) -> Result<Option<ParsedEditValue>> {
+        self.context.parse_edit_value(self.record, path, text)
+    }
+
+    /// Parses edited text using the value's sibling-value container.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the bound transform rejects
+    /// the text or scope, or returns an invalid result.
+    pub fn parse_edit_value_in_scope(
         &self,
         path: &str,
         text: &str,
-    ) -> Result<Option<crate::OwnedFieldValue>> {
-        self.context.parse_edit_value(self.record, path, text)
+        scope: &FieldValue<'_>,
+    ) -> Result<Option<ParsedEditValue>> {
+        self.context
+            .parse_edit_value_in_scope(self.record, path, text, scope)
     }
 
     /// Returns whether xEdit allows a decoded value to be removed.

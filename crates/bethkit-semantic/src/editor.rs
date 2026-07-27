@@ -15,7 +15,8 @@ use crate::value::{float_to_raw, handler_to_owned_value};
 use crate::{
     grammar::{interpret_writable, RepeatScope},
     FieldValue, HandlerMutation, HandlerOutput, HandlerPhase, HandlerRecordContext,
-    OwnedFieldValue, Result, SemanticContext, SemanticError, SemanticHandlerRegistry,
+    OwnedFieldValue, ParsedEditValue, Result, SemanticContext, SemanticError,
+    SemanticHandlerRegistry,
 };
 
 #[derive(Clone)]
@@ -115,6 +116,87 @@ impl RecordEditor {
         self.record = candidate;
         self.decoded_values = decoded_values;
         Ok(())
+    }
+
+    /// Applies a parsed edit value to one nested schema-path occurrence.
+    ///
+    /// The primary value and any sibling mutations produced by the parser are
+    /// committed as one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the path or occurrence is absent, the
+    /// parsed value is invalid, or a sibling mutation cannot be applied.
+    pub fn set_parsed_value(
+        &mut self,
+        path: &str,
+        occurrence: usize,
+        parsed: &ParsedEditValue,
+    ) -> Result<()> {
+        let target = self.find_node(path)?.clone();
+        let schema = self
+            .registry
+            .get(self.record.signature)
+            .ok_or_else(|| SemanticError::MissingRecordSchema(self.record.signature.to_string()))?;
+        let parent = find_containing_subrecord(&schema.root, path)
+            .ok_or_else(|| SemanticError::MissingPath(path.to_owned()))?
+            .clone();
+        let SchemaNodeKind::Subrecord { payload, .. } = &parent.kind else {
+            return Err(SemanticError::Encode {
+                path: path.to_owned(),
+                message: "parsed edit has no containing subrecord".to_owned(),
+            });
+        };
+        let normalized = self.normalize_value(&target.path, parsed.value())?;
+        let parent_count = self.assigned_occurrence_count(&self.record, &parent.path)?;
+        let mut remaining = occurrence;
+        for parent_occurrence in 0..parent_count {
+            let Some(current) = self
+                .decoded_values
+                .get(&(parent.path.clone(), parent_occurrence))
+                .cloned()
+            else {
+                continue;
+            };
+            let old_owned = handler_to_owned_value(current.clone(), &payload.path)?;
+            let mut updated = old_owned.clone();
+            let mut replacement = Some(normalized.clone());
+            if !self.set_nested_value(
+                payload,
+                &mut updated,
+                path,
+                &mut remaining,
+                &mut replacement,
+            )? {
+                continue;
+            }
+            let (updated, mut mutations) =
+                self.apply_after_set_tree(payload, &updated, Some(&current))?;
+            mutations.extend_from_slice(parsed.mutations());
+            let encoded = self.encode_node(payload, &updated)?;
+            let decoded = self.owned_to_handler_value(payload, &updated)?;
+            let index =
+                self.assigned_subrecord_index(&self.record, &parent.path, parent_occurrence)?;
+            let mut candidate = clone_record(&self.record);
+            let mut decoded_values = self.decoded_values.clone();
+            candidate.subrecords[index].data = encoded;
+            let changed = self.changed_field_at(&candidate, index)?;
+            decoded_values.insert((parent.path.clone(), parent_occurrence), decoded);
+            self.apply_local_mutations_with_scope(
+                &mut candidate,
+                &mut decoded_values,
+                &changed,
+                mutations,
+            )?;
+            self.apply_after_set_callbacks(&mut candidate, &mut decoded_values, &changed)?;
+            self.record = candidate;
+            self.decoded_values = decoded_values;
+            return Ok(());
+        }
+        Err(SemanticError::MissingOccurrence {
+            path: path.to_owned(),
+            occurrence,
+        })
     }
 
     /// Sets a record editor ID through its classified xEdit callback.
@@ -2984,6 +3066,133 @@ mod tests {
             editor.encode_node(&node, &OwnedFieldValue::UInt(7))?,
             vec![7, 0xff]
         );
+        Ok(())
+    }
+
+    /// Applies parsed CTDA values and sibling string mutations atomically.
+    #[test]
+    fn parsed_nested_edit_updates_ctda_string_subrecord(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let ctda_path = "TEST/0:CTDA";
+        let parameter_path = "TEST/0:CTDA/payload/5:Parameter #1/variants/2:String";
+        let string_path = "TEST/1:CIS1";
+        let parameter = SchemaNode {
+            id: SchemaNodeId(2),
+            path: parameter_path.to_owned(),
+            name: "String".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::Integer {
+                    integer: IntegerType {
+                        width: 4,
+                        signed: false,
+                        byte_order: ByteOrder::LittleEndian,
+                    },
+                },
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            test_manifest(),
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "TEST".to_owned(),
+                    name: "Test".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            SchemaNode {
+                                id: SchemaNodeId(1),
+                                path: ctda_path.to_owned(),
+                                name: "CTDA".to_owned(),
+                                required: true,
+                                conflict_priority: ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Subrecord {
+                                    signature: SchemaSignature(*b"CTDA"),
+                                    payload: Box::new(parameter.clone()),
+                                },
+                            },
+                            SchemaNode {
+                                id: SchemaNodeId(3),
+                                path: string_path.to_owned(),
+                                name: "Parameter #1".to_owned(),
+                                required: false,
+                                conflict_priority: ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Subrecord {
+                                    signature: SchemaSignature(*b"CIS1"),
+                                    payload: Box::new(SchemaNode {
+                                        id: SchemaNodeId(4),
+                                        path: format!("{string_path}/payload"),
+                                        name: "Parameter #1".to_owned(),
+                                        required: true,
+                                        conflict_priority: ConflictPriority::Normal,
+                                        condition: None,
+                                        kind: SchemaNodeKind::Primitive {
+                                            primitive: PrimitiveType::String {
+                                                string: StringType {
+                                                    encoding: "utf8".to_owned(),
+                                                    localized: false,
+                                                    zero_terminated: true,
+                                                    fixed_length: None,
+                                                    length_prefix: None,
+                                                    trailing_terminator: None,
+                                                    allowed_values: Vec::new(),
+                                                },
+                                            },
+                                        },
+                                    }),
+                                },
+                            },
+                        ],
+                    },
+                },
+            }],
+            Vec::new(),
+        )?;
+        let mut editor = RecordEditor {
+            registry: bethkit_schema::SchemaRegistry::new(Arc::new(package)),
+            decoders: crate::DecoderRegistry::builtin(),
+            handlers: SemanticHandlerRegistry::builtin(),
+            record: WritableRecord {
+                signature: Signature(*b"TEST"),
+                flags: bethkit_core::RecordFlags::empty(),
+                form_id: bethkit_core::FormId::NULL,
+                form_version: 44,
+                subrecords: vec![WritableSubRecord {
+                    signature: Signature(*b"CTDA"),
+                    data: 5_u32.to_le_bytes().to_vec(),
+                }],
+            },
+            localized: false,
+            decoded_values: BTreeMap::from([((ctda_path.to_owned(), 0), FieldValue::UInt(5))]),
+        };
+        let parsed = ParsedEditValue::new(
+            OwnedFieldValue::UInt(0),
+            vec![HandlerMutation::SynchronizePresence {
+                path: string_path.to_owned(),
+                occurrence: 0,
+                present: true,
+                value: OwnedFieldValue::String("Updated".to_owned()),
+            }],
+        );
+
+        // when
+        editor.set_parsed_value(parameter_path, 0, &parsed)?;
+
+        // then
+        assert_eq!(editor.record.subrecords.len(), 2);
+        assert_eq!(editor.record.subrecords[0].data, 0_u32.to_le_bytes());
+        assert_eq!(editor.record.subrecords[1].signature, Signature(*b"CIS1"));
+        assert_eq!(editor.record.subrecords[1].data, b"Updated\0");
         Ok(())
     }
 
