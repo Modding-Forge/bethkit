@@ -534,23 +534,38 @@ impl RecordEditor {
                         ),
                     ));
                 }
-                let mut updated = Vec::with_capacity(values.len());
+                let mut updated = values.clone();
                 let mut mutations = Vec::new();
                 let old_fields = match old_value {
                     Some(FieldValue::Struct(values)) => Some(values.as_slice()),
                     _ => None,
                 };
-                for (index, (field, value)) in fields.iter().zip(values).enumerate() {
+                for (index, field) in fields.iter().enumerate() {
                     let old_field = old_fields
                         .and_then(|values| values.get(index))
                         .map(|value| &value.value);
                     let (value, child_mutations) = self.apply_after_set_tree_with_fields(
                         field,
-                        value,
+                        &updated[index],
                         old_field,
                         field_values,
                     )?;
-                    updated.push(value);
+                    updated[index] = value;
+                    let mut child_mutations = child_mutations;
+                    let mut container = OwnedFieldValue::Struct(updated);
+                    self.apply_local_default_mutations(
+                        node,
+                        &mut container,
+                        &mut child_mutations,
+                        field_values,
+                    )?;
+                    let OwnedFieldValue::Struct(next) = container else {
+                        return Err(encode_error(
+                            &node.path,
+                            "default mutation replaced a struct container",
+                        ));
+                    };
+                    updated = next;
                     mutations.extend(child_mutations);
                 }
                 (OwnedFieldValue::Struct(updated), mutations)
@@ -588,8 +603,10 @@ impl RecordEditor {
             ) => self.apply_after_set_tree_with_fields(payload, value, old_value, field_values)?,
             _ => (value.clone(), Vec::new()),
         };
+        self.apply_local_default_mutations(node, &mut updated, &mut mutations, field_values)?;
         self.apply_local_set_mutations(node, &mut updated, &mut mutations)?;
-        let handler_value = self.owned_to_handler_value(node, &updated)?;
+        let handler_value =
+            self.owned_to_handler_value_with_fields(node, &updated, field_values)?;
         if old_value.is_some_and(|old| handler_values_equal(&handler_value, old)) {
             return Ok((updated, mutations));
         }
@@ -607,7 +624,8 @@ impl RecordEditor {
             ) {
                 continue;
             }
-            let handler_value = self.owned_to_handler_value(node, &updated)?;
+            let handler_value =
+                self.owned_to_handler_value_with_fields(node, &updated, field_values)?;
             match self.handlers.invoke(
                 binding,
                 self.handler_record(),
@@ -628,8 +646,45 @@ impl RecordEditor {
                 }
             }
         }
+        self.apply_local_default_mutations(node, &mut updated, &mut mutations, field_values)?;
         self.apply_local_set_mutations(node, &mut updated, &mut mutations)?;
         Ok((updated, mutations))
+    }
+
+    fn apply_local_default_mutations(
+        &self,
+        node: &SchemaNode,
+        value: &mut OwnedFieldValue,
+        mutations: &mut Vec<HandlerMutation>,
+        field_values: &BTreeMap<String, i64>,
+    ) -> Result<()> {
+        let mut remaining = Vec::with_capacity(mutations.len());
+        for mutation in mutations.drain(..) {
+            let HandlerMutation::ResetToDefault { path, occurrence } = mutation else {
+                remaining.push(mutation);
+                continue;
+            };
+            if path != node.path
+                && !path
+                    .strip_prefix(&node.path)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+            {
+                remaining.push(HandlerMutation::ResetToDefault { path, occurrence });
+                continue;
+            }
+            let mut target_occurrence = occurrence;
+            if !self.reset_nested_value_with_fields(
+                node,
+                value,
+                &path,
+                &mut target_occurrence,
+                field_values,
+            )? {
+                return Err(SemanticError::MissingOccurrence { path, occurrence });
+            }
+        }
+        *mutations = remaining;
+        Ok(())
     }
 
     fn apply_local_set_mutations(
@@ -906,6 +961,203 @@ impl RecordEditor {
         Ok(false)
     }
 
+    fn reset_nested_value_with_fields(
+        &self,
+        node: &SchemaNode,
+        value: &mut OwnedFieldValue,
+        target_path: &str,
+        occurrence: &mut usize,
+        field_values: &BTreeMap<String, i64>,
+    ) -> Result<bool> {
+        if node.path == target_path {
+            if *occurrence == 0 {
+                *value = self.default_value_for_node(node, field_values, 0)?;
+                return Ok(true);
+            }
+            *occurrence = occurrence.saturating_sub(1);
+            return Ok(false);
+        }
+        match (&node.kind, &mut *value) {
+            (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
+                for (field, value) in fields.iter().zip(values) {
+                    if self.reset_nested_value_with_fields(
+                        field,
+                        value,
+                        target_path,
+                        occurrence,
+                        field_values,
+                    )? {
+                        return Ok(true);
+                    }
+                }
+            }
+            (SchemaNodeKind::Array { element, .. }, OwnedFieldValue::Array(values)) => {
+                for value in values {
+                    if self.reset_nested_value_with_fields(
+                        element,
+                        value,
+                        target_path,
+                        occurrence,
+                        field_values,
+                    )? {
+                        return Ok(true);
+                    }
+                }
+            }
+            (SchemaNodeKind::Union { selector, variants }, current) => {
+                let variant =
+                    self.select_union_variant(node, selector, variants, current, field_values)?;
+                if self.reset_nested_value_with_fields(
+                    variant,
+                    current,
+                    target_path,
+                    occurrence,
+                    field_values,
+                )? {
+                    return Ok(true);
+                }
+            }
+            (
+                SchemaNodeKind::Subrecord { payload, .. }
+                | SchemaNodeKind::Compressed { child: payload, .. }
+                | SchemaNodeKind::Terminated { child: payload, .. },
+                current,
+            ) => {
+                if self.reset_nested_value_with_fields(
+                    payload,
+                    current,
+                    target_path,
+                    occurrence,
+                    field_values,
+                )? {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn default_value_for_node(
+        &self,
+        node: &SchemaNode,
+        field_values: &BTreeMap<String, i64>,
+        depth: usize,
+    ) -> Result<OwnedFieldValue> {
+        if depth >= 128 {
+            return Err(encode_error(
+                &node.path,
+                "schema default recursion exceeds 128 nodes",
+            ));
+        }
+        let next_depth = depth.saturating_add(1);
+        match &node.kind {
+            SchemaNodeKind::Primitive { primitive } => Ok(self.default_primitive_value(primitive)),
+            SchemaNodeKind::Struct { fields } => fields
+                .iter()
+                .map(|field| self.default_value_for_node(field, field_values, next_depth))
+                .collect::<Result<Vec<_>>>()
+                .map(OwnedFieldValue::Struct),
+            SchemaNodeKind::Array { element, count } => {
+                let count = match count {
+                    ArrayCount::Fixed { count } => usize::try_from(*count).map_err(|_| {
+                        encode_error(&node.path, "fixed default array count exceeds usize")
+                    })?,
+                    _ => 0,
+                };
+                (0..count)
+                    .map(|_| self.default_value_for_node(element, field_values, next_depth))
+                    .collect::<Result<Vec<_>>>()
+                    .map(OwnedFieldValue::Array)
+            }
+            SchemaNodeKind::Union { selector, variants } => {
+                let variant =
+                    self.select_default_union_variant(node, selector, variants, field_values)?;
+                self.default_value_for_node(variant, field_values, next_depth)
+            }
+            SchemaNodeKind::Subrecord { payload, .. } => {
+                self.default_value_for_node(payload, field_values, next_depth)
+            }
+            SchemaNodeKind::Compressed { child, .. } | SchemaNodeKind::Terminated { child, .. } => {
+                self.default_value_for_node(child, field_values, next_depth)
+            }
+            SchemaNodeKind::Custom { decoder, .. } => Err(SemanticError::Encode {
+                path: node.path.clone(),
+                message: format!("custom decoder {decoder} has no schema-native default"),
+            }),
+            SchemaNodeKind::Sequence { .. }
+            | SchemaNodeKind::Choice { .. }
+            | SchemaNodeKind::SelectedChoice { .. }
+            | SchemaNodeKind::Repeat { .. }
+            | SchemaNodeKind::Reference { .. } => Err(SemanticError::Encode {
+                path: node.path.clone(),
+                message: "this schema node has no editable default value".to_owned(),
+            }),
+        }
+    }
+
+    fn default_primitive_value(&self, primitive: &PrimitiveType) -> OwnedFieldValue {
+        match primitive {
+            PrimitiveType::Integer { integer } if integer.signed => OwnedFieldValue::Int(0),
+            PrimitiveType::Integer { .. } | PrimitiveType::PackedUnsigned => {
+                OwnedFieldValue::UInt(0)
+            }
+            PrimitiveType::Float { .. } => OwnedFieldValue::Float(0.0),
+            PrimitiveType::String { string } if self.localized && is_localized_string(string) => {
+                OwnedFieldValue::UInt(0)
+            }
+            PrimitiveType::String { .. } => OwnedFieldValue::String(String::new()),
+            PrimitiveType::Bytes { length } => {
+                OwnedFieldValue::Bytes(vec![0; length.unwrap_or(0) as usize])
+            }
+            PrimitiveType::FormId { .. } => OwnedFieldValue::FormId(bethkit_core::FormId::NULL),
+            PrimitiveType::Enumeration { .. } => OwnedFieldValue::Int(0),
+            PrimitiveType::Flags { .. } => OwnedFieldValue::UInt(0),
+            PrimitiveType::Unused { length } => OwnedFieldValue::Bytes(vec![0; *length as usize]),
+        }
+    }
+
+    fn select_default_union_variant<'a>(
+        &self,
+        node: &SchemaNode,
+        selector: &UnionSelector,
+        variants: &'a [SchemaNode],
+        field_values: &BTreeMap<String, i64>,
+    ) -> Result<&'a SchemaNode> {
+        let UnionSelector::Expression(expression) = selector else {
+            return Err(encode_error(
+                &node.path,
+                "callback-selected union has no declarative default",
+            ));
+        };
+        let context = EvalContext {
+            payload: &[],
+            field_values,
+            form_version: self.record.form_version,
+            record_signature: self.record.signature.into(),
+        };
+        let selected = match expression.evaluate(&context, 1024) {
+            Ok(EvalValue::Int(selected)) => selected,
+            Ok(_) => {
+                return Err(encode_error(
+                    &node.path,
+                    "default union selector returned a non-integer value",
+                ));
+            }
+            Err(error) => {
+                return Err(encode_error(
+                    &node.path,
+                    format!("default union selector failed: {error}"),
+                ));
+            }
+        };
+        let index = usize::try_from(selected)
+            .map_err(|_| encode_error(&node.path, "default union selector returned a negative"))?;
+        variants
+            .get(index)
+            .ok_or_else(|| encode_error(&node.path, "default union selector is out of range"))
+    }
+
     fn select_union_variant<'a>(
         &self,
         node: &SchemaNode,
@@ -1105,6 +1357,14 @@ impl RecordEditor {
                         &expected,
                         value,
                     )?;
+                }
+                HandlerMutation::ResetToDefault { path, .. } => {
+                    return Err(SemanticError::Handler {
+                        handler: "edit.reset_sibling_default".to_owned(),
+                        message: format!(
+                            "schema-native default mutation for {path} escaped its value container"
+                        ),
+                    });
                 }
                 HandlerMutation::Insert { path, value } => {
                     let (signature, encoded) = self.encode_path(&path, &value)?;
@@ -1351,6 +1611,12 @@ impl RecordEditor {
                     }],
                 )
             }
+            HandlerMutation::ResetToDefault { path, .. } => Err(SemanticError::Handler {
+                handler: "edit.reset_sibling_default".to_owned(),
+                message: format!(
+                    "schema-native default mutation for {path} escaped its value container"
+                ),
+            }),
             HandlerMutation::Insert { path, value } => {
                 self.insert_in_scope(record, decoded_values, repeat_scope, &path, &value)
             }
@@ -1897,6 +2163,15 @@ impl RecordEditor {
                         expected,
                         value,
                     },
+                    HandlerMutation::ResetToDefault { path, .. } => {
+                        return Err(SemanticError::Handler {
+                            handler: "edit.reset_sibling_default".to_owned(),
+                            message: format!(
+                                "schema-native default mutation for {path} escaped its value \
+                                 container"
+                            ),
+                        });
+                    }
                     HandlerMutation::Remove { path, occurrence } => HandlerMutation::Remove {
                         occurrence: self.global_occurrence(
                             &grammar,
@@ -2122,6 +2397,7 @@ fn mutation_path(mutation: &HandlerMutation) -> &str {
     match mutation {
         HandlerMutation::Set { path, .. }
         | HandlerMutation::SetIfEqual { path, .. }
+        | HandlerMutation::ResetToDefault { path, .. }
         | HandlerMutation::Insert { path, .. }
         | HandlerMutation::Remove { path, .. }
         | HandlerMutation::RemoveAll { path }
@@ -2615,9 +2891,9 @@ mod tests {
     use std::sync::Arc;
 
     use bethkit_schema::{
-        BuiltInOperation, CallbackBinding, CallbackImplementation, ConflictPriority,
+        BuiltInOperation, CallbackBinding, CallbackImplementation, ConflictPriority, Expression,
         HandlerRequirement, SchemaGame, SchemaManifest, SchemaNodeId, SchemaPackage, SchemaRecord,
-        SchemaSignature, StringType, ValidationStatus, PACKAGE_FORMAT_VERSION,
+        SchemaSignature, StringLengthPrefix, StringType, ValidationStatus, PACKAGE_FORMAT_VERSION,
     };
 
     use super::*;
@@ -2708,6 +2984,218 @@ mod tests {
             editor.encode_node(&node, &OwnedFieldValue::UInt(7))?,
             vec![7, 0xff]
         );
+        Ok(())
+    }
+
+    /// Resets a VMAD value to the newly selected property's schema-native default.
+    #[test]
+    fn property_type_change_resets_sibling_union_to_default(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let subrecord_path = "TEST/0:VMAD";
+        let payload_path = "TEST/0:VMAD/payload";
+        let type_path = "TEST/0:VMAD/payload/0:Type";
+        let value_path = "TEST/0:VMAD/payload/1:Value";
+        let string_type = PrimitiveType::String {
+            string: StringType {
+                encoding: "utf8".to_owned(),
+                localized: false,
+                zero_terminated: false,
+                fixed_length: None,
+                length_prefix: Some(StringLengthPrefix {
+                    width: 2,
+                    offset: 2,
+                }),
+                trailing_terminator: None,
+                allowed_values: Vec::new(),
+            },
+        };
+        let payload = SchemaNode {
+            id: SchemaNodeId(2),
+            path: payload_path.to_owned(),
+            name: "Property".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    SchemaNode {
+                        id: SchemaNodeId(3),
+                        path: type_path.to_owned(),
+                        name: "Type".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::Enumeration {
+                                integer: IntegerType {
+                                    width: 1,
+                                    signed: false,
+                                    byte_order: ByteOrder::LittleEndian,
+                                },
+                                values: vec![
+                                    (0, "None".to_owned()),
+                                    (1, "Int32".to_owned()),
+                                    (2, "String".to_owned()),
+                                ],
+                            },
+                        },
+                    },
+                    SchemaNode {
+                        id: SchemaNodeId(4),
+                        path: value_path.to_owned(),
+                        name: "Value".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Union {
+                            selector: UnionSelector::Expression(Expression::ReadField {
+                                path: type_path.to_owned(),
+                            }),
+                            variants: vec![
+                                SchemaNode {
+                                    id: SchemaNodeId(5),
+                                    path: format!("{value_path}/variants/0:None"),
+                                    name: "None".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Bytes { length: Some(0) },
+                                    },
+                                },
+                                SchemaNode {
+                                    id: SchemaNodeId(6),
+                                    path: format!("{value_path}/variants/1:Int32"),
+                                    name: "Int32".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Integer {
+                                            integer: IntegerType {
+                                                width: 4,
+                                                signed: true,
+                                                byte_order: ByteOrder::LittleEndian,
+                                            },
+                                        },
+                                    },
+                                },
+                                SchemaNode {
+                                    id: SchemaNodeId(7),
+                                    path: format!("{value_path}/variants/2:String"),
+                                    name: "String".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: string_type,
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "edit.reset_sibling_default".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "TEST".to_owned(),
+                    name: "Test".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: subrecord_path.to_owned(),
+                            name: "VMAD".to_owned(),
+                            required: true,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"VMAD"),
+                                payload: Box::new(payload.clone()),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: type_path.to_owned(),
+                callback_id: "def.after_set".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "44".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "edit.reset_sibling_default".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "target_path": value_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let mut editor = RecordEditor {
+            registry: bethkit_schema::SchemaRegistry::new(Arc::new(package)),
+            decoders: crate::DecoderRegistry::builtin(),
+            handlers: SemanticHandlerRegistry::builtin(),
+            record: WritableRecord {
+                signature: Signature(*b"TEST"),
+                flags: bethkit_core::RecordFlags::empty(),
+                form_id: bethkit_core::FormId::NULL,
+                form_version: 44,
+                subrecords: vec![WritableSubRecord {
+                    signature: Signature(*b"VMAD"),
+                    data: vec![1, 42, 0, 0, 0],
+                }],
+            },
+            localized: false,
+            decoded_values: BTreeMap::new(),
+        };
+        let decoded = editor.owned_to_handler_value(
+            &payload,
+            &OwnedFieldValue::Struct(vec![OwnedFieldValue::Int(1), OwnedFieldValue::Int(42)]),
+        )?;
+        editor
+            .decoded_values
+            .insert((subrecord_path.to_owned(), 0), decoded);
+
+        // when
+        editor.set(
+            subrecord_path,
+            0,
+            &OwnedFieldValue::Struct(vec![OwnedFieldValue::Int(2), OwnedFieldValue::Int(42)]),
+        )?;
+
+        // then
+        assert_eq!(editor.record.subrecords[0].data, vec![2, 0, 0]);
+
+        // when
+        editor.set(
+            subrecord_path,
+            0,
+            &OwnedFieldValue::Struct(vec![
+                OwnedFieldValue::Int(2),
+                OwnedFieldValue::String("kept".to_owned()),
+            ]),
+        )?;
+
+        // then
+        assert_eq!(editor.record.subrecords[0].data, b"\x02\x04\x00kept");
         Ok(())
     }
 

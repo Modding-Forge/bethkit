@@ -181,6 +181,13 @@ pub enum HandlerMutation {
         /// Replacement value.
         value: OwnedFieldValue,
     },
+    /// Reset a field occurrence to the schema-native default selected in the current edit context.
+    ResetToDefault {
+        /// Stable schema path.
+        path: String,
+        /// Zero-based occurrence.
+        occurrence: usize,
+    },
     /// Insert a new field.
     Insert {
         /// Stable schema path.
@@ -445,6 +452,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(HeadPartsAfterSet));
         registry.register(Arc::new(MagicEffectSecondAvWeightAfterSet));
         registry.register(Arc::new(MagicEffectArchetypeAfterSet));
+        registry.register(Arc::new(ResetSiblingDefault));
         registry.register(Arc::new(RefreshSiblingUnions));
         registry.register(Arc::new(InvalidateConflicts));
         registry.register(Arc::new(CtdaTypeFormatter));
@@ -2985,6 +2993,31 @@ fn magic_effect_actor_value_owned(
             handler: "edit.magic_effect_archetype".to_owned(),
             message: format!("unsupported game {}", game.slug()),
         }),
+    }
+}
+
+struct ResetSiblingDefault;
+
+impl SemanticHandler for ResetSiblingDefault {
+    fn id(&self) -> &'static str {
+        "edit.reset_sibling_default"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let path = configured_text(self.id(), invocation.context.configuration, "target_path")?;
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::ResetToDefault {
+                path: path.to_owned(),
+                occurrence: 0,
+            },
+        ]))
     }
 }
 
