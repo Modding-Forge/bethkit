@@ -357,6 +357,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatRgb));
         registry.register(Arc::new(FormatVec3));
         registry.register(Arc::new(FormatAngleDegrees));
+        registry.register(Arc::new(FormatTimestampDate));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
@@ -1288,6 +1289,48 @@ impl SemanticHandler for FormatAngleDegrees {
             invocation.value.expect("float value checked above"),
             None,
         )?))
+    }
+}
+
+struct FormatTimestampDate;
+
+impl SemanticHandler for FormatTimestampDate {
+    fn id(&self) -> &'static str {
+        "format.timestamp_date"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(timestamp_date_error(
+                    "timestamp edit parsing requires hexadecimal text",
+                ));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Bytes(
+                std::borrow::Cow::Owned(parse_fixed_hex_bytes(value, 2)?),
+            )));
+        }
+        let Some(FieldValue::Bytes(value)) = invocation.value else {
+            return Err(timestamp_date_error(
+                "timestamp formatter requires a byte-array value",
+            ));
+        };
+        if value.len() != 2 {
+            return Err(timestamp_date_error(
+                "timestamp formatter requires exactly two bytes",
+            ));
+        }
+        if matches!(
+            invocation.phase,
+            HandlerPhase::Display | HandlerPhase::Summary
+        ) {
+            return Ok(HandlerOutput::Text(format_timestamp_date(value)));
+        }
+        Ok(HandlerOutput::Text(format_hex_bytes(value)))
     }
 }
 
@@ -3038,6 +3081,65 @@ fn parse_angle_degrees(value: &str) -> Result<f64> {
     Ok(degrees.to_radians())
 }
 
+fn format_timestamp_date(value: &[u8]) -> String {
+    let mut packed = u16::from_le_bytes([value[0], value[1]]);
+    if packed == 0 {
+        return "None".to_owned();
+    }
+    let day = packed & 0x1F;
+    packed >>= 5;
+    let month = packed & 0x0F;
+    packed >>= 4;
+    let year = 2000 + (packed & 0x7F);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn format_hex_bytes(value: &[u8]) -> String {
+    value
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_fixed_hex_bytes(value: &str, length: usize) -> Result<Vec<u8>> {
+    let digits: String = value
+        .chars()
+        .filter(|character| !matches!(character, ' ' | ',' | ';'))
+        .collect();
+    if !digits.len().is_multiple_of(2)
+        || !digits
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(timestamp_date_error(
+            "timestamp edit value must contain complete hexadecimal byte pairs",
+        ));
+    }
+    let mut bytes = digits
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).map_err(|_| {
+                timestamp_date_error("timestamp edit value contains invalid hexadecimal text")
+            })?;
+            u8::from_str_radix(text, 16).map_err(|_| {
+                timestamp_date_error("timestamp edit value contains invalid hexadecimal text")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    bytes.resize(length, 0);
+    bytes.truncate(length);
+    Ok(bytes)
+}
+
+fn timestamp_date_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.timestamp_date".to_owned(),
+        message: message.into(),
+    }
+}
+
 fn format_numeric_component(
     handler: &str,
     value: &FieldValue<'_>,
@@ -3686,6 +3788,22 @@ mod tests {
         );
         assert!(parse_angle_degrees("361\u{00B0}").is_err());
         assert!(parse_angle_degrees("90").is_err());
+        Ok(())
+    }
+
+    /// Matches xEdit's packed date display and fixed byte-array edit behavior.
+    #[test]
+    fn timestamp_formatter_matches_xedit_date() -> Result<()> {
+        let packed = (24_u16 << 9) | (7_u16 << 5) | 27_u16;
+        let bytes = packed.to_le_bytes();
+
+        assert_eq!(format_timestamp_date(&bytes), "2024-07-27");
+        assert_eq!(format_timestamp_date(&[0, 0]), "None");
+        assert_eq!(format_hex_bytes(&bytes), "FB 30");
+        assert_eq!(parse_fixed_hex_bytes("FB, 30", 2)?, bytes);
+        assert_eq!(parse_fixed_hex_bytes("01", 2)?, [1, 0]);
+        assert_eq!(parse_fixed_hex_bytes("01 02 03", 2)?, [1, 2]);
+        assert!(parse_fixed_hex_bytes("1", 2).is_err());
         Ok(())
     }
 
