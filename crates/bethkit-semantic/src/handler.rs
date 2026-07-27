@@ -2594,6 +2594,16 @@ impl SemanticHandler for CtdaTypeFormatter {
                     message: "CTDA Type edit parsing requires text".to_owned(),
                 });
             };
+            if invocation.context.game == SchemaGame::Oblivion {
+                let value =
+                    u64::try_from(parse_delphi_integer(value, self.id())?).map_err(|_| {
+                        SemanticError::Handler {
+                            handler: self.id().to_owned(),
+                            message: "Oblivion CTDA Type must be non-negative".to_owned(),
+                        }
+                    })?;
+                return Ok(HandlerOutput::Value(FieldValue::UInt(value)));
+            }
             return Ok(HandlerOutput::Value(FieldValue::UInt(
                 parse_ctda_type_edit_value(
                     value,
@@ -2617,13 +2627,16 @@ impl SemanticHandler for CtdaTypeFormatter {
         })?;
         let legacy = matches!(
             invocation.context.game,
-            SchemaGame::Fallout3 | SchemaGame::FalloutNv
+            SchemaGame::Fallout3 | SchemaGame::FalloutNv | SchemaGame::Oblivion
         );
         let text = match invocation.phase {
             HandlerPhase::Display | HandlerPhase::Summary => {
                 format_ctda_type_display(value, legacy)
             }
             HandlerPhase::SortKey => format!("{value:02X}"),
+            HandlerPhase::EditValue if invocation.context.game == SchemaGame::Oblivion => {
+                value.to_string()
+            }
             HandlerPhase::EditValue => format_ctda_type_edit_value(
                 value,
                 match invocation.context.game {
@@ -2632,7 +2645,8 @@ impl SemanticHandler for CtdaTypeFormatter {
                 },
                 legacy,
             ),
-            HandlerPhase::NativeValue => String::new(),
+            HandlerPhase::NativeValue => value.to_string(),
+            HandlerPhase::Validation => validate_ctda_type(value, legacy),
             _ => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Text(text))
@@ -3130,6 +3144,18 @@ fn format_ctda_type_edit_value(value: u64, width: usize, legacy: bool) -> String
         }
     }
     output.into_iter().map(char::from).collect()
+}
+
+fn validate_ctda_type(value: u64, legacy: bool) -> String {
+    let operator_mask = if legacy { 0xF0 } else { 0xE0 };
+    let mut result = match value & operator_mask {
+        0x00 | 0x20 | 0x40 | 0x60 | 0x80 | 0xA0 => String::new(),
+        _ => "<Unknown Compare operator>".to_owned(),
+    };
+    if legacy && value & 0x08 != 0 {
+        result.push_str(" / <Unknown: 3>");
+    }
+    result
 }
 
 fn parse_ctda_type_edit_value(value: &str, legacy: bool) -> u64 {
@@ -5842,6 +5868,54 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::UInt(0xA7))
+        ));
+
+        let oblivion = FieldValue::UInt(0xA7);
+        let oblivion_record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Oblivion);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                oblivion_record,
+                HandlerPhase::Display,
+                Some(&oblivion),
+                None,
+            )?,
+            HandlerOutput::Text(text)
+                if text == "Less than or equal to / Or, Run on target, Use global"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                oblivion_record,
+                HandlerPhase::EditValue,
+                Some(&oblivion),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "167"
+        ));
+        let oblivion_edit = FieldValue::String(Cow::Borrowed("167"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                oblivion_record,
+                HandlerPhase::ParseEditValue,
+                Some(&oblivion_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(0xA7))
+        ));
+        let invalid = FieldValue::UInt(0x18);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                oblivion_record,
+                HandlerPhase::Validation,
+                Some(&invalid),
+                None,
+            )?,
+            HandlerOutput::Text(text)
+                if text == "<Unknown Compare operator> / <Unknown: 3>"
         ));
         Ok(())
     }
