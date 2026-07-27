@@ -783,6 +783,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectOblivionMiscActorValue));
         registry.register(Arc::new(SelectPerkEffectData));
         registry.register(Arc::new(SelectPerkEntryPointData));
+        registry.register(Arc::new(SelectPerkEpf3));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -4134,6 +4135,8 @@ struct SelectPerkEffectData;
 
 struct SelectPerkEntryPointData;
 
+struct SelectPerkEpf3;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4635,6 +4638,26 @@ impl SemanticHandler for SelectPerkEntryPointData {
             };
         }
         Ok(HandlerOutput::Integer(i64::from(selected)))
+    }
+}
+
+impl SemanticHandler for SelectPerkEpf3 {
+    fn id(&self) -> &'static str {
+        "select.perk_epf3"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let parameter_type = source_subrecord_bytes(&invocation, Signature(*b"EPFT"), self.id())?
+            .and_then(|bytes| bytes.first())
+            .copied();
+        Ok(HandlerOutput::Integer(i64::from(parameter_type == Some(8))))
     }
 }
 
@@ -10057,6 +10080,46 @@ mod tests {
             )?,
             HandlerOutput::Integer(7)
         ));
+        Ok(())
+    }
+
+    /// Selects both Fallout 76 EPF3 payloads from their repeat-local EPFT type.
+    #[test]
+    fn perk_epf3_selector_uses_repeat_local_type() -> TestResult {
+        // given
+        let binding =
+            test_metadata_binding("union.select", "select.perk_epf3", serde_json::json!({}));
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"PERK"), FormId::NULL, 0, SchemaGame::Fallout76);
+        let record = test_record(
+            *b"PERK",
+            &[
+                (*b"EPFT", vec![4]),
+                (*b"EPF3", vec![0; 4]),
+                (*b"EPFT", vec![8]),
+                (*b"EPF3", vec![0; 4]),
+                (*b"EPF3", vec![0; 4]),
+            ],
+        )?;
+
+        // when / then
+        for (source_index, expected) in [(1_usize, 0_i64), (3, 1), (4, 1)] {
+            assert!(matches!(
+                handlers.invoke_with_subrecord(
+                    &binding,
+                    context,
+                    HandlerSubrecordSource::ReadOnly {
+                        record: &record,
+                        index: source_index,
+                    },
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
         Ok(())
     }
 
