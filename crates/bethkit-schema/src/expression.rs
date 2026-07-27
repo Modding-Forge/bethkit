@@ -2,6 +2,8 @@
 //!
 //! Bounded, non-Turing-complete expressions used by schema conditions.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{Result, SchemaError, SchemaSignature};
@@ -10,6 +12,8 @@ use crate::{Result, SchemaError, SchemaSignature};
 pub struct EvalContext<'a> {
     /// Raw bytes of the payload currently being evaluated.
     pub payload: &'a [u8],
+    /// Integer values decoded earlier in the same ordered payload grammar.
+    pub field_values: &'a BTreeMap<String, i64>,
     /// Record form version from the plugin record header.
     pub form_version: u16,
     /// Signature of the containing record.
@@ -69,6 +73,11 @@ pub enum Expression {
         offset: u32,
         /// Integer width in bytes. Supported values are 1, 2, 4, and 8.
         width: u8,
+    },
+    /// Reads an integer decoded earlier at one stable schema path.
+    ReadField {
+        /// Stable schema path of the earlier integer field.
+        path: String,
     },
     /// Tests whether the containing record has a signature.
     RecordSignature {
@@ -132,6 +141,25 @@ pub enum Expression {
         /// Right operand.
         right: Box<Expression>,
     },
+    /// Checked signed multiplication.
+    Multiply {
+        /// Left operand.
+        left: Box<Expression>,
+        /// Right operand.
+        right: Box<Expression>,
+    },
+    /// Checked signed integer division.
+    Divide {
+        /// Dividend.
+        left: Box<Expression>,
+        /// Non-zero divisor.
+        right: Box<Expression>,
+    },
+    /// Number of set bits in the 64-bit representation of an integer.
+    BitCount {
+        /// Integer operand.
+        value: Box<Expression>,
+    },
     /// Selects one of two equally typed values from a boolean condition.
     Select {
         /// Boolean condition.
@@ -176,6 +204,16 @@ impl Expression {
             Self::ReadUnsigned { offset, width } => {
                 read_unsigned(context.payload, *offset, *width).map(EvalValue::Int)
             }
+            Self::ReadField { path } => context
+                .field_values
+                .get(path)
+                .copied()
+                .map(EvalValue::Int)
+                .ok_or_else(|| {
+                    SchemaError::Expression(format!(
+                        "field {path} is unavailable at this grammar position"
+                    ))
+                }),
             Self::RecordSignature { signature } => {
                 Ok(EvalValue::Bool(*signature == context.record_signature))
             }
@@ -241,6 +279,30 @@ impl Expression {
                         SchemaError::Expression("signed subtraction overflowed".to_owned())
                     })
             }
+            Self::Multiply { left, right } => {
+                let left_value: i64 = left.evaluate_inner(context, remaining)?.as_int()?;
+                let right_value: i64 = right.evaluate_inner(context, remaining)?.as_int()?;
+                left_value
+                    .checked_mul(right_value)
+                    .map(EvalValue::Int)
+                    .ok_or_else(|| {
+                        SchemaError::Expression("signed multiplication overflowed".to_owned())
+                    })
+            }
+            Self::Divide { left, right } => {
+                let left_value: i64 = left.evaluate_inner(context, remaining)?.as_int()?;
+                let right_value: i64 = right.evaluate_inner(context, remaining)?.as_int()?;
+                left_value
+                    .checked_div(right_value)
+                    .map(EvalValue::Int)
+                    .ok_or_else(|| {
+                        SchemaError::Expression("signed division by zero or overflowed".to_owned())
+                    })
+            }
+            Self::BitCount { value } => {
+                let raw: i64 = value.evaluate_inner(context, remaining)?.as_int()?;
+                Ok(EvalValue::Int(i64::from((raw as u64).count_ones())))
+            }
             Self::Select {
                 condition,
                 if_true,
@@ -302,8 +364,10 @@ mod tests {
             }),
             bit: 2,
         };
+        let field_values = BTreeMap::new();
         let context = EvalContext {
             payload: &[0, 4],
+            field_values: &field_values,
             form_version: 44,
             record_signature: SchemaSignature(*b"TEST"),
         };
@@ -323,8 +387,10 @@ mod tests {
         let expression = Expression::Not {
             value: Box::new(Expression::Bool { value: true }),
         };
+        let field_values = BTreeMap::new();
         let context = EvalContext {
             payload: &[],
+            field_values: &field_values,
             form_version: 0,
             record_signature: SchemaSignature(*b"TEST"),
         };
@@ -349,8 +415,10 @@ mod tests {
             if_true: Box::new(Expression::Int { value: 0 }),
             if_false: Box::new(Expression::Int { value: 1 }),
         };
+        let field_values = BTreeMap::new();
         let context = EvalContext {
             payload: &[],
+            field_values: &field_values,
             form_version: 44,
             record_signature: SchemaSignature(*b"TEST"),
         };
@@ -360,6 +428,29 @@ mod tests {
 
         // then
         assert_eq!(result, EvalValue::Int(1));
+        Ok(())
+    }
+
+    /// Resolves an earlier field and applies bounded count arithmetic.
+    #[test]
+    fn expression_reads_fields_and_computes_counts(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let path = "TEST/payload/Flags".to_owned();
+        let expression = Expression::Multiply {
+            left: Box::new(Expression::BitCount {
+                value: Box::new(Expression::ReadField { path: path.clone() }),
+            }),
+            right: Box::new(Expression::Int { value: 2 }),
+        };
+        let field_values = BTreeMap::from([(path, 0b1011)]);
+        let context = EvalContext {
+            payload: &[],
+            field_values: &field_values,
+            form_version: 0,
+            record_signature: SchemaSignature(*b"TEST"),
+        };
+
+        assert_eq!(expression.evaluate(&context, 16)?, EvalValue::Int(6));
         Ok(())
     }
 }

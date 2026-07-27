@@ -2,7 +2,7 @@
 //!
 //! Ordered matching of record subrecords against the schema grammar.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bethkit_core::{Signature, SubRecord, WritableSubRecord};
 use bethkit_schema::{EvalContext, EvalValue, SchemaNode, SchemaNodeKind};
@@ -209,8 +209,10 @@ fn condition_applies<T: GrammarInput>(
     let payload = subrecords
         .get(state.cursor)
         .map_or(&[][..], GrammarInput::payload);
+    let field_values = BTreeMap::new();
     let context = EvalContext {
         payload,
+        field_values: &field_values,
         form_version,
         record_signature: record_signature.into(),
     };

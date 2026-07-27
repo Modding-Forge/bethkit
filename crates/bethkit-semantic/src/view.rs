@@ -3,6 +3,7 @@
 //! Ordered schema-guided views over parsed records.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use bethkit_core::{FormId, Record, Signature, SubRecord};
 use bethkit_schema::{
@@ -178,8 +179,9 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         unreachable!("definition was filtered to subrecord nodes");
                     };
                     let data: &'record [u8] = subrecord.as_bytes();
+                    let mut field_values = BTreeMap::new();
                     let (value, consumed): (FieldValue<'record>, usize) =
-                        self.decode_node(payload, data, data, 0)?;
+                        self.decode_node(payload, data, data, 0, &mut field_values)?;
                     if consumed != data.len() {
                         return Err(SemanticError::Decode {
                             path: payload.path.clone(),
@@ -474,8 +476,9 @@ impl<'context, 'record> RecordView<'context, 'record> {
         payload: &'a [u8],
         current: &'a [u8],
         offset: usize,
+        field_values: &mut BTreeMap<String, i64>,
     ) -> Result<(FieldValue<'a>, usize)> {
-        if !self.node_applies(node, payload)? {
+        if !self.node_applies(node, payload, field_values)? {
             return Ok((FieldValue::Absent, 0));
         }
 
@@ -498,7 +501,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 let mut values: Vec<NamedValue<'a>> = Vec::with_capacity(fields.len());
                 let mut cursor: usize = 0;
                 for field in fields {
-                    if !self.node_applies(field, payload)? {
+                    if !self.node_applies(field, payload, field_values)? {
                         values.push(NamedValue {
                             node_id: field.id,
                             path: field.path.clone(),
@@ -517,7 +520,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             message: "struct cursor exceeded payload".to_owned(),
                         })?;
                     let (value, consumed): (FieldValue<'a>, usize) =
-                        self.decode_node(field, payload, remaining, offset + cursor)?;
+                        self.decode_node(field, payload, remaining, offset + cursor, field_values)?;
                     values.push(NamedValue {
                         node_id: field.id,
                         path: field.path.clone(),
@@ -585,9 +588,10 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         )
                     }
                     ArrayCount::Remainder => (0, None),
-                    ArrayCount::Expression { .. } | ArrayCount::Callback { .. } => {
-                        (0, Some(self.resolve_array_count(node, count, payload)?))
-                    }
+                    ArrayCount::Expression { .. } | ArrayCount::Callback { .. } => (
+                        0,
+                        Some(self.resolve_array_count(node, count, payload, field_values)?),
+                    ),
                 };
                 if prefix_size > current.len() {
                     return Err(SemanticError::Decode {
@@ -609,8 +613,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         path: node.path.clone(),
                         message: "array cursor exceeded payload".to_owned(),
                     })?;
-                    let (value, consumed) =
-                        self.decode_node(element, payload, remaining, offset + cursor)?;
+                    let (value, consumed) = self.decode_node(
+                        element,
+                        payload,
+                        remaining,
+                        offset + cursor,
+                        field_values,
+                    )?;
                     if consumed == 0 {
                         return Err(SemanticError::Decode {
                             path: element.path.clone(),
@@ -639,13 +648,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 Ok((FieldValue::Array(values), cursor))
             }
             SchemaNodeKind::Union { selector, variants } => {
-                let index = self.select_union_index(node, selector, payload)?;
+                let index = self.select_union_index(node, selector, payload, field_values)?;
                 let variant: &SchemaNode =
                     variants.get(index).ok_or_else(|| SemanticError::Decode {
                         path: node.path.clone(),
                         message: format!("union variant {index} does not exist"),
                     })?;
-                self.decode_node(variant, payload, current, offset)
+                self.decode_node(variant, payload, current, offset, field_values)
             }
             SchemaNodeKind::Custom { decoder, .. } => {
                 let decoded = self
@@ -667,7 +676,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 Ok((decoded.value, decoded.consumed))
             }
             SchemaNodeKind::Terminated { terminator, child } => {
-                let (value, body_size) = self.decode_node(child, payload, current, offset)?;
+                let (value, body_size) =
+                    self.decode_node(child, payload, current, offset, field_values)?;
                 let actual = current
                     .get(body_size)
                     .ok_or_else(|| SemanticError::Decode {
@@ -709,7 +719,22 @@ impl<'context, 'record> RecordView<'context, 'record> {
         let normalized = self
             .context
             .apply_normalizers(&node.path, self.record, decoded)?;
-        apply_float_read_semantics(node, normalized).map(|value| (value, consumed))
+        let value = apply_float_read_semantics(node, normalized)?;
+        match &value {
+            FieldValue::Int(value) => {
+                field_values.insert(node.path.clone(), *value);
+            }
+            FieldValue::UInt(value) | FieldValue::Flags { value, .. } => {
+                if let Ok(value) = i64::try_from(*value) {
+                    field_values.insert(node.path.clone(), value);
+                }
+            }
+            FieldValue::Enumeration { value, .. } => {
+                field_values.insert(node.path.clone(), *value);
+            }
+            _ => {}
+        }
+        Ok((value, consumed))
     }
 
     fn select_union_index(
@@ -717,11 +742,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
         node: &SchemaNode,
         selector: &UnionSelector,
         payload: &[u8],
+        field_values: &BTreeMap<String, i64>,
     ) -> Result<usize> {
         let selected = match selector {
             UnionSelector::Expression(expression) => {
                 let context = EvalContext {
                     payload,
+                    field_values,
                     form_version: self.record.header.form_version,
                     record_signature: self.record.header.signature.into(),
                 };
@@ -759,11 +786,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
         node: &SchemaNode,
         count: &ArrayCount,
         payload: &[u8],
+        field_values: &BTreeMap<String, i64>,
     ) -> Result<usize> {
         let value = match count {
             ArrayCount::Expression { expression } => {
                 let context = EvalContext {
                     payload,
+                    field_values,
                     form_version: self.record.header.form_version,
                     record_signature: self.record.header.signature.into(),
                 };
@@ -840,12 +869,18 @@ impl<'context, 'record> RecordView<'context, 'record> {
         }
     }
 
-    fn node_applies(&self, node: &SchemaNode, payload: &[u8]) -> Result<bool> {
+    fn node_applies(
+        &self,
+        node: &SchemaNode,
+        payload: &[u8],
+        field_values: &BTreeMap<String, i64>,
+    ) -> Result<bool> {
         let Some(condition) = &node.condition else {
             return Ok(true);
         };
         let context = EvalContext {
             payload,
+            field_values,
             form_version: self.record.header.form_version,
             record_signature: self.record.header.signature.into(),
         };

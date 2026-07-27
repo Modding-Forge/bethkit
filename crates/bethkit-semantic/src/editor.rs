@@ -627,6 +627,7 @@ impl RecordEditor {
         variants: &'a [SchemaNode],
         value: &OwnedFieldValue,
     ) -> Result<&'a SchemaNode> {
+        let field_values = self.expression_field_values();
         for (index, variant) in variants.iter().enumerate() {
             let Ok(encoded) = self.encode_node(variant, value) else {
                 continue;
@@ -635,6 +636,7 @@ impl RecordEditor {
                 UnionSelector::Expression(expression) => {
                     let context = EvalContext {
                         payload: &encoded,
+                        field_values: &field_values,
                         form_version: self.record.form_version,
                         record_signature: self.record.signature.into(),
                     };
@@ -685,6 +687,14 @@ impl RecordEditor {
             &node.path,
             "value does not match the selected union variant",
         ))
+    }
+
+    fn expression_field_values(&self) -> BTreeMap<String, i64> {
+        let mut output = BTreeMap::new();
+        for ((path, _), value) in &self.decoded_values {
+            collect_expression_field_values(path, value, &mut output);
+        }
+        output
     }
 
     fn owned_to_handler_value(
@@ -876,6 +886,37 @@ impl RecordEditor {
             Signature::from(*signature),
             self.encode_node(payload, value)?,
         ))
+    }
+}
+
+fn collect_expression_field_values(
+    path: &str,
+    value: &FieldValue<'_>,
+    output: &mut BTreeMap<String, i64>,
+) {
+    match value {
+        FieldValue::Int(value) => {
+            output.insert(path.to_owned(), *value);
+        }
+        FieldValue::UInt(value) | FieldValue::Flags { value, .. } => {
+            if let Ok(value) = i64::try_from(*value) {
+                output.insert(path.to_owned(), value);
+            }
+        }
+        FieldValue::Enumeration { value, .. } => {
+            output.insert(path.to_owned(), *value);
+        }
+        FieldValue::Struct(values) => {
+            for value in values {
+                collect_expression_field_values(&value.path, &value.value, output);
+            }
+        }
+        FieldValue::Array(values) => {
+            for value in values {
+                collect_expression_field_values(path, value, output);
+            }
+        }
+        _ => {}
     }
 }
 
