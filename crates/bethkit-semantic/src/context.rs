@@ -522,6 +522,27 @@ impl SemanticContext {
         }
     }
 
+    /// Returns xEdit's dynamic editor ID for a main record.
+    ///
+    /// `None` means the record has no custom editor-ID getter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the callback is duplicated,
+    /// not executable, or returns an invalid result.
+    pub fn record_editor_id(&self, record: &Record) -> Result<Option<String>> {
+        let Some(binding) = self.record_metadata_binding(record, "record.get_editor_id")? else {
+            return Ok(None);
+        };
+        match self.invoke_record_metadata(record, binding)? {
+            HandlerOutput::Text(value) => Ok(Some(value)),
+            _ => Err(invalid_record_metadata_output(
+                binding,
+                "editor-ID callback returned a non-text result",
+            )),
+        }
+    }
+
     pub(crate) fn apply_normalizers<'a>(
         &self,
         path: &str,

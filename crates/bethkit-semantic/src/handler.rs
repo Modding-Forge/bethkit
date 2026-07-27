@@ -306,6 +306,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(MorrowindReferenceFormId));
         registry.register(Arc::new(NullRecordFormId));
         registry.register(Arc::new(MorrowindGridIdentity));
+        registry.register(Arc::new(MorrowindScriptEditorId));
         registry.register(Arc::new(FormatRgb));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
@@ -703,6 +704,84 @@ impl SemanticHandler for MorrowindGridIdentity {
             None => String::new(),
         };
         Ok(HandlerOutput::Text(identity))
+    }
+}
+
+struct MorrowindScriptEditorId;
+
+impl SemanticHandler for MorrowindScriptEditorId {
+    fn id(&self) -> &'static str {
+        "metadata.morrowind.script_editor_id"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        match invocation.phase {
+            HandlerPhase::RecordMetadata => {
+                let record = require_source_record(self.id(), &invocation)?;
+                if record.header.signature != Signature(*b"SCPT") {
+                    return Err(SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: format!(
+                            "record {} is not a Morrowind script",
+                            record.header.signature
+                        ),
+                    });
+                }
+                let Some(header) = record.get(Signature(*b"SCHD"))? else {
+                    return Ok(HandlerOutput::Text(String::new()));
+                };
+                let bytes = header.as_bytes();
+                if bytes.len() < 32 {
+                    return Err(SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: format!(
+                            "SCPT header is truncated: expected at least 32 bytes, got {}",
+                            bytes.len()
+                        ),
+                    });
+                }
+                let end = bytes[..32].iter().position(|byte| *byte == 0).unwrap_or(32);
+                let (editor_id, had_errors) =
+                    encoding_rs::WINDOWS_1252.decode_without_bom_handling(&bytes[..end]);
+                if had_errors {
+                    return Err(SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: "SCPT editor ID is not valid Windows-1252".to_owned(),
+                    });
+                }
+                Ok(HandlerOutput::Text(editor_id.into_owned()))
+            }
+            HandlerPhase::AfterSet => {
+                let field_path = invocation
+                    .context
+                    .configuration
+                    .get("field_path")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: "SCPT editor ID setter requires `field_path`".to_owned(),
+                    })?;
+                let value = match invocation.value {
+                    Some(FieldValue::String(value)) => value.to_string(),
+                    _ => {
+                        return Err(SemanticError::Handler {
+                            handler: self.id().to_owned(),
+                            message: "SCPT editor ID setter requires a string value".to_owned(),
+                        });
+                    }
+                };
+                Ok(HandlerOutput::Mutations(vec![HandlerMutation::Set {
+                    path: field_path.to_owned(),
+                    occurrence: 0,
+                    value: OwnedFieldValue::String(value),
+                }]))
+            }
+            _ => Ok(HandlerOutput::None),
+        }
     }
 }
 
@@ -2246,6 +2325,54 @@ mod tests {
                 None,
             )?,
             HandlerOutput::FormId(FormId::NULL)
+        ));
+        Ok(())
+    }
+
+    /// Reads and updates the fixed SCPT header name used as xEdit's editor ID.
+    #[test]
+    fn morrowind_script_editor_id_matches_xedit() -> Result<()> {
+        let mut header = vec![0_u8; 52];
+        header[..11].copy_from_slice(b"HelloWorld\0");
+        let record = test_record(*b"SCPT", &[(*b"SCHD", header)])?;
+        let binding = test_metadata_binding(
+            "record.get_editor_id",
+            "metadata.morrowind.script_editor_id",
+            serde_json::json!({
+                "field_path": "SCPT/0:Script Header/payload/0:Name"
+            }),
+        );
+        let context =
+            HandlerRecordContext::new(Signature(*b"SCPT"), FormId::NULL, 0, SchemaGame::Morrowind);
+        let handlers = SemanticHandlerRegistry::builtin();
+
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &binding,
+                context,
+                Some(&record),
+                HandlerPhase::RecordMetadata,
+                None,
+                None,
+            )?,
+            HandlerOutput::Text(value) if value == "HelloWorld"
+        ));
+        let new_editor_id = FieldValue::String(Cow::Borrowed("NewScript"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::AfterSet,
+                Some(&new_editor_id),
+                None,
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations
+                    == vec![HandlerMutation::Set {
+                        path: "SCPT/0:Script Header/payload/0:Name".to_owned(),
+                        occurrence: 0,
+                        value: OwnedFieldValue::String("NewScript".to_owned()),
+                    }]
         ));
         Ok(())
     }

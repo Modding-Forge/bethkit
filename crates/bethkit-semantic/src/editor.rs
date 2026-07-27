@@ -103,6 +103,65 @@ impl RecordEditor {
         Ok(())
     }
 
+    /// Sets a record editor ID through its classified xEdit callback.
+    ///
+    /// Returns `false` when the record schema has no custom editor-ID setter.
+    /// The callback mutation is applied transactionally to its containing
+    /// subrecord, including nested fixed-size fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the callback is duplicated,
+    /// not executable, or returns an invalid mutation. Returns
+    /// [`SemanticError::Encode`] when the replacement cannot be encoded.
+    pub fn set_record_editor_id(&mut self, editor_id: &str) -> Result<bool> {
+        let record_path = self.record.signature.to_string();
+        let mut bindings = self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| {
+                binding.path == record_path && binding.callback_id == "record.set_editor_id"
+            });
+        let Some(binding) = bindings.next() else {
+            return Ok(false);
+        };
+        if bindings.next().is_some() {
+            return Err(SemanticError::Handler {
+                handler: "record.set_editor_id".to_owned(),
+                message: "record editor-ID callback is bound more than once".to_owned(),
+            });
+        }
+        if !matches!(
+            binding.implementation,
+            CallbackImplementation::BuiltIn { .. } | CallbackImplementation::CustomHandler { .. }
+        ) {
+            return Err(SemanticError::Handler {
+                handler: "record.set_editor_id".to_owned(),
+                message: "record editor-ID callback is not executable".to_owned(),
+            });
+        }
+        let value = FieldValue::String(Cow::Owned(editor_id.to_owned()));
+        let mutations = match self.handlers.invoke(
+            binding,
+            self.handler_record(),
+            HandlerPhase::AfterSet,
+            Some(&value),
+            None,
+        )? {
+            HandlerOutput::Mutations(mutations) => mutations,
+            _ => {
+                return Err(SemanticError::Handler {
+                    handler: "record.set_editor_id".to_owned(),
+                    message: "record editor-ID callback returned invalid mutations".to_owned(),
+                });
+            }
+        };
+        self.apply_record_metadata_mutations(mutations)?;
+        Ok(true)
+    }
+
     /// Inserts a new top-level field after existing occurrences of its path.
     ///
     /// # Errors
@@ -858,6 +917,80 @@ impl RecordEditor {
         Ok(())
     }
 
+    fn apply_record_metadata_mutations(&mut self, mutations: Vec<HandlerMutation>) -> Result<()> {
+        let [HandlerMutation::Set {
+            path,
+            occurrence,
+            value,
+        }] = mutations.as_slice()
+        else {
+            return Err(SemanticError::Handler {
+                handler: "record.set_editor_id".to_owned(),
+                message: "record editor-ID callback must return one set mutation".to_owned(),
+            });
+        };
+        let schema = self
+            .registry
+            .get(self.record.signature)
+            .ok_or_else(|| SemanticError::MissingRecordSchema(self.record.signature.to_string()))?;
+        let parent = find_containing_subrecord(&schema.root, path)
+            .ok_or_else(|| SemanticError::MissingPath(path.clone()))?
+            .clone();
+        let parent_occurrences: Vec<usize> = self
+            .decoded_values
+            .keys()
+            .filter_map(|(candidate, occurrence)| {
+                (candidate == &parent.path).then_some(*occurrence)
+            })
+            .collect();
+        let [parent_occurrence] = parent_occurrences.as_slice() else {
+            return Err(SemanticError::Handler {
+                handler: "record.set_editor_id".to_owned(),
+                message: format!(
+                    "record metadata field {} must have exactly one containing subrecord",
+                    path
+                ),
+            });
+        };
+        let current = self
+            .decoded_values
+            .get(&(parent.path.clone(), *parent_occurrence))
+            .ok_or_else(|| SemanticError::MissingOccurrence {
+                path: parent.path.clone(),
+                occurrence: *parent_occurrence,
+            })?;
+        let mut updated = handler_to_owned_value(current.to_handler_value(), &parent.path)?;
+        let mut target_occurrence = *occurrence;
+        let mut replacement = Some(value.clone());
+        if !self.set_nested_value(
+            &parent,
+            &mut updated,
+            path,
+            &mut target_occurrence,
+            &mut replacement,
+        )? {
+            return Err(SemanticError::MissingOccurrence {
+                path: path.clone(),
+                occurrence: *occurrence,
+            });
+        }
+        let (signature, encoded) = self.encode_path(&parent.path, &updated)?;
+        let mut candidate = clone_record(&self.record);
+        let index = self.assigned_subrecord_index(&candidate, &parent.path, *parent_occurrence)?;
+        if candidate.subrecords[index].signature != signature {
+            return Err(SemanticError::Encode {
+                path: parent.path,
+                message: "assigned subrecord signature does not match schema".to_owned(),
+            });
+        }
+        candidate.subrecords[index].data = encoded;
+        let decoded = self.owned_to_handler_value(&parent, &updated)?;
+        self.record = candidate;
+        self.decoded_values
+            .insert((parent.path, *parent_occurrence), decoded);
+        Ok(())
+    }
+
     fn remove_decoded_occurrence(&mut self, path: &str, occurrence: usize) {
         self.decoded_values.remove(&(path.to_owned(), occurrence));
         let shifted = self
@@ -1040,6 +1173,40 @@ fn find_node_by_path<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaN
     children
         .into_iter()
         .find_map(|child| find_node_by_path(child, path))
+}
+
+fn find_containing_subrecord<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaNode> {
+    fn find<'a>(
+        node: &'a SchemaNode,
+        path: &str,
+        parent: Option<&'a SchemaNode>,
+    ) -> Option<&'a SchemaNode> {
+        let parent = if matches!(node.kind, SchemaNodeKind::Subrecord { .. }) {
+            Some(node)
+        } else {
+            parent
+        };
+        if node.path == path {
+            return parent;
+        }
+        let children: Vec<&SchemaNode> = match &node.kind {
+            SchemaNodeKind::Sequence { children } => children.iter().collect(),
+            SchemaNodeKind::Choice { alternatives } => alternatives.iter().collect(),
+            SchemaNodeKind::Repeat { child, .. }
+            | SchemaNodeKind::Subrecord { payload: child, .. }
+            | SchemaNodeKind::Array { element: child, .. }
+            | SchemaNodeKind::Compressed { child, .. }
+            | SchemaNodeKind::Terminated { child, .. } => vec![child],
+            SchemaNodeKind::Struct { fields } => fields.iter().collect(),
+            SchemaNodeKind::Union { variants, .. } => variants.iter().collect(),
+            _ => Vec::new(),
+        };
+        children
+            .into_iter()
+            .find_map(|child| find(child, path, parent))
+    }
+
+    find(node, path, None)
 }
 
 fn encode_primitive(
@@ -1503,6 +1670,151 @@ mod tests {
             editor.encode_node(&union, &OwnedFieldValue::UInt(7))?,
             vec![7, 0]
         );
+        Ok(())
+    }
+
+    /// Applies a record-level editor-ID callback to a nested fixed string atomically.
+    #[test]
+    fn record_editor_id_updates_nested_morrowind_script_name() -> Result<()> {
+        let name_path = "SCPT/0:Script Header/payload/0:Name";
+        let string_field = SchemaNode {
+            id: SchemaNodeId(3),
+            path: name_path.to_owned(),
+            name: "Name".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::String {
+                    string: StringType {
+                        encoding: "windows_1252".to_owned(),
+                        localized: false,
+                        zero_terminated: false,
+                        fixed_length: Some(32),
+                        length_prefix: None,
+                        trailing_terminator: None,
+                        allowed_values: Vec::new(),
+                    },
+                },
+            },
+        };
+        let mut fields = vec![string_field];
+        for (index, name) in [
+            "NumShorts",
+            "NumLongs",
+            "NumFloats",
+            "ScriptDataSize",
+            "LocalVarSize",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            fields.push(SchemaNode {
+                id: SchemaNodeId(4 + index as u32),
+                path: format!("SCPT/0:Script Header/payload/{}:{name}", index + 1),
+                name: name.to_owned(),
+                required: true,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Primitive {
+                    primitive: PrimitiveType::Integer {
+                        integer: IntegerType {
+                            width: 4,
+                            signed: true,
+                            byte_order: ByteOrder::LittleEndian,
+                        },
+                    },
+                },
+            });
+        }
+        let root = SchemaNode {
+            id: SchemaNodeId(0),
+            path: "SCPT".to_owned(),
+            name: "Script".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: SchemaNodeId(1),
+                    path: "SCPT/0:Script Header".to_owned(),
+                    name: "Script Header".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Subrecord {
+                        signature: SchemaSignature(*b"SCHD"),
+                        payload: Box::new(SchemaNode {
+                            id: SchemaNodeId(2),
+                            path: "SCPT/0:Script Header/payload".to_owned(),
+                            name: "Structure".to_owned(),
+                            required: true,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Struct { fields },
+                        }),
+                    },
+                }],
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Morrowind;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "metadata.morrowind.script_editor_id".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"SCPT"),
+                name: "Script".to_owned(),
+                root,
+            }],
+            vec![CallbackBinding {
+                path: "SCPT".to_owned(),
+                callback_id: "record.set_editor_id".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "11".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "metadata.morrowind.script_editor_id".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({ "field_path": name_path }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut header = vec![0_u8; 52];
+        header[..10].copy_from_slice(b"OldScript\0");
+        for (index, value) in [1_i32, 2, 3, 4, 5].into_iter().enumerate() {
+            let start = 32 + index * 4;
+            header[start..start + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"SCPT");
+        bytes.extend_from_slice(&58_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(b"SCHD");
+        bytes.extend_from_slice(&52_u16.to_le_bytes());
+        bytes.extend_from_slice(&header);
+        let mut cursor = bethkit_io::SliceCursor::new(&bytes);
+        let record = Record::parse_header(&mut cursor, &bethkit_core::GameContext::sse())?;
+        let mut editor = context.edit(&record, false)?;
+
+        assert!(editor.set_record_editor_id("NewScript")?);
+        let writable = editor.into_writable_record();
+        assert_eq!(&writable.subrecords[0].data[..9], b"NewScript");
+        assert!(writable.subrecords[0].data[9..32]
+            .iter()
+            .all(|byte| *byte == 0));
+        assert_eq!(&writable.subrecords[0].data[32..], &header[32..]);
         Ok(())
     }
 
