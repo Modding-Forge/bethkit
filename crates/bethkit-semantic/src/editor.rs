@@ -998,6 +998,32 @@ impl RecordEditor {
                     record.subrecords.remove(index);
                     remove_decoded_occurrence(decoded_values, &path, occurrence);
                 }
+                HandlerMutation::RemoveAll { path } => {
+                    let node = self.find_node(&path)?;
+                    let SchemaNodeKind::Subrecord { signature, .. } = &node.kind else {
+                        return Err(SemanticError::Encode {
+                            path,
+                            message: "handler mutation path is not a subrecord".to_owned(),
+                        });
+                    };
+                    let signature = Signature::from(*signature);
+                    loop {
+                        let index = match self.assigned_subrecord_index(record, &path, 0) {
+                            Ok(index) => index,
+                            Err(SemanticError::MissingOccurrence { .. }) => break,
+                            Err(error) => return Err(error),
+                        };
+                        if record.subrecords[index].signature != signature {
+                            return Err(SemanticError::Encode {
+                                path,
+                                message: "assigned subrecord signature does not match schema"
+                                    .to_owned(),
+                            });
+                        }
+                        record.subrecords.remove(index);
+                        remove_decoded_occurrence(decoded_values, &path, 0);
+                    }
+                }
                 HandlerMutation::SynchronizeCount {
                     path,
                     occurrence,
@@ -1323,6 +1349,12 @@ impl RecordEditor {
                         )?,
                         path,
                     },
+                    HandlerMutation::RemoveAll { .. } => {
+                        return Err(SemanticError::Handler {
+                            handler: "def.after_set".to_owned(),
+                            message: "scoped callbacks cannot remove all subrecords".to_owned(),
+                        });
+                    }
                     HandlerMutation::SynchronizeCount {
                         path,
                         occurrence,
@@ -3098,6 +3130,36 @@ mod tests {
             .subrecords
             .iter()
             .all(|subrecord| subrecord.signature != Signature(*b"VCNT")));
+        Ok(())
+    }
+
+    /// Removes every grammar-assigned occurrence of a repeated subrecord.
+    #[test]
+    fn editor_removes_all_repeated_subrecords_transactionally() -> Result<()> {
+        let editor = editor_with_repeated_counter_groups()?;
+        let mut record = clone_record(&editor.record);
+        let mut decoded_values = editor.decoded_values.clone();
+
+        editor.apply_mutations_with_values(
+            &mut record,
+            &mut decoded_values,
+            vec![HandlerMutation::RemoveAll {
+                path: "TEST/0:Groups/repeat/0:Group/1:Values".to_owned(),
+            }],
+        )?;
+
+        assert!(record
+            .subrecords
+            .iter()
+            .all(|subrecord| subrecord.signature != Signature(*b"VALU")));
+        assert_eq!(
+            record
+                .subrecords
+                .iter()
+                .filter(|subrecord| subrecord.signature == Signature(*b"VCNT"))
+                .count(),
+            2
+        );
         Ok(())
     }
 

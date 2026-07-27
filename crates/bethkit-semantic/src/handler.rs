@@ -174,6 +174,11 @@ pub enum HandlerMutation {
         /// Zero-based occurrence.
         occurrence: usize,
     },
+    /// Remove every occurrence of one subrecord field.
+    RemoveAll {
+        /// Stable schema path.
+        path: String,
+    },
     /// Make an integer counter match a decoded collection length.
     SynchronizeCount {
         /// Stable path of the counter subrecord.
@@ -346,6 +351,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
+        registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(RefreshSiblingUnions));
         registry.register(Arc::new(InvalidateConflicts));
         registry.register(Arc::new(CtdaTypeFormatter));
@@ -1642,6 +1648,44 @@ impl SemanticHandler for MessageDisplayTimeAfterSet {
             },
         ]))
     }
+}
+
+struct FormListEditorIdAfterSet;
+
+impl SemanticHandler for FormListEditorIdAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.form_list_editor_id"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(FieldValue::String(new_value)) = invocation.value else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(FieldValue::String(old_value)) = invocation.old_value else {
+            return Ok(HandlerOutput::None);
+        };
+        if has_ordered_list_suffix(old_value) == has_ordered_list_suffix(new_value) {
+            return Ok(HandlerOutput::None);
+        }
+        let entry_path =
+            configured_text(self.id(), invocation.context.configuration, "entry_path")?;
+        Ok(HandlerOutput::Mutations(vec![HandlerMutation::RemoveAll {
+            path: entry_path.to_owned(),
+        }]))
+    }
+}
+
+fn has_ordered_list_suffix(value: &str) -> bool {
+    value
+        .get(value.len().saturating_sub("OrderedList".len())..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case("OrderedList"))
 }
 
 struct RefreshSiblingUnions;
@@ -3465,6 +3509,64 @@ mod tests {
             Some(&old_message_box),
         )?;
         assert!(matches!(unchanged, HandlerOutput::None));
+
+        let container_replay =
+            handlers.invoke(&binding, record, HandlerPhase::AfterSet, None, None)?;
+        assert!(matches!(container_replay, HandlerOutput::None));
+        Ok(())
+    }
+
+    /// Clears FLST entries only when the OrderedList suffix state changes.
+    #[test]
+    fn form_list_editor_id_clears_entries_on_ordering_transition() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "FLST/0:Editor ID".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-form-list-editor-id".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.form_list_editor_id".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "entry_path": "FLST/1:FormIDs/repeat/0:FormID"
+                    }),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let record =
+            HandlerRecordContext::new(Signature(*b"FLST"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let unordered = FieldValue::String(std::borrow::Cow::Borrowed("ExampleList"));
+        let ordered = FieldValue::String(std::borrow::Cow::Borrowed("MyOrderedList"));
+
+        let cleared = handlers.invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&ordered),
+            Some(&unordered),
+        )?;
+        assert!(matches!(
+            cleared,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::RemoveAll { path }]
+                        if path == "FLST/1:FormIDs/repeat/0:FormID"
+                )
+        ));
+
+        let case_only = handlers.invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::String(std::borrow::Cow::Borrowed(
+                "myorderedlist",
+            ))),
+            Some(&ordered),
+        )?;
+        assert!(matches!(case_only, HandlerOutput::None));
 
         let container_replay =
             handlers.invoke(&binding, record, HandlerPhase::AfterSet, None, None)?;
