@@ -27,7 +27,7 @@ pub use editor::RecordEditor;
 pub use error::{Result, SemanticError};
 pub use handler::{
     HandlerContext, HandlerInvocation, HandlerMutation, HandlerOutput, HandlerPhase,
-    HandlerRecordContext, RecordGridCell, ResourceHashResolver, SemanticHandler,
+    HandlerRecordContext, RecordGridCell, RecordIndexKey, ResourceHashResolver, SemanticHandler,
     SemanticHandlerRegistry, ValueFormat, WwiseGuidInfo, WwiseGuidResolver,
 };
 pub use validation::{Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationReport};

@@ -14,7 +14,8 @@ use bethkit_schema::{
 use crate::{value::handler_to_owned_value, OwnedFieldValue};
 use crate::{
     DecoderRegistry, FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, RecordEditor,
-    RecordGridCell, RecordView, Result, SemanticError, SemanticHandlerRegistry, ValueFormat,
+    RecordGridCell, RecordIndexKey, RecordView, Result, SemanticError, SemanticHandlerRegistry,
+    ValueFormat,
 };
 
 /// Runtime context for schema-guided operations on one game mode.
@@ -539,6 +540,28 @@ impl SemanticContext {
             _ => Err(invalid_record_metadata_output(
                 binding,
                 "editor-ID callback returned a non-text result",
+            )),
+        }
+    }
+
+    /// Returns xEdit's dynamic named index keys for a main record.
+    ///
+    /// `None` means the record has no custom index-key callback. An empty
+    /// vector means the callback ran but the current record contributes no key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the callback is duplicated,
+    /// not executable, or returns an invalid result.
+    pub fn record_index_keys(&self, record: &Record) -> Result<Option<Vec<RecordIndexKey>>> {
+        let Some(binding) = self.record_metadata_binding(record, "record.index_keys")? else {
+            return Ok(None);
+        };
+        match self.invoke_record_metadata(record, binding)? {
+            HandlerOutput::IndexKeys(value) => Ok(Some(value)),
+            _ => Err(invalid_record_metadata_output(
+                binding,
+                "index-key callback returned an invalid result",
             )),
         }
     }

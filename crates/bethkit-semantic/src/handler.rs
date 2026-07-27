@@ -106,6 +106,15 @@ pub struct RecordGridCell {
     pub y: i32,
 }
 
+/// One named xEdit record-index entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordIndexKey {
+    /// Stable Bethkit name for the xEdit index.
+    pub index: String,
+    /// Canonical string representation of the indexed value.
+    pub key: String,
+}
+
 impl HandlerRecordContext {
     /// Creates callback record metadata.
     pub const fn new(
@@ -198,7 +207,7 @@ pub enum HandlerOutput {
     /// Exterior-cell grid coordinates.
     GridCell(RecordGridCell),
     /// Record index keys.
-    IndexKeys(Vec<String>),
+    IndexKeys(Vec<RecordIndexKey>),
     /// Transactional record edits.
     Mutations(Vec<HandlerMutation>),
 }
@@ -307,6 +316,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(NullRecordFormId));
         registry.register(Arc::new(MorrowindGridIdentity));
         registry.register(Arc::new(MorrowindScriptEditorId));
+        registry.register(Arc::new(IntegerRecordIndexKey));
+        registry.register(Arc::new(StarfieldAvmdIndexKey));
         registry.register(Arc::new(FormatRgb));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
@@ -785,6 +796,83 @@ impl SemanticHandler for MorrowindScriptEditorId {
     }
 }
 
+struct IntegerRecordIndexKey;
+
+impl SemanticHandler for IntegerRecordIndexKey {
+    fn id(&self) -> &'static str {
+        "metadata.integer_index_key"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::RecordMetadata {
+            return Ok(HandlerOutput::None);
+        }
+        let record = require_source_record(self.id(), &invocation)?;
+        let signature = configured_signature(
+            self.id(),
+            invocation.context.configuration,
+            "subrecord_signature",
+        )?;
+        let index = configured_text(self.id(), invocation.context.configuration, "index")?;
+        let Some(subrecord) = record.get(signature)? else {
+            return Ok(HandlerOutput::IndexKeys(Vec::new()));
+        };
+        Ok(HandlerOutput::IndexKeys(vec![RecordIndexKey {
+            index: index.to_owned(),
+            key: subrecord.as_u32()?.to_string(),
+        }]))
+    }
+}
+
+struct StarfieldAvmdIndexKey;
+
+impl SemanticHandler for StarfieldAvmdIndexKey {
+    fn id(&self) -> &'static str {
+        "metadata.starfield.avmd_index_key"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::RecordMetadata {
+            return Ok(HandlerOutput::None);
+        }
+        let record = require_source_record(self.id(), &invocation)?;
+        if record.header.signature != Signature(*b"AVMD") {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("record {} is not AVMD", record.header.signature),
+            });
+        }
+        let (Some(kind), Some(name)) = (
+            record.get(Signature(*b"MNAM"))?,
+            record.get(Signature(*b"TNAM"))?,
+        ) else {
+            return Ok(HandlerOutput::IndexKeys(Vec::new()));
+        };
+        let index = match kind.as_u32()? {
+            1 => "simple_group",
+            2 => "complex_group",
+            3 => "modulation",
+            _ => return Ok(HandlerOutput::IndexKeys(Vec::new())),
+        };
+        let name = name.as_zstring()?;
+        if name.is_empty() {
+            return Ok(HandlerOutput::IndexKeys(Vec::new()));
+        }
+        Ok(HandlerOutput::IndexKeys(vec![RecordIndexKey {
+            index: index.to_owned(),
+            key: name.to_owned(),
+        }]))
+    }
+}
+
 fn require_source_record<'a>(
     handler: &str,
     invocation: &'a HandlerInvocation<'_>,
@@ -795,6 +883,42 @@ fn require_source_record<'a>(
             handler: handler.to_owned(),
             message: "record metadata callback requires the source record".to_owned(),
         })
+}
+
+fn configured_text<'a>(
+    handler: &str,
+    configuration: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a str> {
+    configuration
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("record metadata callback requires string configuration `{key}`"),
+        })
+}
+
+fn configured_signature(
+    handler: &str,
+    configuration: &serde_json::Value,
+    key: &str,
+) -> Result<Signature> {
+    let value = configured_text(handler, configuration, key)?;
+    let bytes: [u8; 4] = value
+        .as_bytes()
+        .try_into()
+        .map_err(|_| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("record metadata configuration `{key}` must be four ASCII bytes"),
+        })?;
+    if !bytes.iter().all(u8::is_ascii) {
+        return Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("record metadata configuration `{key}` must be four ASCII bytes"),
+        });
+    }
+    Ok(Signature(bytes))
 }
 
 fn configured_byte(handler: &str, configuration: &serde_json::Value, key: &str) -> Result<u8> {
@@ -2372,6 +2496,77 @@ mod tests {
                         path: "SCPT/0:Script Header/payload/0:Name".to_owned(),
                         occurrence: 0,
                         value: OwnedFieldValue::String("NewScript".to_owned()),
+                    }]
+        ));
+        Ok(())
+    }
+
+    /// Builds Starfield's integer and AVMD named indexes exactly like xEdit.
+    #[test]
+    fn starfield_record_index_keys_match_xedit() -> Result<()> {
+        let collision = test_record(*b"COLL", &[(*b"BNAM", 42_u32.to_le_bytes().to_vec())])?;
+        let collision_binding = test_metadata_binding(
+            "record.index_keys",
+            "metadata.integer_index_key",
+            serde_json::json!({
+                "subrecord_signature": "BNAM",
+                "index": "collision_layer"
+            }),
+        );
+        let avmd = test_record(
+            *b"AVMD",
+            &[
+                (*b"MNAM", 2_u32.to_le_bytes().to_vec()),
+                (*b"TNAM", b"SurfaceGroup\0".to_vec()),
+            ],
+        )?;
+        let avmd_binding = test_metadata_binding(
+            "record.index_keys",
+            "metadata.starfield.avmd_index_key",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &collision_binding,
+                HandlerRecordContext::new(
+                    Signature(*b"COLL"),
+                    FormId::NULL,
+                    0,
+                    SchemaGame::Starfield,
+                ),
+                Some(&collision),
+                HandlerPhase::RecordMetadata,
+                None,
+                None,
+            )?,
+            HandlerOutput::IndexKeys(keys)
+                if keys
+                    == vec![RecordIndexKey {
+                        index: "collision_layer".to_owned(),
+                        key: "42".to_owned(),
+                    }]
+        ));
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &avmd_binding,
+                HandlerRecordContext::new(
+                    Signature(*b"AVMD"),
+                    FormId::NULL,
+                    0,
+                    SchemaGame::Starfield,
+                ),
+                Some(&avmd),
+                HandlerPhase::RecordMetadata,
+                None,
+                None,
+            )?,
+            HandlerOutput::IndexKeys(keys)
+                if keys
+                    == vec![RecordIndexKey {
+                        index: "complex_group".to_owned(),
+                        key: "SurfaceGroup".to_owned(),
                     }]
         ));
         Ok(())
