@@ -28,7 +28,7 @@ pub struct Field<'a> {
     pub name: String,
     /// Source subrecord signature.
     pub subrecord_signature: Signature,
-    /// Zero-based occurrence of the signature.
+    /// Zero-based occurrence of the stable path, or signature for raw fields.
     pub occurrence: usize,
     /// Byte span inside the subrecord payload.
     pub span: ByteSpan,
@@ -156,18 +156,24 @@ impl<'context, 'record> RecordView<'context, 'record> {
             self.record.header.form_version,
             subrecords,
         )?;
-        let mut occurrences: std::collections::BTreeMap<Signature, usize> =
+        let mut signature_occurrences: std::collections::BTreeMap<Signature, usize> =
+            std::collections::BTreeMap::new();
+        let mut path_occurrences: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
         let mut fields: Vec<Field<'record>> = Vec::with_capacity(subrecords.len());
 
         for (index, subrecord) in subrecords.iter().enumerate() {
-            let occurrence: usize = *occurrences
+            let signature_occurrence: usize = *signature_occurrences
                 .entry(subrecord.signature)
                 .and_modify(|value| *value += 1)
                 .or_insert(0);
             let definition = grammar.assignments[index];
             match definition {
                 Some(node) => {
+                    let occurrence = *path_occurrences
+                        .entry(node.path.clone())
+                        .and_modify(|value| *value += 1)
+                        .or_insert(0);
                     let SchemaNodeKind::Subrecord { payload, .. } = &node.kind else {
                         unreachable!("definition was filtered to subrecord nodes");
                     };
@@ -199,7 +205,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             "{}.{}.{}",
                             if declared { "unmatched" } else { "unknown" },
                             subrecord.signature,
-                            occurrence
+                            signature_occurrence
                         ),
                         name: if declared {
                             "Out-of-order known subrecord".to_owned()
@@ -207,7 +213,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             "Unknown subrecord".to_owned()
                         },
                         subrecord_signature: subrecord.signature,
-                        occurrence,
+                        occurrence: signature_occurrence,
                         span: ByteSpan {
                             start: 0,
                             end: data.len(),

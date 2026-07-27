@@ -12,8 +12,9 @@ use bethkit_schema::{
 
 use crate::value::{float_to_raw, handler_to_owned_value};
 use crate::{
-    FieldValue, HandlerMutation, HandlerOutput, HandlerPhase, HandlerRecordContext,
-    OwnedFieldValue, Result, SemanticContext, SemanticError, SemanticHandlerRegistry,
+    grammar::interpret_writable, FieldValue, HandlerMutation, HandlerOutput, HandlerPhase,
+    HandlerRecordContext, OwnedFieldValue, Result, SemanticContext, SemanticError,
+    SemanticHandlerRegistry,
 };
 
 /// Lossless editor for one record.
@@ -72,7 +73,7 @@ impl RecordEditor {
         })
     }
 
-    /// Replaces an existing top-level field occurrence with a typed value.
+    /// Replaces an existing top-level schema-path occurrence with a typed value.
     ///
     /// # Errors
     ///
@@ -80,25 +81,13 @@ impl RecordEditor {
     /// invalid for the loaded schema.
     pub fn set(&mut self, path: &str, occurrence: usize, value: &OwnedFieldValue) -> Result<()> {
         let node: &SchemaNode = self.find_node(path)?;
-        let SchemaNodeKind::Subrecord { signature, payload } = &node.kind else {
+        let SchemaNodeKind::Subrecord { payload, .. } = &node.kind else {
             return Err(SemanticError::Encode {
                 path: path.to_owned(),
                 message: "only top-level subrecords can be replaced".to_owned(),
             });
         };
-        let target_signature: Signature = (*signature).into();
-        let index: usize = self
-            .record
-            .subrecords
-            .iter()
-            .enumerate()
-            .filter(|(_, subrecord)| subrecord.signature == target_signature)
-            .nth(occurrence)
-            .map(|(index, _)| index)
-            .ok_or_else(|| SemanticError::MissingOccurrence {
-                path: path.to_owned(),
-                occurrence,
-            })?;
+        let index = self.assigned_subrecord_index(&self.record, path, occurrence)?;
         let normalized = self.normalize_value(&payload.path, value)?;
         let old_value = self.decoded_values.get(&(path.to_owned(), occurrence));
         let (normalized, mutations) = self.apply_after_set_tree(payload, &normalized, old_value)?;
@@ -113,8 +102,7 @@ impl RecordEditor {
         Ok(())
     }
 
-    /// Inserts a new top-level field after existing occurrences of its
-    /// signature.
+    /// Inserts a new top-level field after existing occurrences of its path.
     ///
     /// # Errors
     ///
@@ -128,30 +116,8 @@ impl RecordEditor {
             });
         };
         let target_signature: Signature = (*signature).into();
-        let schema = self
-            .registry
-            .get(self.record.signature)
-            .ok_or_else(|| SemanticError::MissingRecordSchema(self.record.signature.to_string()))?;
-        let ordered = top_level_subrecords(&schema.root);
-        let target_order = ordered
-            .iter()
-            .position(|candidate| candidate.id == node.id)
-            .ok_or_else(|| SemanticError::MissingPath(path.to_owned()))?;
-        let insertion_index = self
-            .record
-            .subrecords
-            .iter()
-            .position(|subrecord| {
-                first_signature_order(&ordered, subrecord.signature)
-                    .is_some_and(|order| order > target_order)
-            })
-            .unwrap_or(self.record.subrecords.len());
-        let occurrence = self
-            .record
-            .subrecords
-            .iter()
-            .filter(|subrecord| subrecord.signature == target_signature)
-            .count();
+        let insertion_index = self.schema_insertion_index(&self.record, node)?;
+        let occurrence = self.assigned_occurrence_count(&self.record, path)?;
         let normalized = self.normalize_value(&payload.path, value)?;
         let (normalized, mutations) = self.apply_after_set_tree(payload, &normalized, None)?;
         let encoded: Vec<u8> = self.encode_node(payload, &normalized)?;
@@ -171,32 +137,20 @@ impl RecordEditor {
         Ok(())
     }
 
-    /// Removes a top-level field occurrence.
+    /// Removes a top-level schema-path occurrence.
     ///
     /// # Errors
     ///
     /// Returns [`SemanticError`] when the path or occurrence is absent.
     pub fn remove(&mut self, path: &str, occurrence: usize) -> Result<()> {
         let node: &SchemaNode = self.find_node(path)?;
-        let SchemaNodeKind::Subrecord { signature, .. } = &node.kind else {
+        let SchemaNodeKind::Subrecord { .. } = &node.kind else {
             return Err(SemanticError::Encode {
                 path: path.to_owned(),
                 message: "only top-level subrecords can be removed".to_owned(),
             });
         };
-        let target_signature: Signature = (*signature).into();
-        let index: usize = self
-            .record
-            .subrecords
-            .iter()
-            .enumerate()
-            .filter(|(_, subrecord)| subrecord.signature == target_signature)
-            .nth(occurrence)
-            .map(|(index, _)| index)
-            .ok_or_else(|| SemanticError::MissingOccurrence {
-                path: path.to_owned(),
-                occurrence,
-            })?;
+        let index = self.assigned_subrecord_index(&self.record, path, occurrence)?;
         let mut candidate = clone_record(&self.record);
         candidate.subrecords.remove(index);
         self.record = candidate;
@@ -222,6 +176,84 @@ impl RecordEditor {
             .ok_or_else(|| SemanticError::MissingRecordSchema(self.record.signature.to_string()))?;
         find_node_by_path(&schema.root, path)
             .ok_or_else(|| SemanticError::MissingPath(path.to_owned()))
+    }
+
+    fn grammar_for(&self, record: &WritableRecord) -> Result<crate::grammar::GrammarMatch<'_>> {
+        let schema = self
+            .registry
+            .get(record.signature)
+            .ok_or_else(|| SemanticError::MissingRecordSchema(record.signature.to_string()))?;
+        interpret_writable(
+            &schema.root,
+            record.signature,
+            record.form_version,
+            &record.subrecords,
+        )
+    }
+
+    fn assigned_subrecord_index(
+        &self,
+        record: &WritableRecord,
+        path: &str,
+        occurrence: usize,
+    ) -> Result<usize> {
+        self.grammar_for(record)?
+            .assignments
+            .iter()
+            .enumerate()
+            .filter(|(_, assignment)| assignment.is_some_and(|candidate| candidate.path == path))
+            .nth(occurrence)
+            .map(|(index, _)| index)
+            .ok_or_else(|| SemanticError::MissingOccurrence {
+                path: path.to_owned(),
+                occurrence,
+            })
+    }
+
+    fn assigned_occurrence_count(&self, record: &WritableRecord, path: &str) -> Result<usize> {
+        Ok(self
+            .grammar_for(record)?
+            .assignments
+            .iter()
+            .filter(|assignment| assignment.is_some_and(|candidate| candidate.path == path))
+            .count())
+    }
+
+    fn schema_insertion_index(
+        &self,
+        record: &WritableRecord,
+        target: &SchemaNode,
+    ) -> Result<usize> {
+        let schema = self
+            .registry
+            .get(record.signature)
+            .ok_or_else(|| SemanticError::MissingRecordSchema(record.signature.to_string()))?;
+        let ordered = top_level_subrecords(&schema.root);
+        let target_order = ordered
+            .iter()
+            .position(|candidate| candidate.id == target.id)
+            .ok_or_else(|| SemanticError::MissingPath(target.path.clone()))?;
+        let grammar = self.grammar_for(record)?;
+        let mut after_existing = None;
+        for (index, assignment) in grammar.assignments.iter().enumerate() {
+            let Some(assigned) = assignment else {
+                continue;
+            };
+            if assigned.path == target.path {
+                after_existing = Some(index + 1);
+                continue;
+            }
+            let Some(order) = ordered
+                .iter()
+                .position(|candidate| candidate.id == assigned.id)
+            else {
+                continue;
+            };
+            if order > target_order {
+                return Ok(after_existing.unwrap_or(index));
+            }
+        }
+        Ok(after_existing.unwrap_or(record.subrecords.len()))
     }
 
     fn encode_node(&self, node: &SchemaNode, value: &OwnedFieldValue) -> Result<Vec<u8>> {
@@ -675,20 +707,27 @@ impl RecordEditor {
                     value,
                 } => {
                     let (signature, encoded) = self.encode_path(&path, &value)?;
-                    let target = record
-                        .subrecords
-                        .iter_mut()
-                        .filter(|subrecord| subrecord.signature == signature)
-                        .nth(occurrence)
-                        .ok_or(SemanticError::MissingOccurrence { path, occurrence })?;
-                    target.data = encoded;
+                    let index = self.assigned_subrecord_index(record, &path, occurrence)?;
+                    if record.subrecords[index].signature != signature {
+                        return Err(SemanticError::Encode {
+                            path,
+                            message: "assigned subrecord signature does not match schema"
+                                .to_owned(),
+                        });
+                    }
+                    record.subrecords[index].data = encoded;
                 }
                 HandlerMutation::Insert { path, value } => {
                     let (signature, encoded) = self.encode_path(&path, &value)?;
-                    record.subrecords.push(WritableSubRecord {
-                        signature,
-                        data: encoded,
-                    });
+                    let node = self.find_node(&path)?;
+                    let index = self.schema_insertion_index(record, node)?;
+                    record.subrecords.insert(
+                        index,
+                        WritableSubRecord {
+                            signature,
+                            data: encoded,
+                        },
+                    );
                 }
                 HandlerMutation::Remove { path, occurrence } => {
                     let node = self.find_node(&path)?;
@@ -699,14 +738,14 @@ impl RecordEditor {
                         });
                     };
                     let signature = Signature::from(*signature);
-                    let index = record
-                        .subrecords
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, subrecord)| subrecord.signature == signature)
-                        .nth(occurrence)
-                        .map(|(index, _)| index)
-                        .ok_or(SemanticError::MissingOccurrence { path, occurrence })?;
+                    let index = self.assigned_subrecord_index(record, &path, occurrence)?;
+                    if record.subrecords[index].signature != signature {
+                        return Err(SemanticError::Encode {
+                            path,
+                            message: "assigned subrecord signature does not match schema"
+                                .to_owned(),
+                        });
+                    }
                     record.subrecords.remove(index);
                 }
             }
@@ -844,18 +883,6 @@ fn top_level_subrecords(root: &SchemaNode) -> Vec<&SchemaNode> {
     let mut output = Vec::new();
     collect(root, &mut output);
     output
-}
-
-fn first_signature_order(nodes: &[&SchemaNode], signature: Signature) -> Option<usize> {
-    nodes.iter().position(|node| {
-        matches!(
-            node.kind,
-            SchemaNodeKind::Subrecord {
-                signature: expected,
-                ..
-            } if Signature::from(expected) == signature
-        )
-    })
 }
 
 fn find_node_by_path<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaNode> {
@@ -1062,7 +1089,12 @@ fn encode_error(path: &str, message: impl Into<String>) -> SemanticError {
 
 #[cfg(test)]
 mod tests {
-    use bethkit_schema::StringType;
+    use std::sync::Arc;
+
+    use bethkit_schema::{
+        ConflictPriority, SchemaGame, SchemaManifest, SchemaNodeId, SchemaPackage, SchemaRecord,
+        SchemaSignature, StringType, ValidationStatus, PACKAGE_FORMAT_VERSION,
+    };
 
     use super::*;
 
@@ -1080,6 +1112,99 @@ mod tests {
         }
     }
 
+    fn editor_with_reused_signature() -> Result<RecordEditor> {
+        fn subrecord(id: u32, path: &str) -> SchemaNode {
+            SchemaNode {
+                id: SchemaNodeId(id),
+                path: path.to_owned(),
+                name: path.to_owned(),
+                required: true,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Subrecord {
+                    signature: SchemaSignature(*b"AAAA"),
+                    payload: Box::new(SchemaNode {
+                        id: SchemaNodeId(id + 100),
+                        path: format!("{path}/payload"),
+                        name: "Payload".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::Bytes { length: None },
+                        },
+                    }),
+                },
+            }
+        }
+
+        let package = SchemaPackage::new(
+            SchemaManifest {
+                format_version: PACKAGE_FORMAT_VERSION,
+                game: SchemaGame::SkyrimSe,
+                package_version: "test".to_owned(),
+                source_repository: "TES5Edit/TES5Edit".to_owned(),
+                source_tag: "test".to_owned(),
+                source_commit: "00".repeat(20),
+                source_archive_sha256: "00".repeat(32),
+                exporter_version: "test".to_owned(),
+                exporter_binary_sha256: "00".repeat(32),
+                exporter_map_sha256: "00".repeat(32),
+                exporter_patch_sha256: "00".repeat(32),
+                exporter_build_sha256: "00".repeat(32),
+                conversion_rules_sha256: "00".repeat(32),
+                minimum_bethkit_version: "0.4.0".to_owned(),
+                minimum_abi_version: 2,
+                validation_status: ValidationStatus::Candidate,
+                corpus_sha256: "00".repeat(32),
+                validated_records: 0,
+                byte_coverage: 0.0,
+                callbacks_total: 0,
+                callbacks_classified: 0,
+                required_decoders: Vec::new(),
+                required_handlers: Vec::new(),
+            },
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "TEST".to_owned(),
+                    name: "Test".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![subrecord(1, "TEST/first"), subrecord(2, "TEST/second")],
+                    },
+                },
+            }],
+        )?;
+        Ok(RecordEditor {
+            registry: bethkit_schema::SchemaRegistry::new(Arc::new(package)),
+            decoders: crate::DecoderRegistry::builtin(),
+            handlers: SemanticHandlerRegistry::builtin(),
+            record: WritableRecord {
+                signature: Signature(*b"TEST"),
+                flags: bethkit_core::RecordFlags::empty(),
+                form_id: bethkit_core::FormId::NULL,
+                form_version: 44,
+                subrecords: vec![
+                    WritableSubRecord {
+                        signature: Signature(*b"AAAA"),
+                        data: vec![1],
+                    },
+                    WritableSubRecord {
+                        signature: Signature(*b"AAAA"),
+                        data: vec![2],
+                    },
+                ],
+            },
+            localized: false,
+            decoded_values: BTreeMap::new(),
+        })
+    }
+
     #[test]
     fn windows_1252_strings_encode_exact_bytes() {
         let bytes = encode_primitive(
@@ -1091,6 +1216,26 @@ mod tests {
         .expect("Windows-1252 string should encode");
 
         assert_eq!(bytes, b"Gr\xfc\xdfe\0");
+    }
+
+    /// Addresses repeated signatures by their ordered schema path.
+    #[test]
+    fn editor_distinguishes_reused_signatures_by_path() -> Result<()> {
+        let editor = editor_with_reused_signature()?;
+
+        assert_eq!(
+            editor.assigned_subrecord_index(&editor.record, "TEST/first", 0)?,
+            0
+        );
+        assert_eq!(
+            editor.assigned_subrecord_index(&editor.record, "TEST/second", 0)?,
+            1
+        );
+        assert!(matches!(
+            editor.assigned_subrecord_index(&editor.record, "TEST/second", 1),
+            Err(SemanticError::MissingOccurrence { occurrence: 1, .. })
+        ));
+        Ok(())
     }
 
     #[test]

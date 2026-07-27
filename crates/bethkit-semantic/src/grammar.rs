@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use bethkit_core::{Signature, SubRecord};
+use bethkit_core::{Signature, SubRecord, WritableSubRecord};
 use bethkit_schema::{EvalContext, EvalValue, SchemaNode, SchemaNodeKind};
 
 use crate::{Result, SemanticError};
@@ -36,6 +36,49 @@ pub(crate) fn interpret<'schema>(
     form_version: u16,
     subrecords: &[SubRecord],
 ) -> Result<GrammarMatch<'schema>> {
+    interpret_inputs(root, record_signature, form_version, subrecords)
+}
+
+pub(crate) fn interpret_writable<'schema>(
+    root: &'schema SchemaNode,
+    record_signature: Signature,
+    form_version: u16,
+    subrecords: &[WritableSubRecord],
+) -> Result<GrammarMatch<'schema>> {
+    interpret_inputs(root, record_signature, form_version, subrecords)
+}
+
+trait GrammarInput {
+    fn signature(&self) -> Signature;
+    fn payload(&self) -> &[u8];
+}
+
+impl GrammarInput for SubRecord {
+    fn signature(&self) -> Signature {
+        self.signature
+    }
+
+    fn payload(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl GrammarInput for WritableSubRecord {
+    fn signature(&self) -> Signature {
+        self.signature
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+fn interpret_inputs<'schema, T: GrammarInput>(
+    root: &'schema SchemaNode,
+    record_signature: Signature,
+    form_version: u16,
+    subrecords: &[T],
+) -> Result<GrammarMatch<'schema>> {
     let mut declared_signatures = BTreeSet::new();
     collect_signatures(root, &mut declared_signatures);
     let initial = MatchState {
@@ -59,12 +102,12 @@ pub(crate) fn interpret<'schema>(
     })
 }
 
-fn match_node<'schema>(
+fn match_node<'schema, T: GrammarInput>(
     node: &'schema SchemaNode,
     state: MatchState<'schema>,
     record_signature: Signature,
     form_version: u16,
-    subrecords: &[SubRecord],
+    subrecords: &[T],
     declared: &BTreeSet<Signature>,
 ) -> Result<MatchState<'schema>> {
     if !condition_applies(node, &state, record_signature, form_version, subrecords)? {
@@ -141,7 +184,7 @@ fn match_node<'schema>(
             let Some(subrecord) = subrecords.get(current.cursor) else {
                 return Ok(current);
             };
-            if subrecord.signature != Signature::from(*signature) {
+            if subrecord.signature() != Signature::from(*signature) {
                 return Ok(current);
             }
             current.assignments[current.cursor] = Some(node);
@@ -153,19 +196,19 @@ fn match_node<'schema>(
     }
 }
 
-fn condition_applies(
+fn condition_applies<T: GrammarInput>(
     node: &SchemaNode,
     state: &MatchState<'_>,
     record_signature: Signature,
     form_version: u16,
-    subrecords: &[SubRecord],
+    subrecords: &[T],
 ) -> Result<bool> {
     let Some(condition) = &node.condition else {
         return Ok(true);
     };
     let payload = subrecords
         .get(state.cursor)
-        .map_or(&[][..], SubRecord::as_bytes);
+        .map_or(&[][..], GrammarInput::payload);
     let context = EvalContext {
         payload,
         form_version,
@@ -180,14 +223,14 @@ fn condition_applies(
     }
 }
 
-fn skip_unknown(
+fn skip_unknown<T: GrammarInput>(
     state: &mut MatchState<'_>,
-    subrecords: &[SubRecord],
+    subrecords: &[T],
     declared: &BTreeSet<Signature>,
 ) {
     while subrecords
         .get(state.cursor)
-        .is_some_and(|subrecord| !declared.contains(&subrecord.signature))
+        .is_some_and(|subrecord| !declared.contains(&subrecord.signature()))
     {
         state.cursor += 1;
     }
@@ -383,6 +426,53 @@ mod tests {
         assert_eq!(matched.violations[0].path, "TEST");
         assert_eq!(matched.violations[0].minimum, 2);
         assert_eq!(matched.violations[0].actual, 1);
+        Ok(())
+    }
+
+    /// Keeps identical signatures attached to their ordered schema paths.
+    #[test]
+    fn ordered_match_distinguishes_paths_with_the_same_signature(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut first = subrecord_node(1, *b"AAAA", true);
+        first.path = "TEST/first".to_owned();
+        let mut second = subrecord_node(2, *b"AAAA", true);
+        second.path = "TEST/second".to_owned();
+        let root = SchemaNode {
+            id: SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![first, second],
+            },
+        };
+        let source = vec![subrecord(*b"AAAA"), subrecord(*b"AAAA")];
+        let writable = vec![
+            WritableSubRecord {
+                signature: Signature(*b"AAAA"),
+                data: Vec::new(),
+            },
+            WritableSubRecord {
+                signature: Signature(*b"AAAA"),
+                data: Vec::new(),
+            },
+        ];
+
+        let matched = interpret(&root, Signature(*b"TEST"), 44, &source)?;
+        let editable = interpret_writable(&root, Signature(*b"TEST"), 44, &writable)?;
+
+        for assignments in [&matched.assignments, &editable.assignments] {
+            assert_eq!(
+                assignments[0].map(|node| node.path.as_str()),
+                Some("TEST/first")
+            );
+            assert_eq!(
+                assignments[1].map(|node| node.path.as_str()),
+                Some("TEST/second")
+            );
+        }
         Ok(())
     }
 }
