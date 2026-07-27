@@ -2768,7 +2768,7 @@ mod tests {
         Ok(())
     }
 
-    /// Dispatches record callbacks after removal and commits their cleanup atomically.
+    /// Dispatches record callbacks after removal and clears a populated optional counter.
     #[test]
     fn editor_dispatches_record_after_set_callbacks() -> Result<()> {
         let mut editor = editor_with_reused_signature()?;
@@ -2789,8 +2789,13 @@ mod tests {
                 .iter()
                 .map(|subrecord| subrecord.signature)
                 .collect::<Vec<_>>(),
-            vec![Signature(*b"AAAA"), Signature(*b"AAAA")]
+            vec![
+                Signature(*b"AAAA"),
+                Signature(*b"AAAA"),
+                Signature(*b"VCNT")
+            ]
         );
+        assert_eq!(editor.record.subrecords[2].data, 0_u32.to_le_bytes());
         Ok(())
     }
 

@@ -1899,14 +1899,15 @@ impl SemanticHandler for SynchronizeRecordCountsAfterSet {
             }
             let path = configured_text(self.id(), counter, "counter_path")?.to_owned();
             let counter_signature = configured_signature(self.id(), counter, "counter_signature")?;
+            let counter_subrecord = record
+                .subrecords
+                .iter()
+                .find(|subrecord| subrecord.signature == counter_signature);
             if counter
                 .get("only_when_counter_exists")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
-                && !record
-                    .subrecords
-                    .iter()
-                    .any(|subrecord| subrecord.signature == counter_signature)
+                && counter_subrecord.is_none()
             {
                 continue;
             }
@@ -1969,14 +1970,31 @@ impl SemanticHandler for SynchronizeRecordCountsAfterSet {
                     });
                 }
             };
+            let value = u64::try_from(count).map_err(|_| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "record counter value exceeds u64".to_owned(),
+            })?;
+            if counter
+                .get("counter_nested")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                mutations.push(HandlerMutation::Set {
+                    path,
+                    occurrence: 0,
+                    value: OwnedFieldValue::UInt(value),
+                });
+                continue;
+            }
+            let remove_when_zero = !required
+                && (!only_when_missing
+                    || counter_subrecord
+                        .is_some_and(|subrecord| subrecord.data.iter().all(|byte| *byte == 0)));
             mutations.push(HandlerMutation::SynchronizeCount {
                 path,
                 occurrence: 0,
-                value: u64::try_from(count).map_err(|_| SemanticError::Handler {
-                    handler: self.id().to_owned(),
-                    message: "record counter value exceeds u64".to_owned(),
-                })?,
-                remove_when_zero: !required,
+                value,
+                remove_when_zero,
             });
         }
         Ok(HandlerOutput::Mutations(mutations))
@@ -3683,6 +3701,94 @@ mod tests {
                 remove_when_zero: false,
                 ..
             }] if path == "TEST/2:Condition Count"
+        ));
+        Ok(())
+    }
+
+    /// Preserves xEdit's two-step cleanup for an optional container counter.
+    #[test]
+    fn synchronize_record_counts_handler_clears_counter_before_removal(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let binding = CallbackBinding {
+            path: "TEST".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-container-cleanup".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.sync_record_counts".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "counters": [{
+                            "counter_path": "TEST/0:Animation Count",
+                            "counter_signature": "IDLC",
+                            "counter_required": false,
+                            "value_signature": "IDLA",
+                            "mode": "subrecord_count",
+                            "only_when_missing": true,
+                            "only_when_counter_exists": true
+                        }]
+                    }),
+                },
+            },
+        };
+        let mut record = WritableRecord {
+            signature: Signature(*b"TEST"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"IDLC"),
+                data: vec![3],
+            }],
+        };
+        let context =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Fallout4);
+        let registry = SemanticHandlerRegistry::builtin();
+
+        let output = registry.invoke_with_writable_record(
+            &binding,
+            context,
+            &record,
+            HandlerPhase::AfterSet,
+            None,
+            None,
+        )?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::SynchronizeCount {
+                        value: 0,
+                        remove_when_zero: false,
+                        ..
+                    }]
+                )
+        ));
+
+        record.subrecords[0].data[0] = 0;
+        let output = registry.invoke_with_writable_record(
+            &binding,
+            context,
+            &record,
+            HandlerPhase::AfterSet,
+            None,
+            None,
+        )?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::SynchronizeCount {
+                        value: 0,
+                        remove_when_zero: true,
+                        ..
+                    }]
+                )
         ));
         Ok(())
     }
