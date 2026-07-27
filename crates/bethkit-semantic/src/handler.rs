@@ -359,6 +359,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatAngleDegrees));
         registry.register(Arc::new(FormatGeographicCoordinate));
         registry.register(Arc::new(FormatTimestampDate));
+        registry.register(Arc::new(FormatScriptSummary));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
@@ -1179,14 +1180,7 @@ impl SemanticHandler for FormatRgb {
     }
 
     fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
-        if !matches!(
-            invocation.phase,
-            HandlerPhase::Display
-                | HandlerPhase::Summary
-                | HandlerPhase::SortKey
-                | HandlerPhase::EditValue
-                | HandlerPhase::NativeValue
-        ) {
+        if invocation.phase != HandlerPhase::Summary {
             return Ok(HandlerOutput::None);
         }
         let include_alpha = invocation
@@ -1230,14 +1224,7 @@ impl SemanticHandler for FormatVec3 {
     }
 
     fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
-        if !matches!(
-            invocation.phase,
-            HandlerPhase::Display
-                | HandlerPhase::Summary
-                | HandlerPhase::SortKey
-                | HandlerPhase::EditValue
-                | HandlerPhase::NativeValue
-        ) {
+        if invocation.phase != HandlerPhase::Summary {
             return Ok(HandlerOutput::None);
         }
         let digits =
@@ -1374,6 +1361,29 @@ impl SemanticHandler for FormatGeographicCoordinate {
             invocation.value.expect("float value checked above"),
             None,
         )?))
+    }
+}
+
+struct FormatScriptSummary;
+
+impl SemanticHandler for FormatScriptSummary {
+    fn id(&self) -> &'static str {
+        "format.script_summary"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::Summary {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "script summary requires a value".to_owned(),
+        })?;
+        Ok(HandlerOutput::Text(format_script_summary(value)?))
     }
 }
 
@@ -3294,6 +3304,64 @@ fn coordinate_error(message: impl Into<String>) -> SemanticError {
     }
 }
 
+fn format_script_summary(value: &FieldValue<'_>) -> Result<String> {
+    if !matches!(value, FieldValue::Struct(_)) {
+        return Err(SemanticError::Handler {
+            handler: "format.script_summary".to_owned(),
+            message: "script summary requires a struct value".to_owned(),
+        });
+    }
+    let compiled = find_compiled_script(value);
+    let source = find_script_source(value);
+    if !compiled {
+        return Ok(if source.is_some() {
+            "<Source not compiled>".to_owned()
+        } else {
+            "<Empty>".to_owned()
+        });
+    }
+    let Some(source) = source else {
+        return Ok("<Source missing>".to_owned());
+    };
+    let lines: Vec<&str> = source
+        .split(['\r', '\n'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with(';'))
+        .collect();
+    match lines.as_slice() {
+        [] => Ok("<Source missing>".to_owned()),
+        [line] => Ok((*line).to_owned()),
+        _ => Ok(format!("<{} lines>", lines.len())),
+    }
+}
+
+fn find_compiled_script(value: &FieldValue<'_>) -> bool {
+    match value {
+        FieldValue::Struct(values) => values.iter().any(|field| {
+            matches!(field.value, FieldValue::Bytes(_))
+                && field.name.to_ascii_lowercase().contains("compiled")
+                || find_compiled_script(&field.value)
+        }),
+        FieldValue::Array(values) => values.iter().any(find_compiled_script),
+        _ => false,
+    }
+}
+
+fn find_script_source<'a>(value: &'a FieldValue<'a>) -> Option<&'a str> {
+    match value {
+        FieldValue::Struct(values) => values.iter().find_map(|field| {
+            if let FieldValue::String(source) = &field.value {
+                if field.name.to_ascii_lowercase().contains("source") {
+                    return Some(source.as_ref());
+                }
+            }
+            find_script_source(&field.value)
+        }),
+        FieldValue::Array(values) => values.iter().find_map(find_script_source),
+        _ => None,
+    }
+}
+
 fn format_numeric_component(
     handler: &str,
     value: &FieldValue<'_>,
@@ -3901,6 +3969,30 @@ mod tests {
             format_rgb(&rgba, true, Some(0), Some(6))?,
             "RGBA(12, 34, 56, 0.123457)"
         );
+        let binding = test_metadata_binding(
+            "def.value_transform",
+            "format.rgb",
+            serde_json::json!({"include_alpha": false}),
+        );
+        let display = FormatRgb.invoke(HandlerInvocation {
+            context: HandlerContext {
+                binding: &binding,
+                record_signature: Signature(*b"TEST"),
+                form_id: FormId::NULL,
+                form_version: 0,
+                game: SchemaGame::SkyrimSe,
+                configuration: match &binding.implementation {
+                    CallbackImplementation::BuiltIn { operation } => &operation.configuration,
+                    _ => unreachable!("test binding is built-in"),
+                },
+            },
+            phase: HandlerPhase::Display,
+            value: Some(&rgb),
+            old_value: None,
+            source_record: None,
+            source_writable_record: None,
+        })?;
+        assert!(matches!(display, HandlerOutput::None));
         Ok(())
     }
 
@@ -3985,6 +4077,50 @@ mod tests {
             (-180.0_f64).to_radians()
         );
         assert!(parse_geographic_coordinate("91\u{00B0}0'0\"N", true).is_err());
+        Ok(())
+    }
+
+    /// Matches xEdit's source/compiled-state and meaningful-line script summaries.
+    #[test]
+    fn script_summary_matches_xedit_states() -> Result<()> {
+        let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: format!("TEST/{name}"),
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let source_only = FieldValue::Struct(vec![field(
+            "Script Source",
+            FieldValue::String(std::borrow::Cow::Borrowed("set x to 1")),
+        )]);
+        let compiled_only = FieldValue::Struct(vec![field(
+            "Compiled Script",
+            FieldValue::Bytes(std::borrow::Cow::Borrowed(&[])),
+        )]);
+        let complete = FieldValue::Struct(vec![
+            field(
+                "Compiled Script",
+                FieldValue::Bytes(std::borrow::Cow::Borrowed(&[1])),
+            ),
+            field(
+                "Script Source",
+                FieldValue::String(std::borrow::Cow::Borrowed(
+                    "; comment\r\n set x to 1 \r\n\r\nset y to 2",
+                )),
+            ),
+        ]);
+
+        assert_eq!(
+            format_script_summary(&FieldValue::Struct(vec![]))?,
+            "<Empty>"
+        );
+        assert_eq!(
+            format_script_summary(&source_only)?,
+            "<Source not compiled>"
+        );
+        assert_eq!(format_script_summary(&compiled_only)?, "<Source missing>");
+        assert_eq!(format_script_summary(&complete)?, "<2 lines>");
         Ok(())
     }
 

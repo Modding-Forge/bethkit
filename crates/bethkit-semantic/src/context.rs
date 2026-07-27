@@ -238,13 +238,15 @@ impl SemanticContext {
             ) {
                 continue;
             }
-            let text = match self.handlers.invoke(
+            let output = self.handlers.invoke(
                 binding,
                 self.handler_record(record),
                 format.into(),
                 Some(&handler_value),
                 None,
-            )? {
+            )?;
+            let text = match output {
+                HandlerOutput::None => continue,
                 HandlerOutput::Text(value) => value,
                 _ => {
                     return Err(SemanticError::Handler {
