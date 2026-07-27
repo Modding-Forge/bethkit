@@ -331,6 +331,15 @@ pub trait ResourceHashResolver: Send + Sync {
     fn resolve_folder_hash(&self, hash: u64) -> Option<String>;
 }
 
+/// Resolves the next object identifier offered by an xEdit plugin-header editor.
+///
+/// Implementations normally return the source plugin's highest object identifier plus one.
+/// The record context lets a resolver select the source plugin in load-order-aware applications.
+pub trait NextObjectIdResolver: Send + Sync {
+    /// Returns the next file-local object identifier for the source record.
+    fn next_object_id(&self, source: HandlerRecordContext) -> Option<u32>;
+}
+
 /// xEdit-compatible presentation metadata for a resolved FormID link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormLinkInfo {
@@ -606,6 +615,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatIdleAnimationGroup));
         registry.register(Arc::new(FormatWeatherClassification));
         registry.register(Arc::new(FixedHexIntegerFormatter));
+        registry.register(Arc::new(NextObjectIdFormatter { resolver: None }));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
@@ -642,6 +652,15 @@ impl SemanticHandlerRegistry {
     /// This replaces the built-in formatter while preserving its stable handler ID.
     pub fn set_resource_hash_resolver(&mut self, resolver: Arc<dyn ResourceHashResolver>) {
         self.register(Arc::new(ResourceHashFormatter {
+            resolver: Some(resolver),
+        }));
+    }
+
+    /// Installs the source-plugin resolver used by xEdit's `?` object-ID edit value.
+    ///
+    /// This replaces the built-in formatter while preserving its stable handler ID.
+    pub fn set_next_object_id_resolver(&mut self, resolver: Arc<dyn NextObjectIdResolver>) {
+        self.register(Arc::new(NextObjectIdFormatter {
             resolver: Some(resolver),
         }));
     }
@@ -3034,6 +3053,70 @@ impl SemanticHandler for FixedHexIntegerFormatter {
             }
             HandlerPhase::NativeValue => value.to_string(),
             HandlerPhase::Validation => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct NextObjectIdFormatter {
+    resolver: Option<Arc<dyn NextObjectIdResolver>>,
+}
+
+impl SemanticHandler for NextObjectIdFormatter {
+    fn id(&self) -> &'static str {
+        "format.next_object_id"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(input)) = invocation.value else {
+                return Err(integer_formatter_error(
+                    self.id(),
+                    "next object ID edit parsing requires text",
+                ));
+            };
+            let value = if input.trim() == "?" {
+                self.resolver
+                    .as_deref()
+                    .and_then(|resolver| {
+                        resolver.next_object_id(handler_record_context(&invocation.context))
+                    })
+                    .unwrap_or(2048)
+            } else {
+                let parsed = parse_delphi_integer(input, self.id())?;
+                u32::try_from(parsed).map_err(|_| {
+                    integer_formatter_error(
+                        self.id(),
+                        "next object ID edit value must fit an unsigned 32-bit integer",
+                    )
+                })?
+            };
+            return Ok(HandlerOutput::Value(FieldValue::UInt(u64::from(value))));
+        }
+        let value = u32::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                integer_formatter_error(self.id(), "next object ID formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| {
+            integer_formatter_error(
+                self.id(),
+                "next object ID value must fit an unsigned 32-bit integer",
+            )
+        })?;
+        let hexadecimal = format!("{value:08X}");
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::SortKey => hexadecimal,
+            HandlerPhase::EditValue => format!("${hexadecimal}"),
+            HandlerPhase::Summary | HandlerPhase::NativeValue | HandlerPhase::Validation => {
+                String::new()
+            }
             _ => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Text(text))
@@ -6034,6 +6117,14 @@ mod tests {
         }
     }
 
+    struct TestNextObjectIdResolver;
+
+    impl NextObjectIdResolver for TestNextObjectIdResolver {
+        fn next_object_id(&self, _source: HandlerRecordContext) -> Option<u32> {
+            Some(0x1235)
+        }
+    }
+
     struct TestFormLinkResolver;
 
     impl FormLinkResolver for TestFormLinkResolver {
@@ -7649,6 +7740,59 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::UInt(0x1234))
+        ));
+        Ok(())
+    }
+
+    /// Matches xEdit's plugin-header object-ID display and `?` edit behavior.
+    #[test]
+    fn next_object_id_formatter_matches_xedit() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.next_object_id",
+            serde_json::json!({}),
+        );
+        let context =
+            HandlerRecordContext::new(Signature(*b"TES4"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let value = FieldValue::UInt(0x1234);
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_next_object_id_resolver(Arc::new(TestNextObjectIdResolver));
+
+        // when / then
+        for (phase, expected) in [
+            (HandlerPhase::Display, "00001234"),
+            (HandlerPhase::SortKey, "00001234"),
+            (HandlerPhase::EditValue, "$00001234"),
+            (HandlerPhase::Summary, ""),
+            (HandlerPhase::NativeValue, ""),
+        ] {
+            assert!(matches!(
+                handlers.invoke(&binding, context, phase, Some(&value), None)?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
+        let automatic = FieldValue::String(Cow::Borrowed(" ? "));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::ParseEditValue,
+                Some(&automatic),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(0x1235))
+        ));
+        let fallback = SemanticHandlerRegistry::builtin();
+        assert!(matches!(
+            fallback.invoke(
+                &binding,
+                context,
+                HandlerPhase::ParseEditValue,
+                Some(&automatic),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(2048))
         ));
         Ok(())
     }
