@@ -13,10 +13,16 @@ use bethkit_schema::{
 
 use crate::value::{float_to_raw, handler_to_owned_value};
 use crate::{
-    grammar::interpret_writable, FieldValue, HandlerMutation, HandlerOutput, HandlerPhase,
-    HandlerRecordContext, OwnedFieldValue, Result, SemanticContext, SemanticError,
-    SemanticHandlerRegistry,
+    grammar::{interpret_writable, RepeatScope},
+    FieldValue, HandlerMutation, HandlerOutput, HandlerPhase, HandlerRecordContext,
+    OwnedFieldValue, Result, SemanticContext, SemanticError, SemanticHandlerRegistry,
 };
+
+#[derive(Clone)]
+struct ChangedField {
+    path: String,
+    repeat_scopes: Vec<RepeatScope>,
+}
 
 /// Lossless editor for one record.
 pub struct RecordEditor {
@@ -97,9 +103,10 @@ impl RecordEditor {
         let mut candidate = clone_record(&self.record);
         let mut decoded_values = self.decoded_values.clone();
         candidate.subrecords[index].data = encoded;
+        let changed = self.changed_field_at(&candidate, index)?;
         decoded_values.insert((path.to_owned(), occurrence), decoded);
         self.apply_mutations_with_values(&mut candidate, &mut decoded_values, mutations)?;
-        self.apply_record_after_set(&mut candidate, &mut decoded_values)?;
+        self.apply_after_set_callbacks(&mut candidate, &mut decoded_values, &changed)?;
         self.record = candidate;
         self.decoded_values = decoded_values;
         Ok(())
@@ -192,10 +199,11 @@ impl RecordEditor {
                 data: encoded,
             },
         );
+        let changed = self.changed_field_at(&candidate, insertion_index)?;
         let mut decoded_values = self.decoded_values.clone();
         decoded_values.insert((path.to_owned(), occurrence), decoded);
         self.apply_mutations_with_values(&mut candidate, &mut decoded_values, mutations)?;
-        self.apply_record_after_set(&mut candidate, &mut decoded_values)?;
+        self.apply_after_set_callbacks(&mut candidate, &mut decoded_values, &changed)?;
         self.record = candidate;
         self.decoded_values = decoded_values;
         Ok(())
@@ -215,11 +223,12 @@ impl RecordEditor {
             });
         };
         let index = self.assigned_subrecord_index(&self.record, path, occurrence)?;
+        let changed = self.changed_field_at(&self.record, index)?;
         let mut candidate = clone_record(&self.record);
         let mut decoded_values = self.decoded_values.clone();
         candidate.subrecords.remove(index);
         remove_decoded_occurrence(&mut decoded_values, path, occurrence);
-        self.apply_record_after_set(&mut candidate, &mut decoded_values)?;
+        self.apply_after_set_callbacks(&mut candidate, &mut decoded_values, &changed)?;
         self.record = candidate;
         self.decoded_values = decoded_values;
         Ok(())
@@ -1019,10 +1028,37 @@ impl RecordEditor {
         })
     }
 
-    fn apply_record_after_set(
+    fn changed_field_at(&self, record: &WritableRecord, index: usize) -> Result<ChangedField> {
+        let grammar = self.grammar_for(record)?;
+        let path = grammar
+            .assignments
+            .get(index)
+            .and_then(|assignment| *assignment)
+            .map(|node| node.path.clone())
+            .ok_or_else(|| SemanticError::Encode {
+                path: record.signature.to_string(),
+                message: format!("edited subrecord at index {index} has no grammar assignment"),
+            })?;
+        let repeat_scopes =
+            grammar
+                .repeat_scopes
+                .get(index)
+                .cloned()
+                .ok_or_else(|| SemanticError::Encode {
+                    path: path.clone(),
+                    message: format!("edited subrecord at index {index} has no repeat scope"),
+                })?;
+        Ok(ChangedField {
+            path,
+            repeat_scopes,
+        })
+    }
+
+    fn apply_after_set_callbacks(
         &self,
         record: &mut WritableRecord,
         decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+        changed: &ChangedField,
     ) -> Result<()> {
         let record_path = record.signature.to_string();
         for binding in self
@@ -1030,7 +1066,15 @@ impl RecordEditor {
             .package()
             .callback_bindings()
             .iter()
-            .filter(|binding| binding.path == record_path && binding.callback_id == "def.after_set")
+            .filter(|binding| {
+                binding.callback_id == "def.after_set"
+                    && (binding.path == record_path
+                        || changed.path == binding.path
+                        || changed
+                            .path
+                            .strip_prefix(&binding.path)
+                            .is_some_and(|suffix| suffix.starts_with('/')))
+            })
         {
             if !matches!(
                 binding.implementation,
@@ -1042,17 +1086,31 @@ impl RecordEditor {
                     message: "record-level after-set callback is not executable".to_owned(),
                 });
             }
+            let repeat_scope = changed
+                .repeat_scopes
+                .iter()
+                .filter(|scope| {
+                    binding.path == scope.path
+                        || binding
+                            .path
+                            .strip_prefix(&scope.path)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+                .max_by_key(|scope| scope.path.len());
+            let source_record = self.scoped_record(record, repeat_scope)?;
             match self.handlers.invoke_with_writable_record(
                 binding,
                 self.handler_record(),
-                record,
+                &source_record,
                 HandlerPhase::AfterSet,
                 None,
                 None,
             )? {
                 HandlerOutput::None => {}
                 HandlerOutput::Mutations(handler_mutations) => {
-                    self.apply_mutations_with_values(record, decoded_values, handler_mutations)?;
+                    let mutations =
+                        self.globalize_mutations(record, repeat_scope, handler_mutations)?;
+                    self.apply_mutations_with_values(record, decoded_values, mutations)?;
                 }
                 _ => {
                     return Err(SemanticError::Handler {
@@ -1064,6 +1122,134 @@ impl RecordEditor {
             }
         }
         Ok(())
+    }
+
+    fn scoped_record(
+        &self,
+        record: &WritableRecord,
+        repeat_scope: Option<&RepeatScope>,
+    ) -> Result<WritableRecord> {
+        let Some(repeat_scope) = repeat_scope else {
+            return Ok(clone_record(record));
+        };
+        let grammar = self.grammar_for(record)?;
+        let subrecords = record
+            .subrecords
+            .iter()
+            .zip(&grammar.repeat_scopes)
+            .filter(|(_, scopes)| scopes.contains(repeat_scope))
+            .map(|(subrecord, _)| WritableSubRecord {
+                signature: subrecord.signature,
+                data: subrecord.data.clone(),
+            })
+            .collect();
+        Ok(WritableRecord {
+            signature: record.signature,
+            flags: record.flags,
+            form_id: record.form_id,
+            form_version: record.form_version,
+            subrecords,
+        })
+    }
+
+    fn globalize_mutations(
+        &self,
+        record: &WritableRecord,
+        repeat_scope: Option<&RepeatScope>,
+        mutations: Vec<HandlerMutation>,
+    ) -> Result<Vec<HandlerMutation>> {
+        let Some(repeat_scope) = repeat_scope else {
+            return Ok(mutations);
+        };
+        let grammar = self.grammar_for(record)?;
+        mutations
+            .into_iter()
+            .map(|mutation| {
+                Ok(match mutation {
+                    HandlerMutation::Set {
+                        path,
+                        occurrence,
+                        value,
+                    } => HandlerMutation::Set {
+                        occurrence: self.global_occurrence(
+                            &grammar,
+                            repeat_scope,
+                            &path,
+                            occurrence,
+                        )?,
+                        path,
+                        value,
+                    },
+                    HandlerMutation::Remove { path, occurrence } => HandlerMutation::Remove {
+                        occurrence: self.global_occurrence(
+                            &grammar,
+                            repeat_scope,
+                            &path,
+                            occurrence,
+                        )?,
+                        path,
+                    },
+                    HandlerMutation::SynchronizeCount {
+                        path,
+                        occurrence,
+                        value,
+                        remove_when_zero,
+                    } => HandlerMutation::SynchronizeCount {
+                        occurrence: self.global_occurrence(
+                            &grammar,
+                            repeat_scope,
+                            &path,
+                            occurrence,
+                        )?,
+                        path,
+                        value,
+                        remove_when_zero,
+                    },
+                    HandlerMutation::Insert { .. } => {
+                        return Err(SemanticError::Handler {
+                            handler: "def.after_set".to_owned(),
+                            message: "scoped callbacks cannot insert absent subrecords".to_owned(),
+                        });
+                    }
+                })
+            })
+            .collect()
+    }
+
+    fn global_occurrence(
+        &self,
+        grammar: &crate::grammar::GrammarMatch<'_>,
+        repeat_scope: &RepeatScope,
+        path: &str,
+        local_occurrence: usize,
+    ) -> Result<usize> {
+        let schema = self
+            .registry
+            .get(self.record.signature)
+            .ok_or_else(|| SemanticError::MissingRecordSchema(self.record.signature.to_string()))?;
+        let parent_path = find_containing_subrecord(&schema.root, path)
+            .ok_or_else(|| SemanticError::MissingPath(path.to_owned()))?
+            .path
+            .as_str();
+        let selected_index = grammar
+            .assignments
+            .iter()
+            .zip(&grammar.repeat_scopes)
+            .enumerate()
+            .filter(|(_, (assignment, scopes))| {
+                assignment.is_some_and(|node| node.path == parent_path)
+                    && scopes.contains(repeat_scope)
+            })
+            .nth(local_occurrence)
+            .map(|(index, _)| index)
+            .ok_or_else(|| SemanticError::MissingOccurrence {
+                path: path.to_owned(),
+                occurrence: local_occurrence,
+            })?;
+        Ok(grammar.assignments[..selected_index]
+            .iter()
+            .filter(|assignment| assignment.is_some_and(|node| node.path == parent_path))
+            .count())
     }
 
     fn apply_record_metadata_mutations(&mut self, mutations: Vec<HandlerMutation>) -> Result<()> {
@@ -2115,6 +2301,7 @@ mod tests {
                         configuration: serde_json::json!({
                             "counters": [{
                                 "counter_path": "TEST/2:Value Count",
+                                "counter_signature": "VCNT",
                                 "counter_required": false,
                                 "value_signature": "VALU",
                                 "mode": "u32_payload_count",
@@ -2258,6 +2445,170 @@ mod tests {
         Ok(editor)
     }
 
+    fn editor_with_repeated_counter_groups() -> Result<RecordEditor> {
+        fn integer_subrecord(id: u32, path: &str, signature: [u8; 4]) -> SchemaNode {
+            SchemaNode {
+                id: SchemaNodeId(id),
+                path: path.to_owned(),
+                name: path.to_owned(),
+                required: true,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Subrecord {
+                    signature: SchemaSignature(signature),
+                    payload: Box::new(SchemaNode {
+                        id: SchemaNodeId(id + 100),
+                        path: format!("{path}/payload"),
+                        name: "Value".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::Integer {
+                                integer: IntegerType {
+                                    width: 4,
+                                    signed: false,
+                                    byte_order: ByteOrder::LittleEndian,
+                                },
+                            },
+                        },
+                    }),
+                },
+            }
+        }
+
+        fn bytes_subrecord(id: u32, path: &str, signature: [u8; 4]) -> SchemaNode {
+            SchemaNode {
+                id: SchemaNodeId(id),
+                path: path.to_owned(),
+                name: path.to_owned(),
+                required: false,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Subrecord {
+                    signature: SchemaSignature(signature),
+                    payload: Box::new(SchemaNode {
+                        id: SchemaNodeId(id + 100),
+                        path: format!("{path}/payload"),
+                        name: "Value".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::Bytes { length: None },
+                        },
+                    }),
+                },
+            }
+        }
+
+        let group_path = "TEST/0:Groups/repeat/0:Group";
+        let counter_path = format!("{group_path}/0:Count");
+        let value_path = format!("{group_path}/1:Values");
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "edit.sync_record_counts".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "TEST".to_owned(),
+                    name: "Test".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Repeat {
+                        minimum: 0,
+                        maximum: None,
+                        child: Box::new(SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: group_path.to_owned(),
+                            name: "Group".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Sequence {
+                                children: vec![
+                                    integer_subrecord(2, &counter_path, *b"VCNT"),
+                                    bytes_subrecord(3, &value_path, *b"VALU"),
+                                ],
+                            },
+                        }),
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: group_path.to_owned(),
+                callback_id: "def.after_set".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "33".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "edit.sync_record_counts".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "counters": [{
+                                "counter_path": counter_path,
+                                "counter_signature": "VCNT",
+                                "counter_required": true,
+                                "value_signature": "VALU",
+                                "mode": "subrecord_count",
+                                "only_when_missing": true,
+                                "only_when_counter_exists": true
+                            }]
+                        }),
+                    },
+                },
+            }],
+        )?;
+        Ok(RecordEditor {
+            registry: bethkit_schema::SchemaRegistry::new(Arc::new(package)),
+            decoders: crate::DecoderRegistry::builtin(),
+            handlers: SemanticHandlerRegistry::builtin(),
+            record: WritableRecord {
+                signature: Signature(*b"TEST"),
+                flags: bethkit_core::RecordFlags::empty(),
+                form_id: bethkit_core::FormId::NULL,
+                form_version: 44,
+                subrecords: vec![
+                    WritableSubRecord {
+                        signature: Signature(*b"VCNT"),
+                        data: 1_u32.to_le_bytes().to_vec(),
+                    },
+                    WritableSubRecord {
+                        signature: Signature(*b"VALU"),
+                        data: vec![1],
+                    },
+                    WritableSubRecord {
+                        signature: Signature(*b"VCNT"),
+                        data: 1_u32.to_le_bytes().to_vec(),
+                    },
+                    WritableSubRecord {
+                        signature: Signature(*b"VALU"),
+                        data: vec![2],
+                    },
+                ],
+            },
+            localized: false,
+            decoded_values: BTreeMap::from([
+                ((counter_path.clone(), 0), FieldValue::UInt(1)),
+                ((counter_path, 1), FieldValue::UInt(1)),
+                (
+                    (value_path.clone(), 0),
+                    FieldValue::Bytes(Cow::Owned(vec![1])),
+                ),
+                ((value_path, 1), FieldValue::Bytes(Cow::Owned(vec![2]))),
+            ]),
+        })
+    }
+
     #[test]
     fn windows_1252_strings_encode_exact_bytes() {
         let bytes = encode_primitive(
@@ -2328,6 +2679,33 @@ mod tests {
                 OwnedFieldValue::UInt(7),
                 OwnedFieldValue::Bytes(vec![9, 8, 7]),
             ])
+        );
+        Ok(())
+    }
+
+    /// Limits container callbacks to the edited repeated grammar occurrence.
+    #[test]
+    fn repeated_container_callbacks_preserve_other_occurrences() -> Result<()> {
+        // given
+        let mut editor = editor_with_repeated_counter_groups()?;
+        let value_path = "TEST/0:Groups/repeat/0:Group/1:Values";
+
+        // when
+        editor.remove(value_path, 0)?;
+        let record = editor.into_writable_record();
+
+        // then
+        assert_eq!(
+            record
+                .subrecords
+                .iter()
+                .map(|subrecord| (subrecord.signature, subrecord.data.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Signature(*b"VCNT"), 0_u32.to_le_bytes().to_vec()),
+                (Signature(*b"VCNT"), 1_u32.to_le_bytes().to_vec()),
+                (Signature(*b"VALU"), vec![2]),
+            ]
         );
         Ok(())
     }

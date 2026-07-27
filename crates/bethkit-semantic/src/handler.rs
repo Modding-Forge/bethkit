@@ -1785,20 +1785,34 @@ impl SemanticHandler for SynchronizeCountAfterSet {
         if invocation.phase != HandlerPhase::AfterSet {
             return Ok(HandlerOutput::None);
         }
-        let FieldValue::Array(values) = invocation.value.ok_or_else(|| SemanticError::Handler {
-            handler: self.id().to_owned(),
-            message: "counter synchronization requires an array value".to_owned(),
-        })?
-        else {
+        let value = if let Some(FieldValue::Array(values)) = invocation.value {
+            u64::try_from(values.len()).map_err(|_| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "array length exceeds u64".to_owned(),
+            })?
+        } else if let Some(record) = invocation.source_writable_record {
+            let signature = configured_signature(
+                self.id(),
+                invocation.context.configuration,
+                "value_signature",
+            )?;
+            u64::try_from(
+                record
+                    .subrecords
+                    .iter()
+                    .filter(|subrecord| subrecord.signature == signature)
+                    .count(),
+            )
+            .map_err(|_| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "array length exceeds u64".to_owned(),
+            })?
+        } else {
             return Err(SemanticError::Handler {
                 handler: self.id().to_owned(),
                 message: "counter synchronization requires an array value".to_owned(),
             });
         };
-        let value = u64::try_from(values.len()).map_err(|_| SemanticError::Handler {
-            handler: self.id().to_owned(),
-            message: "array length exceeds u64".to_owned(),
-        })?;
         if invocation
             .context
             .configuration
@@ -1884,6 +1898,18 @@ impl SemanticHandler for SynchronizeRecordCountsAfterSet {
                 continue;
             }
             let path = configured_text(self.id(), counter, "counter_path")?.to_owned();
+            let counter_signature = configured_signature(self.id(), counter, "counter_signature")?;
+            if counter
+                .get("only_when_counter_exists")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                && !record
+                    .subrecords
+                    .iter()
+                    .any(|subrecord| subrecord.signature == counter_signature)
+            {
+                continue;
+            }
             let required = counter
                 .get("counter_required")
                 .and_then(serde_json::Value::as_bool)
@@ -3596,6 +3622,7 @@ mod tests {
                         "counters": [
                             {
                                 "counter_path": "TEST/0:Keyword Count",
+                                "counter_signature": "KSIZ",
                                 "counter_required": false,
                                 "value_signature": "KWDA",
                                 "mode": "u32_payload_count",
@@ -3603,6 +3630,7 @@ mod tests {
                             },
                             {
                                 "counter_path": "TEST/2:Condition Count",
+                                "counter_signature": "CITC",
                                 "counter_required": true,
                                 "value_signature": "LVLO",
                                 "mode": "subrecord_count"

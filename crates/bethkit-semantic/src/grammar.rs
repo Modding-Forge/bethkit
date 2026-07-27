@@ -14,8 +14,15 @@ use crate::{Result, SemanticError};
 
 pub(crate) struct GrammarMatch<'schema> {
     pub(crate) assignments: Vec<Option<&'schema SchemaNode>>,
+    pub(crate) repeat_scopes: Vec<Vec<RepeatScope>>,
     pub(crate) declared_signatures: BTreeSet<Signature>,
     pub(crate) violations: Vec<GrammarViolation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepeatScope {
+    pub(crate) path: String,
+    pub(crate) occurrence: u32,
 }
 
 #[derive(Clone)]
@@ -29,6 +36,8 @@ pub(crate) struct GrammarViolation {
 struct MatchState<'schema> {
     cursor: usize,
     assignments: Vec<Option<&'schema SchemaNode>>,
+    repeat_scopes: Vec<Vec<RepeatScope>>,
+    active_repeat_scopes: Vec<RepeatScope>,
     assigned: usize,
     violations: Vec<GrammarViolation>,
 }
@@ -87,6 +96,8 @@ fn interpret_inputs<'schema, T: GrammarInput>(
     let initial = MatchState {
         cursor: 0,
         assignments: vec![None; subrecords.len()],
+        repeat_scopes: vec![Vec::new(); subrecords.len()],
+        active_repeat_scopes: Vec::new(),
         assigned: 0,
         violations: Vec::new(),
     };
@@ -100,6 +111,7 @@ fn interpret_inputs<'schema, T: GrammarInput>(
     )?;
     Ok(GrammarMatch {
         assignments: state.assignments,
+        repeat_scopes: state.repeat_scopes,
         declared_signatures,
         violations: state.violations,
     })
@@ -213,9 +225,14 @@ fn match_node<'schema, T: GrammarInput>(
             let mut current = state;
             let mut count = 0_u32;
             while maximum.is_none_or(|limit| count < limit) {
+                let mut scoped = current.clone();
+                scoped.active_repeat_scopes.push(RepeatScope {
+                    path: child.path.clone(),
+                    occurrence: count,
+                });
                 let candidate = match_node(
                     child,
-                    current.clone(),
+                    scoped,
                     record_signature,
                     form_version,
                     subrecords,
@@ -225,6 +242,7 @@ fn match_node<'schema, T: GrammarInput>(
                     break;
                 }
                 current = candidate;
+                current.active_repeat_scopes.pop();
                 count += 1;
             }
             if count < *minimum {
@@ -246,6 +264,7 @@ fn match_node<'schema, T: GrammarInput>(
                 return Ok(current);
             }
             current.assignments[current.cursor] = Some(node);
+            current.repeat_scopes[current.cursor] = current.active_repeat_scopes.clone();
             current.cursor += 1;
             current.assigned += 1;
             Ok(current)
@@ -563,6 +582,21 @@ mod tests {
             matched.assignments[2].map(|node| node.id),
             Some(SchemaNodeId(2))
         );
+        assert_eq!(
+            matched.repeat_scopes[0],
+            vec![RepeatScope {
+                path: "AAAA".to_owned(),
+                occurrence: 0,
+            }]
+        );
+        assert_eq!(
+            matched.repeat_scopes[1],
+            vec![RepeatScope {
+                path: "AAAA".to_owned(),
+                occurrence: 1,
+            }]
+        );
+        assert!(matched.repeat_scopes[2].is_empty());
         assert!(matched.violations.is_empty());
         Ok(())
     }
