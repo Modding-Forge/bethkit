@@ -346,6 +346,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
+        registry.register(Arc::new(RefreshSiblingUnions));
         registry.register(Arc::new(CtdaTypeFormatter));
         registry.register(Arc::new(IntegerLookupFormatter));
         registry.register(Arc::new(SynchronizeCountAfterSet));
@@ -1639,6 +1640,28 @@ impl SemanticHandler for MessageDisplayTimeAfterSet {
                 value: OwnedFieldValue::UInt(0),
             },
         ]))
+    }
+}
+
+struct RefreshSiblingUnions;
+
+impl SemanticHandler for RefreshSiblingUnions {
+    fn id(&self) -> &'static str {
+        "edit.refresh_sibling_unions"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        // The editor overlays the full in-flight value tree onto the expression
+        // context before selecting unions, which performs xEdit's eager refresh
+        // without an additional byte mutation.
+        Ok(HandlerOutput::None)
     }
 }
 

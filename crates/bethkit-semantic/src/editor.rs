@@ -333,6 +333,17 @@ impl RecordEditor {
     }
 
     fn encode_node(&self, node: &SchemaNode, value: &OwnedFieldValue) -> Result<Vec<u8>> {
+        let mut field_values = self.expression_field_values();
+        collect_owned_expression_field_values(node, value, &mut field_values);
+        self.encode_node_with_fields(node, value, &field_values)
+    }
+
+    fn encode_node_with_fields(
+        &self,
+        node: &SchemaNode,
+        value: &OwnedFieldValue,
+        field_values: &BTreeMap<String, i64>,
+    ) -> Result<Vec<u8>> {
         match &node.kind {
             SchemaNodeKind::Primitive { primitive } => {
                 encode_primitive(primitive, value, self.localized, &node.path)
@@ -353,7 +364,7 @@ impl RecordEditor {
                 }
                 let mut output: Vec<u8> = Vec::new();
                 for (field, value) in fields.iter().zip(values) {
-                    output.extend(self.encode_node(field, value)?);
+                    output.extend(self.encode_node_with_fields(field, value, field_values)?);
                 }
                 Ok(output)
             }
@@ -409,13 +420,14 @@ impl RecordEditor {
                     | ArrayCount::Remainder => {}
                 }
                 for value in values {
-                    output.extend(self.encode_node(element, value)?);
+                    output.extend(self.encode_node_with_fields(element, value, field_values)?);
                 }
                 Ok(output)
             }
             SchemaNodeKind::Union { selector, variants } => {
-                let variant = self.select_union_variant(node, selector, variants, value)?;
-                self.encode_node(variant, value)
+                let variant =
+                    self.select_union_variant(node, selector, variants, value, field_values)?;
+                self.encode_node_with_fields(variant, value, field_values)
             }
             SchemaNodeKind::Custom { decoder, .. } => self
                 .decoders
@@ -423,7 +435,7 @@ impl RecordEditor {
                 .ok_or_else(|| SemanticError::MissingDecoder(decoder.clone()))?
                 .encode(value),
             SchemaNodeKind::Terminated { terminator, child } => {
-                let mut output = self.encode_node(child, value)?;
+                let mut output = self.encode_node_with_fields(child, value, field_values)?;
                 output.push(*terminator);
                 Ok(output)
             }
@@ -488,6 +500,18 @@ impl RecordEditor {
         value: &OwnedFieldValue,
         old_value: Option<&FieldValue<'static>>,
     ) -> Result<(OwnedFieldValue, Vec<HandlerMutation>)> {
+        let mut field_values = self.expression_field_values();
+        collect_owned_expression_field_values(node, value, &mut field_values);
+        self.apply_after_set_tree_with_fields(node, value, old_value, &field_values)
+    }
+
+    fn apply_after_set_tree_with_fields(
+        &self,
+        node: &SchemaNode,
+        value: &OwnedFieldValue,
+        old_value: Option<&FieldValue<'static>>,
+        field_values: &BTreeMap<String, i64>,
+    ) -> Result<(OwnedFieldValue, Vec<HandlerMutation>)> {
         let (mut updated, mut mutations) = match (&node.kind, value) {
             (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
                 if fields.len() != values.len() {
@@ -510,8 +534,12 @@ impl RecordEditor {
                     let old_field = old_fields
                         .and_then(|values| values.get(index))
                         .map(|value| &value.value);
-                    let (value, child_mutations) =
-                        self.apply_after_set_tree(field, value, old_field)?;
+                    let (value, child_mutations) = self.apply_after_set_tree_with_fields(
+                        field,
+                        value,
+                        old_field,
+                        field_values,
+                    )?;
                     updated.push(value);
                     mutations.extend(child_mutations);
                 }
@@ -526,23 +554,28 @@ impl RecordEditor {
                 };
                 for (index, value) in values.iter().enumerate() {
                     let old_element = old_values.and_then(|values| values.get(index));
-                    let (value, child_mutations) =
-                        self.apply_after_set_tree(element, value, old_element)?;
+                    let (value, child_mutations) = self.apply_after_set_tree_with_fields(
+                        element,
+                        value,
+                        old_element,
+                        field_values,
+                    )?;
                     updated.push(value);
                     mutations.extend(child_mutations);
                 }
                 (OwnedFieldValue::Array(updated), mutations)
             }
             (SchemaNodeKind::Union { selector, variants }, _) => {
-                let variant = self.select_union_variant(node, selector, variants, value)?;
-                self.apply_after_set_tree(variant, value, old_value)?
+                let variant =
+                    self.select_union_variant(node, selector, variants, value, field_values)?;
+                self.apply_after_set_tree_with_fields(variant, value, old_value, field_values)?
             }
             (
                 SchemaNodeKind::Subrecord { payload, .. }
                 | SchemaNodeKind::Compressed { child: payload, .. }
                 | SchemaNodeKind::Terminated { child: payload, .. },
                 _,
-            ) => self.apply_after_set_tree(payload, value, old_value)?,
+            ) => self.apply_after_set_tree_with_fields(payload, value, old_value, field_values)?,
             _ => (value.clone(), Vec::new()),
         };
         self.apply_local_set_mutations(node, &mut updated, &mut mutations)?;
@@ -642,6 +675,27 @@ impl RecordEditor {
         occurrence: &mut usize,
         replacement: &mut Option<OwnedFieldValue>,
     ) -> Result<bool> {
+        let mut field_values = self.expression_field_values();
+        collect_owned_expression_field_values(node, value, &mut field_values);
+        self.set_nested_value_with_fields(
+            node,
+            value,
+            target_path,
+            occurrence,
+            replacement,
+            &field_values,
+        )
+    }
+
+    fn set_nested_value_with_fields(
+        &self,
+        node: &SchemaNode,
+        value: &mut OwnedFieldValue,
+        target_path: &str,
+        occurrence: &mut usize,
+        replacement: &mut Option<OwnedFieldValue>,
+        field_values: &BTreeMap<String, i64>,
+    ) -> Result<bool> {
         if node.path == target_path {
             if *occurrence == 0 {
                 *value = replacement.take().ok_or_else(|| SemanticError::Handler {
@@ -656,27 +710,43 @@ impl RecordEditor {
         match (&node.kind, &mut *value) {
             (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
                 for (field, value) in fields.iter().zip(values) {
-                    if self.set_nested_value(field, value, target_path, occurrence, replacement)? {
+                    if self.set_nested_value_with_fields(
+                        field,
+                        value,
+                        target_path,
+                        occurrence,
+                        replacement,
+                        field_values,
+                    )? {
                         return Ok(true);
                     }
                 }
             }
             (SchemaNodeKind::Array { element, .. }, OwnedFieldValue::Array(values)) => {
                 for value in values {
-                    if self.set_nested_value(
+                    if self.set_nested_value_with_fields(
                         element,
                         value,
                         target_path,
                         occurrence,
                         replacement,
+                        field_values,
                     )? {
                         return Ok(true);
                     }
                 }
             }
             (SchemaNodeKind::Union { selector, variants }, current) => {
-                let variant = self.select_union_variant(node, selector, variants, current)?;
-                if self.set_nested_value(variant, current, target_path, occurrence, replacement)? {
+                let variant =
+                    self.select_union_variant(node, selector, variants, current, field_values)?;
+                if self.set_nested_value_with_fields(
+                    variant,
+                    current,
+                    target_path,
+                    occurrence,
+                    replacement,
+                    field_values,
+                )? {
                     return Ok(true);
                 }
             }
@@ -686,7 +756,14 @@ impl RecordEditor {
                 | SchemaNodeKind::Terminated { child: payload, .. },
                 current,
             ) => {
-                if self.set_nested_value(payload, current, target_path, occurrence, replacement)? {
+                if self.set_nested_value_with_fields(
+                    payload,
+                    current,
+                    target_path,
+                    occurrence,
+                    replacement,
+                    field_values,
+                )? {
                     return Ok(true);
                 }
             }
@@ -701,17 +778,17 @@ impl RecordEditor {
         selector: &UnionSelector,
         variants: &'a [SchemaNode],
         value: &OwnedFieldValue,
+        field_values: &BTreeMap<String, i64>,
     ) -> Result<&'a SchemaNode> {
-        let field_values = self.expression_field_values();
         for (index, variant) in variants.iter().enumerate() {
-            let Ok(encoded) = self.encode_node(variant, value) else {
+            let Ok(encoded) = self.encode_node_with_fields(variant, value, field_values) else {
                 continue;
             };
             let selected = match selector {
                 UnionSelector::Expression(expression) => {
                     let context = EvalContext {
                         payload: &encoded,
-                        field_values: &field_values,
+                        field_values,
                         form_version: self.record.form_version,
                         record_signature: self.record.signature.into(),
                     };
@@ -777,6 +854,17 @@ impl RecordEditor {
         node: &SchemaNode,
         value: &OwnedFieldValue,
     ) -> Result<FieldValue<'static>> {
+        let mut field_values = self.expression_field_values();
+        collect_owned_expression_field_values(node, value, &mut field_values);
+        self.owned_to_handler_value_with_fields(node, value, &field_values)
+    }
+
+    fn owned_to_handler_value_with_fields(
+        &self,
+        node: &SchemaNode,
+        value: &OwnedFieldValue,
+        field_values: &BTreeMap<String, i64>,
+    ) -> Result<FieldValue<'static>> {
         match (&node.kind, value) {
             (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
                 if fields.len() != values.len() {
@@ -798,7 +886,11 @@ impl RecordEditor {
                             path: field.path.clone(),
                             name: field.name.clone(),
                             span: crate::ByteSpan { start: 0, end: 0 },
-                            value: self.owned_to_handler_value(field, value)?,
+                            value: self.owned_to_handler_value_with_fields(
+                                field,
+                                value,
+                                field_values,
+                            )?,
                         })
                     })
                     .collect::<Result<Vec<_>>>()
@@ -806,19 +898,20 @@ impl RecordEditor {
             }
             (SchemaNodeKind::Array { element, .. }, OwnedFieldValue::Array(values)) => values
                 .iter()
-                .map(|value| self.owned_to_handler_value(element, value))
+                .map(|value| self.owned_to_handler_value_with_fields(element, value, field_values))
                 .collect::<Result<Vec<_>>>()
                 .map(FieldValue::Array),
             (SchemaNodeKind::Union { selector, variants }, _) => {
-                let variant = self.select_union_variant(node, selector, variants, value)?;
-                self.owned_to_handler_value(variant, value)
+                let variant =
+                    self.select_union_variant(node, selector, variants, value, field_values)?;
+                self.owned_to_handler_value_with_fields(variant, value, field_values)
             }
             (
                 SchemaNodeKind::Subrecord { payload, .. }
                 | SchemaNodeKind::Compressed { child: payload, .. }
                 | SchemaNodeKind::Terminated { child: payload, .. },
                 _,
-            ) => self.owned_to_handler_value(payload, value),
+            ) => self.owned_to_handler_value_with_fields(payload, value, field_values),
             _ => Ok(owned_leaf_to_handler_value(value)),
         }
     }
@@ -1447,6 +1540,50 @@ fn collect_expression_field_values(
     }
 }
 
+fn collect_owned_expression_field_values(
+    node: &SchemaNode,
+    value: &OwnedFieldValue,
+    output: &mut BTreeMap<String, i64>,
+) {
+    match (&node.kind, value) {
+        (SchemaNodeKind::Primitive { .. }, OwnedFieldValue::Int(value)) => {
+            output.insert(node.path.clone(), *value);
+        }
+        (SchemaNodeKind::Primitive { .. }, OwnedFieldValue::UInt(value)) => {
+            if let Ok(value) = i64::try_from(*value) {
+                output.insert(node.path.clone(), value);
+            }
+        }
+        (SchemaNodeKind::Primitive { .. }, OwnedFieldValue::FormId(value)) => {
+            output.insert(node.path.clone(), i64::from(value.0));
+        }
+        (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values))
+            if fields.len() == values.len() =>
+        {
+            for (field, value) in fields.iter().zip(values) {
+                collect_owned_expression_field_values(field, value, output);
+            }
+        }
+        (SchemaNodeKind::Array { element, .. }, OwnedFieldValue::Array(values)) => {
+            for value in values {
+                collect_owned_expression_field_values(element, value, output);
+            }
+        }
+        (SchemaNodeKind::Union { variants, .. }, _) => {
+            for variant in variants {
+                collect_owned_expression_field_values(variant, value, output);
+            }
+        }
+        (
+            SchemaNodeKind::Subrecord { payload, .. }
+            | SchemaNodeKind::Compressed { child: payload, .. }
+            | SchemaNodeKind::Terminated { child: payload, .. },
+            _,
+        ) => collect_owned_expression_field_values(payload, value, output),
+        _ => {}
+    }
+}
+
 fn handler_values_equal(left: &FieldValue<'_>, right: &FieldValue<'_>) -> bool {
     if let (Some(left), Some(right)) = (integer_handler_value(left), integer_handler_value(right)) {
         return left == right;
@@ -2067,6 +2204,100 @@ mod tests {
             editor.encode_node(&union, &OwnedFieldValue::UInt(7))?,
             vec![7, 0]
         );
+        Ok(())
+    }
+
+    /// Selects a sibling-dependent union from the in-flight edited fields.
+    #[test]
+    fn union_encoding_uses_updated_sibling_fields() -> Result<()> {
+        let editor = editor_with_reused_signature()?;
+        let integer = |width| PrimitiveType::Integer {
+            integer: IntegerType {
+                width,
+                signed: false,
+                byte_order: ByteOrder::LittleEndian,
+            },
+        };
+        let flags_path = "TEST/data/0:Flags".to_owned();
+        let node = SchemaNode {
+            id: SchemaNodeId(200),
+            path: "TEST/data".to_owned(),
+            name: "Data".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    SchemaNode {
+                        id: SchemaNodeId(201),
+                        path: flags_path.clone(),
+                        name: "Flags".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: integer(1),
+                        },
+                    },
+                    SchemaNode {
+                        id: SchemaNodeId(202),
+                        path: "TEST/data/1:Value".to_owned(),
+                        name: "Value".to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Union {
+                            selector: UnionSelector::Expression(
+                                bethkit_schema::Expression::Select {
+                                    condition: Box::new(bethkit_schema::Expression::BitSet {
+                                        value: Box::new(bethkit_schema::Expression::ReadField {
+                                            path: flags_path,
+                                        }),
+                                        bit: 0,
+                                    }),
+                                    if_true: Box::new(bethkit_schema::Expression::Int { value: 1 }),
+                                    if_false: Box::new(bethkit_schema::Expression::Int {
+                                        value: 0,
+                                    }),
+                                },
+                            ),
+                            variants: vec![
+                                SchemaNode {
+                                    id: SchemaNodeId(203),
+                                    path: "TEST/data/1:Value/variants/0".to_owned(),
+                                    name: "Byte".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: integer(1),
+                                    },
+                                },
+                                SchemaNode {
+                                    id: SchemaNodeId(204),
+                                    path: "TEST/data/1:Value/variants/1".to_owned(),
+                                    name: "Word".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: integer(2),
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            },
+        };
+        let value = OwnedFieldValue::Struct(vec![
+            OwnedFieldValue::UInt(1),
+            OwnedFieldValue::UInt(0x0203),
+        ]);
+
+        let encoded = editor.encode_node(&node, &value)?;
+
+        assert_eq!(encoded, vec![1, 3, 2]);
         Ok(())
     }
 
