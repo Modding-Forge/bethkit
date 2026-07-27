@@ -347,6 +347,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(RefreshSiblingUnions));
+        registry.register(Arc::new(InvalidateConflicts));
         registry.register(Arc::new(CtdaTypeFormatter));
         registry.register(Arc::new(IntegerLookupFormatter));
         registry.register(Arc::new(SynchronizeCountAfterSet));
@@ -1661,6 +1662,28 @@ impl SemanticHandler for RefreshSiblingUnions {
         // The editor overlays the full in-flight value tree onto the expression
         // context before selecting unions, which performs xEdit's eager refresh
         // without an additional byte mutation.
+        Ok(HandlerOutput::None)
+    }
+}
+
+struct InvalidateConflicts;
+
+impl SemanticHandler for InvalidateConflicts {
+    fn id(&self) -> &'static str {
+        "edit.invalidate_conflicts"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        // xEdit invalidates a mutable record conflict cache here. Bethkit's
+        // conflict report is recomputed from its inputs and retains no record
+        // cache, so completing the callback requires no byte mutation.
         Ok(HandlerOutput::None)
     }
 }
