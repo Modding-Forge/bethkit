@@ -53,6 +53,8 @@ pub enum HandlerPhase {
     UnionSelection,
     /// Dynamic selection of a schema array's element count.
     ArrayCount,
+    /// Dynamic inclusion of the next element in a schema array.
+    ArrayElementInclusion,
     /// Validation equivalent to xEdit's `ctCheck`.
     Validation,
     /// Transactional callback after a value is changed.
@@ -817,6 +819,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ModelInfoArrayCount));
         registry.register(Arc::new(WorldspaceOffsetColumnCount));
         registry.register(Arc::new(OblivionPathGridConnectionCount));
+        registry.register(Arc::new(StarSlotArrayElementInclusion));
         registry.register(Arc::new(SelectCtdaParameter { table: None }));
         registry.register(Arc::new(SelectCoedOwner { resolver: None }));
         registry.register(Arc::new(SelectNoteData));
@@ -3237,6 +3240,7 @@ fn unresolved_vmad_alias(raw: i64, phase: HandlerPhase, game: SchemaGame) -> Res
         | HandlerPhase::ParseEditValue
         | HandlerPhase::UnionSelection
         | HandlerPhase::ArrayCount
+        | HandlerPhase::ArrayElementInclusion
         | HandlerPhase::AfterSet
         | HandlerPhase::ReferenceResolution
         | HandlerPhase::Conflict
@@ -4227,6 +4231,52 @@ impl SemanticHandler for OblivionPathGridConnectionCount {
                 ),
             })?;
         Ok(HandlerOutput::Integer(i64::from(count)))
+    }
+}
+
+struct StarSlotArrayElementInclusion;
+
+impl SemanticHandler for StarSlotArrayElementInclusion {
+    fn id(&self) -> &'static str {
+        "array.star_slot_matches_outer_index"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ArrayElementInclusion {
+            return Ok(HandlerOutput::None);
+        }
+        let outer_index =
+            invocation
+                .array_indices
+                .last()
+                .copied()
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "star-slot inclusion requires its outer array index".to_owned(),
+                })?;
+        let bytes = match invocation.value {
+            Some(FieldValue::Bytes(bytes)) => bytes.as_ref(),
+            _ => {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "star-slot inclusion requires payload bytes".to_owned(),
+                });
+            }
+        };
+        let star_slot = bytes
+            .get(..4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "star-slot element is shorter than four bytes".to_owned(),
+            })?;
+        let include = usize::try_from(star_slot).is_ok_and(|slot| slot == outer_index);
+        Ok(HandlerOutput::Integer(i64::from(include)))
     }
 }
 
@@ -12134,6 +12184,43 @@ mod tests {
                 HandlerOutput::Integer(actual) if actual == expected
             ));
         }
+        Ok(())
+    }
+
+    /// Includes Starfield LGDI elements only in their encoded star-slot group.
+    #[test]
+    fn star_slot_array_inclusion_matches_outer_array_index() -> TestResult {
+        let binding = test_metadata_binding(
+            "array.should_include",
+            "array.star_slot_matches_outer_index",
+            serde_json::json!({}),
+        );
+        let value = FieldValue::Bytes(Cow::Borrowed(&[2, 0, 0, 0, 99]));
+        let indices = [2_usize];
+
+        let output = StarSlotArrayElementInclusion.invoke(HandlerInvocation {
+            context: HandlerContext {
+                binding: &binding,
+                record_signature: Signature(*b"LGDI"),
+                form_id: FormId::NULL,
+                form_version: 0,
+                game: SchemaGame::Starfield,
+                configuration: match &binding.implementation {
+                    CallbackImplementation::BuiltIn { operation } => &operation.configuration,
+                    _ => unreachable!("test binding is built-in"),
+                },
+            },
+            phase: HandlerPhase::ArrayElementInclusion,
+            value: Some(&value),
+            old_value: None,
+            value_scope: None,
+            source_record: None,
+            source_writable_record: None,
+            source_subrecord_index: None,
+            array_indices: &indices,
+        })?;
+
+        assert!(matches!(output, HandlerOutput::Integer(1)));
         Ok(())
     }
 

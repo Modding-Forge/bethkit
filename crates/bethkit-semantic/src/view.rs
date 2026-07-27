@@ -693,6 +693,9 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         path: node.path.clone(),
                         message: "array cursor exceeded payload".to_owned(),
                     })?;
+                    if !self.should_include_array_element(node, remaining, frame)? {
+                        break;
+                    }
                     let mut child_array_indices = frame.array_indices.to_vec();
                     child_array_indices.push(values.len());
                     let child_frame = DecodeFrame {
@@ -703,7 +706,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     };
                     let (value, consumed) =
                         self.decode_node(element, payload, remaining, child_frame, field_values)?;
-                    if consumed == 0 {
+                    if consumed == 0 && element_count.is_none() {
                         return Err(SemanticError::Decode {
                             path: element.path.clone(),
                             message: "array element consumed no bytes".to_owned(),
@@ -924,6 +927,51 @@ impl<'context, 'record> RecordView<'context, 'record> {
             path: node.path.clone(),
             message: "array count exceeds platform size".to_owned(),
         })
+    }
+
+    fn should_include_array_element(
+        &self,
+        node: &SchemaNode,
+        remaining: &[u8],
+        frame: DecodeFrame<'_, '_>,
+    ) -> Result<bool> {
+        let Some(binding) = self
+            .context
+            .registry()
+            .package()
+            .callback_bindings()
+            .iter()
+            .find(|binding| {
+                binding.path == node.path && binding.callback_id == "array.should_include"
+            })
+        else {
+            return Ok(true);
+        };
+        let value = FieldValue::Bytes(Cow::Owned(remaining.to_vec()));
+        match self.context.handlers().invoke_with_records(
+            binding,
+            HandlerRecordContext::new(
+                self.record.header.signature,
+                self.record.header.form_id,
+                self.record.header.form_version,
+                self.context.registry().package().manifest().game,
+            ),
+            HandlerInvocationAccess::read_only_subrecord_with_scope(
+                self.record,
+                frame.source_subrecord_index,
+                None,
+            )
+            .with_array_indices(frame.array_indices),
+            HandlerPhase::ArrayElementInclusion,
+            Some(&value),
+            None,
+        )? {
+            HandlerOutput::Integer(value) => Ok(value != 0),
+            _ => Err(SemanticError::Handler {
+                handler: binding.callback_id.clone(),
+                message: "array inclusion callback returned a non-integer result".to_owned(),
+            }),
+        }
     }
 
     fn invoke_integer_callback(
@@ -1981,6 +2029,159 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
             vec![1, 2, 3]
+        );
+        Ok(())
+    }
+
+    /// Splits Starfield star-slot payloads into five fixed outer groups.
+    #[test]
+    fn array_inclusion_callback_groups_remainder_elements(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let inner_path = "LGDI/0:Data/payload/element";
+        let element = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(4),
+            path: format!("{inner_path}/element"),
+            name: "Entry".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(5),
+                        path: format!("{inner_path}/element/0:Star Slot"),
+                        name: "Star Slot".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::Integer {
+                                integer: IntegerType {
+                                    width: 4,
+                                    signed: false,
+                                    byte_order: ByteOrder::LittleEndian,
+                                },
+                            },
+                        },
+                    },
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(6),
+                        path: format!("{inner_path}/element/1:Value"),
+                        name: "Value".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::Integer {
+                                integer: IntegerType {
+                                    width: 1,
+                                    signed: false,
+                                    byte_order: ByteOrder::LittleEndian,
+                                },
+                            },
+                        },
+                    },
+                ],
+            },
+        };
+        let inner = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(3),
+            path: inner_path.to_owned(),
+            name: "Slot".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Array {
+                element: Box::new(element),
+                count: ArrayCount::Remainder,
+            },
+        };
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "LGDI".to_owned(),
+            name: "Leveled Item".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(1),
+                    path: "LGDI/0:Data".to_owned(),
+                    name: "Data".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Subrecord {
+                        signature: SchemaSignature(*b"DATA"),
+                        payload: Box::new(SchemaNode {
+                            id: bethkit_schema::SchemaNodeId(2),
+                            path: "LGDI/0:Data/payload".to_owned(),
+                            name: "Slots".to_owned(),
+                            required: true,
+                            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Array {
+                                element: Box::new(inner),
+                                count: ArrayCount::Fixed { count: 5 },
+                            },
+                        }),
+                    },
+                }],
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = bethkit_schema::SchemaGame::Starfield;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "array.star_slot_matches_outer_index".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"LGDI"),
+                name: "Leveled Item".to_owned(),
+                root,
+            }],
+            vec![CallbackBinding {
+                path: inner_path.to_owned(),
+                callback_id: "array.should_include".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "00".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "array.star_slot_matches_outer_index".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::Value::Null,
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut payload = Vec::new();
+        for (slot, value) in [(0_u32, 10_u8), (0, 11), (2, 20), (4, 40)] {
+            payload.extend(slot.to_le_bytes());
+            payload.push(value);
+        }
+        let record_bytes = test_record_bytes(b"LGDI", b"DATA", &payload);
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::sse())?;
+
+        let fields = context.view(&record, false)?.fields()?;
+
+        let FieldValue::Array(groups) = &fields[0].value else {
+            return Err("expected star-slot groups".into());
+        };
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| match group {
+                    FieldValue::Array(values) => values.len(),
+                    _ => 0,
+                })
+                .collect::<Vec<_>>(),
+            vec![2, 0, 1, 0, 1]
         );
         Ok(())
     }
