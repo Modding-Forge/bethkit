@@ -602,6 +602,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ResolveVmadObjectAliasLink { resolver: None }));
         registry.register(Arc::new(FormatLandscapePosition));
         registry.register(Arc::new(FormatClimateMoons));
+        registry.register(Arc::new(FormatClimateTime));
         registry.register(Arc::new(FormatIdleAnimationGroup));
         registry.register(Arc::new(FormatWeatherClassification));
         registry.register(Arc::new(FixedHexIntegerFormatter));
@@ -2831,6 +2832,45 @@ impl SemanticHandler for FormatClimateMoons {
             HandlerPhase::SortKey => format!("{value:02X}"),
             HandlerPhase::EditValue | HandlerPhase::NativeValue => value.to_string(),
             HandlerPhase::Validation => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct FormatClimateTime;
+
+impl SemanticHandler for FormatClimateTime {
+    fn id(&self) -> &'static str {
+        "format.climate_time"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            return parse_integer_handler_value(
+                invocation.value,
+                self.id(),
+                "climate time edit parsing requires text",
+            );
+        }
+
+        let value = i64::try_from(callback_integer(
+            invocation
+                .value
+                .ok_or_else(|| climate_time_error("climate time formatting requires an integer"))?,
+            self.id(),
+        )?)
+        .map_err(|_| climate_time_error("climate time value exceeds i64"))?;
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary => format_climate_time(value),
+            HandlerPhase::SortKey => format!("{value:04X}"),
+            HandlerPhase::EditValue | HandlerPhase::NativeValue | HandlerPhase::Validation => {
+                String::new()
+            }
             _ => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Text(text))
@@ -5205,6 +5245,22 @@ fn climate_moons_error(message: impl Into<String>) -> SemanticError {
     }
 }
 
+fn format_climate_time(value: i64) -> String {
+    if !(0..144).contains(&value) {
+        return value.to_string();
+    }
+    let hours = value / 6;
+    let minutes = value % 6 * 10;
+    format!("{hours:02}:{minutes:02}:00")
+}
+
+fn climate_time_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.climate_time".to_owned(),
+        message: message.into(),
+    }
+}
+
 fn parse_integer_handler_value(
     value: Option<&FieldValue<'static>>,
     handler: &str,
@@ -7414,6 +7470,55 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Text(text) if text == "FF"
+        ));
+        Ok(())
+    }
+
+    /// Matches xEdit's six-values-per-hour climate time formatter.
+    #[test]
+    fn climate_time_formatter_matches_xedit_units_and_fallback() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.climate_time",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"CLMT"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+
+        // when / then
+        for (value, expected) in [(0, "00:00:00"), (39, "06:30:00"), (143, "23:50:00")] {
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::Display,
+                    Some(&FieldValue::UInt(value)),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::Summary,
+                Some(&FieldValue::UInt(144)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "144"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::SortKey,
+                Some(&FieldValue::UInt(39)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "0027"
         ));
         Ok(())
     }
