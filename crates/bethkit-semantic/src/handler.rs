@@ -451,6 +451,18 @@ pub trait FormLinkResolver: Send + Sync {
         form_id: FormId,
         targets: &[Signature],
     ) -> Option<FormLinkInfo>;
+
+    /// Resolves the effective quest context inherited by an INFO condition.
+    ///
+    /// The default returns `None` because resolving INFO parent groups requires
+    /// load-order context beyond one parsed record.
+    fn resolve_info_condition_quest(
+        &self,
+        _source: HandlerRecordContext,
+        _record: &Record,
+    ) -> Option<FormLinkInfo> {
+        None
+    }
 }
 
 /// Metadata associated with one Wwise object GUID.
@@ -499,9 +511,21 @@ enum HandlerRecordSource<'a> {
     Writable(&'a WritableRecord),
 }
 
-struct HandlerInvocationAccess<'a> {
+pub(crate) struct HandlerInvocationAccess<'a> {
     source: HandlerRecordSource<'a>,
     value_scope: Option<&'a FieldValue<'static>>,
+}
+
+impl<'a> HandlerInvocationAccess<'a> {
+    pub(crate) fn read_only_with_scope(
+        record: &'a Record,
+        value_scope: Option<&'a FieldValue<'static>>,
+    ) -> Self {
+        Self {
+            source: HandlerRecordSource::ReadOnly(record),
+            value_scope,
+        }
+    }
 }
 
 impl Default for HandlerInvocationAccess<'_> {
@@ -546,6 +570,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatObjectProperty { resolver: None }));
         registry.register(Arc::new(FormatVmadObjectAlias { resolver: None }));
         registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
+        registry.register(Arc::new(FormatCtdaConditionAlias { resolver: None }));
         registry.register(Arc::new(ResolveVmadObjectAliasLink { resolver: None }));
         registry.register(Arc::new(FormatLandscapePosition));
         registry.register(Arc::new(FormatClimateMoons));
@@ -607,6 +632,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatCtdaQuestStage {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatCtdaConditionAlias {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(ResolveVmadObjectAliasLink {
@@ -764,7 +792,7 @@ impl SemanticHandlerRegistry {
         )
     }
 
-    fn invoke_with_records<'a>(
+    pub(crate) fn invoke_with_records<'a>(
         &self,
         binding: &'a CallbackBinding,
         record: HandlerRecordContext,
@@ -1763,6 +1791,74 @@ struct FormatCtdaQuestStage {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatCtdaConditionAlias {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for FormatCtdaConditionAlias {
+    fn id(&self) -> &'static str {
+        "format.ctda_condition_alias"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(ctda_condition_alias_error(
+                    "condition alias edit parsing requires text",
+                ));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Int(parse_vmad_alias(
+                value,
+                invocation.context.game,
+            ))));
+        }
+        let raw = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                ctda_condition_alias_error("condition alias formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| ctda_condition_alias_error("condition alias exceeds i64"))?;
+        if invocation.phase == HandlerPhase::SortKey {
+            return Ok(HandlerOutput::Text(format!("{:08X}", raw as u64)));
+        }
+        let source = handler_record_context(&invocation.context);
+        let Some(record) = invocation.source_record else {
+            return Ok(HandlerOutput::Text(String::new()));
+        };
+        let resolver = self.resolver.as_deref();
+        let quest = if invocation.context.record_signature == Signature(*b"QUST") {
+            resolver.and_then(|resolver| {
+                resolver.resolve_form_id(source, invocation.context.form_id, &[Signature(*b"QUST")])
+            })
+        } else if invocation.context.record_signature == Signature(*b"SCEN") {
+            resolve_condition_quest_subrecord(record, Signature(*b"PNAM"), source, resolver)?
+        } else if invocation.context.record_signature == Signature(*b"PACK") {
+            resolve_condition_quest_subrecord(record, Signature(*b"QNAM"), source, resolver)?
+        } else if invocation.context.record_signature == Signature(*b"INFO") {
+            resolver.and_then(|resolver| resolver.resolve_info_condition_quest(source, record))
+        } else {
+            return Ok(HandlerOutput::Text(format_unresolved_condition_alias(
+                raw,
+                invocation.phase,
+            )));
+        };
+        if invocation.context.record_signature == Signature(*b"INFO") && quest.is_none() {
+            return Ok(HandlerOutput::Text(String::new()));
+        }
+        Ok(HandlerOutput::Text(format_resolved_quest_alias(
+            raw,
+            invocation.phase,
+            invocation.context.game,
+            quest.as_ref(),
+        )))
+    }
+}
+
 impl SemanticHandler for FormatCtdaQuestStage {
     fn id(&self) -> &'static str {
         "format.ctda_quest_stage"
@@ -1964,6 +2060,47 @@ fn ctda_quest_stage_error(message: impl Into<String>) -> SemanticError {
     }
 }
 
+fn resolve_condition_quest_subrecord(
+    record: &Record,
+    signature: Signature,
+    source: HandlerRecordContext,
+    resolver: Option<&dyn FormLinkResolver>,
+) -> Result<Option<FormLinkInfo>> {
+    let subrecords = record.subrecords()?;
+    let Some(subrecord) = subrecords
+        .iter()
+        .find(|subrecord| subrecord.signature == signature)
+    else {
+        return Ok(None);
+    };
+    let bytes: [u8; 4] = subrecord
+        .as_bytes()
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| {
+            ctda_condition_alias_error(format!(
+                "{signature} quest reference is shorter than four bytes"
+            ))
+        })?;
+    let form_id = FormId(u32::from_le_bytes(bytes));
+    Ok(resolver
+        .and_then(|resolver| resolver.resolve_form_id(source, form_id, &[Signature(*b"QUST")])))
+}
+
+fn format_unresolved_condition_alias(raw: i64, phase: HandlerPhase) -> String {
+    match phase {
+        HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => raw.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn ctda_condition_alias_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.ctda_condition_alias".to_owned(),
+        message: message.into(),
+    }
+}
+
 impl SemanticHandler for FormatVmadObjectAlias {
     fn id(&self) -> &'static str {
         "format.vmad_object_alias"
@@ -2050,22 +2187,32 @@ fn format_vmad_object_alias(
     if phase == HandlerPhase::SortKey {
         return Ok(format!("{:08X}", raw as u64));
     }
-    let mut result = unresolved_vmad_alias(raw, phase, game)?;
+    let link =
+        resolver.and_then(|resolver| resolver.resolve_form_id(source, quest_form_id, targets));
+    Ok(format_resolved_quest_alias(raw, phase, game, link.as_ref()))
+}
+
+fn format_resolved_quest_alias(
+    raw: i64,
+    phase: HandlerPhase,
+    game: SchemaGame,
+    link: Option<&FormLinkInfo>,
+) -> String {
+    let mut result =
+        unresolved_vmad_alias(raw, phase, game).expect("alias fallback formatting is infallible");
     if vmad_alias_is_sentinel(raw, game)
         && !matches!(
             phase,
             HandlerPhase::NativeValue | HandlerPhase::ParseEditValue
         )
     {
-        return Ok(result);
+        return result;
     }
-    let Some(link) =
-        resolver.and_then(|resolver| resolver.resolve_form_id(source, quest_form_id, targets))
-    else {
-        return Ok(result);
+    let Some(link) = link else {
+        return result;
     };
     let Some(aliases) = link.quest_aliases() else {
-        return Ok(match phase {
+        return match phase {
             HandlerPhase::Display => format!(
                 "{raw} <Warning: \"{}\" is not a Quest record>",
                 link.short_name()
@@ -2075,7 +2222,7 @@ fn format_vmad_object_alias(
                 format!("<Warning: \"{}\" is not a Quest record>", link.short_name())
             }
             _ => result,
-        });
+        };
     };
     if let Some(alias) = aliases.iter().find(|alias| alias.index() == raw) {
         let include_index = phase != HandlerPhase::Summary
@@ -2091,9 +2238,9 @@ fn format_vmad_object_alias(
         if phase == HandlerPhase::Validation {
             result.clear();
         }
-        return Ok(result);
+        return result;
     }
-    Ok(match phase {
+    match phase {
         HandlerPhase::Display => format!(
             "{raw} <Warning: Quest Alias not found in \"{}\">",
             link.value()
@@ -2103,7 +2250,7 @@ fn format_vmad_object_alias(
             format!("<Warning: Quest Alias not found in \"{}\">", link.value())
         }
         _ => result,
-    })
+    }
 }
 
 fn unresolved_vmad_alias(raw: i64, phase: HandlerPhase, game: SchemaGame) -> Result<String> {
@@ -6457,6 +6604,64 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::Int(10))
+        ));
+        Ok(())
+    }
+
+    /// Resolves CTDA aliases through the quest context inherited by a scene.
+    #[test]
+    fn ctda_condition_alias_formatter_matches_xedit(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.ctda_condition_alias",
+            serde_json::Value::Null,
+        );
+        let scene = test_record(*b"SCEN", &[(*b"PNAM", 0x5678_u32.to_le_bytes().to_vec())])?;
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let record =
+            HandlerRecordContext::new(Signature(*b"SCEN"), FormId::NULL, 0, SchemaGame::Starfield);
+        let alias = FieldValue::Int(7);
+        let missing = FieldValue::Int(8);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &binding,
+                record,
+                Some(&scene),
+                HandlerPhase::Display,
+                Some(&alias),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "007 Target"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &binding,
+                record,
+                Some(&scene),
+                HandlerPhase::Validation,
+                Some(&missing),
+                None,
+            )?,
+            HandlerOutput::Text(text)
+                if text
+                    == "<Warning: Quest Alias not found in \
+                        \"Example Quest [QUST:00005678]\">"
+        ));
+        let player = FieldValue::String(Cow::Borrowed("Player"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&player),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(-2))
         ));
         Ok(())
     }

@@ -11,7 +11,7 @@ use bethkit_schema::{
     SchemaPackage, SchemaRegistry,
 };
 
-use crate::{value::handler_to_owned_value, OwnedFieldValue};
+use crate::{handler::HandlerInvocationAccess, value::handler_to_owned_value, OwnedFieldValue};
 use crate::{
     DecoderRegistry, FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, RecordEditor,
     RecordGridCell, RecordIndexKey, RecordView, Result, SemanticError, SemanticHandlerRegistry,
@@ -273,13 +273,13 @@ impl SemanticContext {
             ) {
                 continue;
             }
-            let output = self.handlers.invoke_with_value_scope(
+            let output = self.handlers.invoke_with_records(
                 binding,
                 self.handler_record(record),
+                HandlerInvocationAccess::read_only_with_scope(record, handler_scope.as_ref()),
                 format.into(),
                 Some(&handler_value),
                 None,
-                handler_scope.as_ref(),
             )?;
             let text = match output {
                 HandlerOutput::None => continue,
@@ -353,13 +353,13 @@ impl SemanticContext {
             ) {
                 continue;
             }
-            match self.handlers.invoke_with_value_scope(
+            match self.handlers.invoke_with_records(
                 binding,
                 self.handler_record(record),
+                HandlerInvocationAccess::read_only_with_scope(record, handler_scope.as_ref()),
                 HandlerPhase::ReferenceResolution,
                 Some(&handler_value),
                 None,
-                handler_scope.as_ref(),
             )? {
                 HandlerOutput::None => {}
                 HandlerOutput::Link(link) => return Ok(Some(link)),
