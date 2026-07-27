@@ -761,6 +761,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FixedHexIntegerFormatter));
         registry.register(Arc::new(ScaledInt4Formatter));
         registry.register(Arc::new(HideFfffFormatter));
+        registry.register(Arc::new(CloudSpeedFormatter));
         registry.register(Arc::new(NextObjectIdFormatter { resolver: None }));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
@@ -3492,6 +3493,64 @@ struct FixedHexIntegerFormatter;
 struct ScaledInt4Formatter;
 
 struct HideFfffFormatter;
+
+struct CloudSpeedFormatter;
+
+impl SemanticHandler for CloudSpeedFormatter {
+    fn id(&self) -> &'static str {
+        "format.cloud_speed"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(input)) = invocation.value else {
+                return Err(integer_formatter_error(
+                    self.id(),
+                    "cloud speed edit parsing requires text",
+                ));
+            };
+            let parsed = input.trim().parse::<f64>().map_err(|error| {
+                integer_formatter_error(
+                    self.id(),
+                    format!("invalid cloud speed edit value {input:?}: {error}"),
+                )
+            })?;
+            let scaled = parsed * 10.0 * 127.0 + 127.0;
+            if !scaled.is_finite() || scaled < i64::MIN as f64 {
+                return Err(integer_formatter_error(
+                    self.id(),
+                    "cloud speed edit value exceeds i64",
+                ));
+            }
+            let value = (scaled.round_ties_even() as i64).min(254);
+            return Ok(if value < 0 {
+                HandlerOutput::Value(FieldValue::Int(value))
+            } else {
+                HandlerOutput::Value(FieldValue::UInt(value as u64))
+            });
+        }
+
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                integer_formatter_error(self.id(), "cloud speed formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| integer_formatter_error(self.id(), "cloud speed value exceeds i64"))?;
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+                format!("{:.4}", (value - 127) as f64 / 1_270.0)
+            }
+            HandlerPhase::Validation => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
 
 impl SemanticHandler for HideFfffFormatter {
     fn id(&self) -> &'static str {
@@ -9177,6 +9236,63 @@ mod tests {
                 )?,
                 HandlerOutput::Text(text) if text == expected
             ));
+        }
+        Ok(())
+    }
+
+    /// Matches xEdit's fixed cloud-speed display, parsing, and upper clamp.
+    #[test]
+    fn cloud_speed_formatter_matches_xedit() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.cloud_speed",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"WTHR"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+
+        // when / then
+        for (value, expected) in [
+            (0_u64, "-0.1000"),
+            (127, "0.0000"),
+            (254, "0.1000"),
+            (255, "0.1008"),
+        ] {
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::Display,
+                    Some(&FieldValue::UInt(value)),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
+        for (input, expected) in [
+            ("-0.1", 0_i64),
+            ("0", 127),
+            ("0.1", 254),
+            ("1", 254),
+            ("-0.2", -127),
+        ] {
+            let output = handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::ParseEditValue,
+                Some(&FieldValue::String(input.into())),
+                None,
+            )?;
+            let actual = match output {
+                HandlerOutput::Value(FieldValue::Int(value)) => value,
+                HandlerOutput::Value(FieldValue::UInt(value)) => {
+                    i64::try_from(value).expect("cloud speed test values fit in a signed integer")
+                }
+                _ => panic!("cloud speed parser did not return an integer value"),
+            };
+            assert_eq!(actual, expected);
         }
         Ok(())
     }
