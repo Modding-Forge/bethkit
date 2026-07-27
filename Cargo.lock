@@ -140,6 +140,7 @@ name = "bethkit-semantic"
 version = "0.4.0"
 dependencies = [
  "bethkit-core",
+ "bethkit-io",
  "bethkit-schema",
  "encoding_rs",
  "serde_json",

@@ -9,3 +9,6 @@ bethkit-schema = { path = "../bethkit-schema" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 encoding_rs = { workspace = true }
+
+[dev-dependencies]
+bethkit-io = { path = "../bethkit-io" }

@@ -1594,6 +1594,14 @@ fn decode_length_error(path: &str, expected: usize, actual: usize) -> SemanticEr
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use bethkit_core::{GameContext, Record};
+    use bethkit_io::SliceCursor;
+    use bethkit_schema::{
+        SchemaManifest, SchemaPackage, SchemaSignature, ValidationStatus, PACKAGE_FORMAT_VERSION,
+    };
+
     use super::*;
 
     fn terminated_byte_node() -> SchemaNode {
@@ -1683,6 +1691,160 @@ mod tests {
             3
         );
         Ok(())
+    }
+
+    /// Reads a sibling counter before decoding a bounded array and its following field.
+    #[test]
+    fn record_view_resolves_prior_field_array_counts(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let byte = |id, path: &str, name: &str| SchemaNode {
+            id: bethkit_schema::SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::Integer {
+                    integer: IntegerType {
+                        width: 1,
+                        signed: false,
+                        byte_order: ByteOrder::LittleEndian,
+                    },
+                },
+            },
+        };
+        let count_path = "TEST/0:Data/payload/0:Count";
+        let array_path = "TEST/0:Data/payload/1:Items";
+        let payload = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(2),
+            path: "TEST/0:Data/payload".to_owned(),
+            name: "Payload".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    byte(3, count_path, "Count"),
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(4),
+                        path: array_path.to_owned(),
+                        name: "Items".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Array {
+                            element: Box::new(byte(5, &format!("{array_path}/element"), "Item")),
+                            count: ArrayCount::Expression {
+                                expression: bethkit_schema::Expression::ReadField {
+                                    path: count_path.to_owned(),
+                                },
+                            },
+                        },
+                    },
+                    byte(6, "TEST/0:Data/payload/2:Tail", "Tail"),
+                ],
+            },
+        };
+        let package = SchemaPackage::new(
+            test_manifest(),
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(0),
+                    path: "TEST".to_owned(),
+                    name: "Test".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: bethkit_schema::SchemaNodeId(1),
+                            path: "TEST/0:Data".to_owned(),
+                            name: "Data".to_owned(),
+                            required: true,
+                            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"DATA"),
+                                payload: Box::new(payload),
+                            },
+                        }],
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let record_bytes = test_record_bytes(b"TEST", b"DATA", &[2, 10, 11, 99]);
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::sse())?;
+
+        let fields = context.view(&record, false)?.fields()?;
+
+        let FieldValue::Struct(values) = &fields[0].value else {
+            return Err("expected decoded struct".into());
+        };
+        assert!(matches!(values[0].value, FieldValue::UInt(2)));
+        assert!(matches!(
+            &values[1].value,
+            FieldValue::Array(items)
+                if matches!(items.as_slice(), [FieldValue::UInt(10), FieldValue::UInt(11)])
+        ));
+        assert!(matches!(values[2].value, FieldValue::UInt(99)));
+        Ok(())
+    }
+
+    fn test_record_bytes(
+        record_signature: &[u8; 4],
+        subrecord_signature: &[u8; 4],
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let data_size = 6_u32 + u32::try_from(payload.len()).expect("test payload fits u32");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(record_signature);
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&44_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(subrecord_signature);
+        bytes.extend_from_slice(
+            &u16::try_from(payload.len())
+                .expect("test payload fits u16")
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn test_manifest() -> SchemaManifest {
+        SchemaManifest {
+            format_version: PACKAGE_FORMAT_VERSION,
+            game: bethkit_schema::SchemaGame::SkyrimSe,
+            package_version: "test".to_owned(),
+            source_repository: "TES5Edit/TES5Edit".to_owned(),
+            source_tag: "test".to_owned(),
+            source_commit: "00".repeat(20),
+            source_archive_sha256: "00".repeat(32),
+            exporter_version: "test".to_owned(),
+            exporter_binary_sha256: "00".repeat(32),
+            exporter_map_sha256: "00".repeat(32),
+            exporter_patch_sha256: "00".repeat(32),
+            exporter_build_sha256: "00".repeat(32),
+            conversion_rules_sha256: "00".repeat(32),
+            minimum_bethkit_version: "0.4.0".to_owned(),
+            minimum_abi_version: 2,
+            validation_status: ValidationStatus::Candidate,
+            corpus_sha256: "00".repeat(32),
+            validated_records: 0,
+            byte_coverage: 0.0,
+            callbacks_total: 0,
+            callbacks_classified: 0,
+            required_decoders: Vec::new(),
+            required_handlers: Vec::new(),
+        }
     }
 
     /// Matches xEdit's packed 6/14/30-bit unsigned counter decoding.
