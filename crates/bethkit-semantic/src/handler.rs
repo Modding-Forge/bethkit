@@ -152,6 +152,17 @@ pub enum HandlerMutation {
         /// Zero-based occurrence.
         occurrence: usize,
     },
+    /// Make an integer counter match a decoded collection length.
+    SynchronizeCount {
+        /// Stable path of the counter subrecord.
+        path: String,
+        /// Zero-based counter occurrence.
+        occurrence: usize,
+        /// Collection length written to the counter.
+        value: u64,
+        /// Remove an existing optional counter when the length is zero.
+        remove_when_zero: bool,
+    },
 }
 
 /// Typed result returned by a semantic callback handler.
@@ -279,6 +290,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(CtdaTypeFormatter));
         registry.register(Arc::new(IntegerLookupFormatter));
+        registry.register(Arc::new(SynchronizeCountAfterSet));
         registry.register(Arc::new(InvalidModelInfoValidation));
         registry.register(Arc::new(WwiseGuidFormatter { resolver: None }));
         registry
@@ -1081,6 +1093,58 @@ impl SemanticHandler for IntegerLookupFormatter {
             _ => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct SynchronizeCountAfterSet;
+
+impl SemanticHandler for SynchronizeCountAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.sync_count"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let FieldValue::Array(values) = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "counter synchronization requires an array value".to_owned(),
+        })?
+        else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "counter synchronization requires an array value".to_owned(),
+            });
+        };
+        let value = u64::try_from(values.len()).map_err(|_| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "array length exceeds u64".to_owned(),
+        })?;
+        let path =
+            configuration_string(invocation.context.configuration, "counter_path", self.id())?
+                .to_owned();
+        let required = invocation
+            .context
+            .configuration
+            .get("counter_required")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "counter synchronization requires counter_required".to_owned(),
+            })?;
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::SynchronizeCount {
+                path,
+                occurrence: 0,
+                value,
+                remove_when_zero: !required,
+            },
+        ]))
     }
 }
 
@@ -2142,6 +2206,57 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::Int(123))
+        ));
+        Ok(())
+    }
+
+    /// Converts an array edit into one transactional sibling-counter update.
+    #[test]
+    fn synchronize_count_handler_tracks_array_length() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/1:Values/payload".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-sync-count".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.sync_count".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "counter_path": "TEST/0:Value Count",
+                        "counter_required": false
+                    }),
+                },
+            },
+        };
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let values = FieldValue::Array(vec![
+            FieldValue::UInt(1),
+            FieldValue::UInt(2),
+            FieldValue::UInt(3),
+        ]);
+
+        let output = SemanticHandlerRegistry::builtin().invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&values),
+            None,
+        )?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::SynchronizeCount {
+                        path,
+                        occurrence: 0,
+                        value: 3,
+                        remove_when_zero: true,
+                    }] if path == "TEST/0:Value Count"
+                )
         ));
         Ok(())
     }

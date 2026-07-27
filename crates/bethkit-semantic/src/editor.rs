@@ -748,6 +748,48 @@ impl RecordEditor {
                     }
                     record.subrecords.remove(index);
                 }
+                HandlerMutation::SynchronizeCount {
+                    path,
+                    occurrence,
+                    value,
+                    remove_when_zero,
+                } => {
+                    let existing = self
+                        .assigned_subrecord_index(record, &path, occurrence)
+                        .map(Some)
+                        .or_else(|error| match error {
+                            SemanticError::MissingOccurrence { .. } => Ok(None),
+                            _ => Err(error),
+                        })?;
+                    if value == 0 && remove_when_zero {
+                        if let Some(index) = existing {
+                            record.subrecords.remove(index);
+                        }
+                        continue;
+                    }
+                    let (signature, encoded) =
+                        self.encode_path(&path, &OwnedFieldValue::UInt(value))?;
+                    if let Some(index) = existing {
+                        if record.subrecords[index].signature != signature {
+                            return Err(SemanticError::Encode {
+                                path,
+                                message: "assigned counter signature does not match schema"
+                                    .to_owned(),
+                            });
+                        }
+                        record.subrecords[index].data = encoded;
+                    } else {
+                        let node = self.find_node(&path)?;
+                        let index = self.schema_insertion_index(record, node)?;
+                        record.subrecords.insert(
+                            index,
+                            WritableSubRecord {
+                                signature,
+                                data: encoded,
+                            },
+                        );
+                    }
+                }
             }
         }
         Ok(())
@@ -1175,7 +1217,60 @@ mod tests {
                     conflict_priority: ConflictPriority::Normal,
                     condition: None,
                     kind: SchemaNodeKind::Sequence {
-                        children: vec![subrecord(1, "TEST/first"), subrecord(2, "TEST/second")],
+                        children: vec![
+                            subrecord(1, "TEST/first"),
+                            subrecord(2, "TEST/second"),
+                            SchemaNode {
+                                id: SchemaNodeId(3),
+                                path: "TEST/2:Value Count".to_owned(),
+                                name: "Value Count".to_owned(),
+                                required: false,
+                                conflict_priority: ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Subrecord {
+                                    signature: SchemaSignature(*b"VCNT"),
+                                    payload: Box::new(SchemaNode {
+                                        id: SchemaNodeId(103),
+                                        path: "TEST/2:Value Count/payload".to_owned(),
+                                        name: "Count".to_owned(),
+                                        required: true,
+                                        conflict_priority: ConflictPriority::Normal,
+                                        condition: None,
+                                        kind: SchemaNodeKind::Primitive {
+                                            primitive: PrimitiveType::Integer {
+                                                integer: IntegerType {
+                                                    width: 4,
+                                                    signed: false,
+                                                    byte_order: ByteOrder::LittleEndian,
+                                                },
+                                            },
+                                        },
+                                    }),
+                                },
+                            },
+                            SchemaNode {
+                                id: SchemaNodeId(4),
+                                path: "TEST/3:Values".to_owned(),
+                                name: "Values".to_owned(),
+                                required: true,
+                                conflict_priority: ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Subrecord {
+                                    signature: SchemaSignature(*b"VALU"),
+                                    payload: Box::new(SchemaNode {
+                                        id: SchemaNodeId(104),
+                                        path: "TEST/3:Values/payload".to_owned(),
+                                        name: "Values".to_owned(),
+                                        required: true,
+                                        conflict_priority: ConflictPriority::Normal,
+                                        condition: None,
+                                        kind: SchemaNodeKind::Primitive {
+                                            primitive: PrimitiveType::Bytes { length: None },
+                                        },
+                                    }),
+                                },
+                            },
+                        ],
                     },
                 },
             }],
@@ -1197,6 +1292,10 @@ mod tests {
                     WritableSubRecord {
                         signature: Signature(*b"AAAA"),
                         data: vec![2],
+                    },
+                    WritableSubRecord {
+                        signature: Signature(*b"VALU"),
+                        data: Vec::new(),
                     },
                 ],
             },
@@ -1235,6 +1334,61 @@ mod tests {
             editor.assigned_subrecord_index(&editor.record, "TEST/second", 1),
             Err(SemanticError::MissingOccurrence { occurrence: 1, .. })
         ));
+        Ok(())
+    }
+
+    /// Inserts, updates, and removes optional counters in schema order.
+    #[test]
+    fn editor_synchronizes_optional_counter_transactionally() -> Result<()> {
+        let editor = editor_with_reused_signature()?;
+        let mut record = clone_record(&editor.record);
+
+        editor.apply_mutations(
+            &mut record,
+            vec![HandlerMutation::SynchronizeCount {
+                path: "TEST/2:Value Count".to_owned(),
+                occurrence: 0,
+                value: 3,
+                remove_when_zero: true,
+            }],
+        )?;
+
+        assert_eq!(
+            record
+                .subrecords
+                .iter()
+                .map(|subrecord| subrecord.signature)
+                .collect::<Vec<_>>(),
+            vec![
+                Signature(*b"AAAA"),
+                Signature(*b"AAAA"),
+                Signature(*b"VCNT"),
+                Signature(*b"VALU")
+            ]
+        );
+        assert_eq!(record.subrecords[2].data, 3_u32.to_le_bytes());
+
+        editor.apply_mutations(
+            &mut record,
+            vec![HandlerMutation::SynchronizeCount {
+                path: "TEST/2:Value Count".to_owned(),
+                occurrence: 0,
+                value: 0,
+                remove_when_zero: true,
+            }],
+        )?;
+        assert_eq!(
+            record
+                .subrecords
+                .iter()
+                .map(|subrecord| subrecord.signature)
+                .collect::<Vec<_>>(),
+            vec![
+                Signature(*b"AAAA"),
+                Signature(*b"AAAA"),
+                Signature(*b"VALU")
+            ]
+        );
         Ok(())
     }
 
