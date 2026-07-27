@@ -2,6 +2,8 @@
 //!
 //! Lossless schema-guided record editing.
 
+use std::collections::BTreeMap;
+
 use bethkit_core::{Record, Signature, WritableRecord, WritableSubRecord};
 use bethkit_schema::{
     ArrayCount, ByteOrder, CallbackImplementation, EvalContext, EvalValue, IntegerType,
@@ -21,6 +23,7 @@ pub struct RecordEditor {
     handlers: SemanticHandlerRegistry,
     record: WritableRecord,
     localized: bool,
+    decoded_values: BTreeMap<(String, usize), FieldValue<'static>>,
 }
 
 impl RecordEditor {
@@ -42,6 +45,17 @@ impl RecordEditor {
                 data: subrecord.as_bytes().to_vec(),
             })
             .collect();
+        let decoded_values = context
+            .view(record, plugin_localized)?
+            .fields()?
+            .into_iter()
+            .map(|field| {
+                (
+                    (field.path, field.occurrence),
+                    field.value.to_handler_value(),
+                )
+            })
+            .collect();
         Ok(Self {
             registry: context.registry().clone(),
             decoders: context.decoders().clone(),
@@ -54,6 +68,7 @@ impl RecordEditor {
                 subrecords,
             },
             localized: plugin_localized,
+            decoded_values,
         })
     }
 
@@ -85,12 +100,16 @@ impl RecordEditor {
                 occurrence,
             })?;
         let normalized = self.normalize_value(&payload.path, value)?;
-        let (normalized, mutations) = self.apply_after_set_tree(payload, &normalized)?;
+        let old_value = self.decoded_values.get(&(path.to_owned(), occurrence));
+        let (normalized, mutations) = self.apply_after_set_tree(payload, &normalized, old_value)?;
         let encoded: Vec<u8> = self.encode_node(payload, &normalized)?;
+        let decoded = self.owned_to_handler_value(payload, &normalized)?;
         let mut candidate = clone_record(&self.record);
         candidate.subrecords[index].data = encoded;
         self.apply_mutations(&mut candidate, mutations)?;
         self.record = candidate;
+        self.decoded_values
+            .insert((path.to_owned(), occurrence), decoded);
         Ok(())
     }
 
@@ -127,9 +146,16 @@ impl RecordEditor {
                     .is_some_and(|order| order > target_order)
             })
             .unwrap_or(self.record.subrecords.len());
+        let occurrence = self
+            .record
+            .subrecords
+            .iter()
+            .filter(|subrecord| subrecord.signature == target_signature)
+            .count();
         let normalized = self.normalize_value(&payload.path, value)?;
-        let (normalized, mutations) = self.apply_after_set_tree(payload, &normalized)?;
+        let (normalized, mutations) = self.apply_after_set_tree(payload, &normalized, None)?;
         let encoded: Vec<u8> = self.encode_node(payload, &normalized)?;
+        let decoded = self.owned_to_handler_value(payload, &normalized)?;
         let mut candidate = clone_record(&self.record);
         candidate.subrecords.insert(
             insertion_index,
@@ -140,6 +166,8 @@ impl RecordEditor {
         );
         self.apply_mutations(&mut candidate, mutations)?;
         self.record = candidate;
+        self.decoded_values
+            .insert((path.to_owned(), occurrence), decoded);
         Ok(())
     }
 
@@ -172,6 +200,7 @@ impl RecordEditor {
         let mut candidate = clone_record(&self.record);
         candidate.subrecords.remove(index);
         self.record = candidate;
+        self.remove_decoded_occurrence(path, occurrence);
         Ok(())
     }
 
@@ -320,6 +349,7 @@ impl RecordEditor {
                 self.handler_record(),
                 HandlerPhase::DecodeNormalize,
                 Some(&handler_value),
+                None,
             )? {
                 HandlerOutput::Value(value) => handler_to_owned_value(value, path)?,
                 _ => {
@@ -337,6 +367,7 @@ impl RecordEditor {
         &self,
         node: &SchemaNode,
         value: &OwnedFieldValue,
+        old_value: Option<&FieldValue<'static>>,
     ) -> Result<(OwnedFieldValue, Vec<HandlerMutation>)> {
         let (mut updated, mut mutations) = match (&node.kind, value) {
             (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
@@ -352,8 +383,16 @@ impl RecordEditor {
                 }
                 let mut updated = Vec::with_capacity(values.len());
                 let mut mutations = Vec::new();
-                for (field, value) in fields.iter().zip(values) {
-                    let (value, child_mutations) = self.apply_after_set_tree(field, value)?;
+                let old_fields = match old_value {
+                    Some(FieldValue::Struct(values)) => Some(values.as_slice()),
+                    _ => None,
+                };
+                for (index, (field, value)) in fields.iter().zip(values).enumerate() {
+                    let old_field = old_fields
+                        .and_then(|values| values.get(index))
+                        .map(|value| &value.value);
+                    let (value, child_mutations) =
+                        self.apply_after_set_tree(field, value, old_field)?;
                     updated.push(value);
                     mutations.extend(child_mutations);
                 }
@@ -362,8 +401,14 @@ impl RecordEditor {
             (SchemaNodeKind::Array { element, .. }, OwnedFieldValue::Array(values)) => {
                 let mut updated = Vec::with_capacity(values.len());
                 let mut mutations = Vec::new();
-                for value in values {
-                    let (value, child_mutations) = self.apply_after_set_tree(element, value)?;
+                let old_values = match old_value {
+                    Some(FieldValue::Array(values)) => Some(values.as_slice()),
+                    _ => None,
+                };
+                for (index, value) in values.iter().enumerate() {
+                    let old_element = old_values.and_then(|values| values.get(index));
+                    let (value, child_mutations) =
+                        self.apply_after_set_tree(element, value, old_element)?;
                     updated.push(value);
                     mutations.extend(child_mutations);
                 }
@@ -371,15 +416,19 @@ impl RecordEditor {
             }
             (SchemaNodeKind::Union { selector, variants }, _) => {
                 let variant = self.select_union_variant(node, selector, variants, value)?;
-                self.apply_after_set_tree(variant, value)?
+                self.apply_after_set_tree(variant, value, old_value)?
             }
             (
                 SchemaNodeKind::Subrecord { payload, .. }
                 | SchemaNodeKind::Compressed { child: payload, .. },
                 _,
-            ) => self.apply_after_set_tree(payload, value)?,
+            ) => self.apply_after_set_tree(payload, value, old_value)?,
             _ => (value.clone(), Vec::new()),
         };
+        let handler_value = self.owned_to_handler_value(node, &updated)?;
+        if old_value.is_some_and(|old| handler_values_equal(&handler_value, old)) {
+            return Ok((updated, mutations));
+        }
         for binding in self
             .registry
             .package()
@@ -400,6 +449,7 @@ impl RecordEditor {
                 self.handler_record(),
                 HandlerPhase::AfterSet,
                 Some(&handler_value),
+                old_value,
             )? {
                 HandlerOutput::None => {}
                 HandlerOutput::Value(value) => {
@@ -557,6 +607,22 @@ impl RecordEditor {
         Ok(())
     }
 
+    fn remove_decoded_occurrence(&mut self, path: &str, occurrence: usize) {
+        self.decoded_values.remove(&(path.to_owned(), occurrence));
+        let shifted = self
+            .decoded_values
+            .keys()
+            .filter(|(candidate, index)| candidate == path && *index > occurrence)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in shifted {
+            if let Some(value) = self.decoded_values.remove(&key) {
+                self.decoded_values
+                    .insert((key.0, key.1.saturating_sub(1)), value);
+            }
+        }
+    }
+
     fn encode_path(&self, path: &str, value: &OwnedFieldValue) -> Result<(Signature, Vec<u8>)> {
         let node = self.find_node(path)?;
         let SchemaNodeKind::Subrecord { signature, payload } = &node.kind else {
@@ -569,6 +635,44 @@ impl RecordEditor {
             Signature::from(*signature),
             self.encode_node(payload, value)?,
         ))
+    }
+}
+
+fn handler_values_equal(left: &FieldValue<'_>, right: &FieldValue<'_>) -> bool {
+    if let (Some(left), Some(right)) = (integer_handler_value(left), integer_handler_value(right)) {
+        return left == right;
+    }
+    match (left, right) {
+        (FieldValue::Float(left), FieldValue::Float(right)) => left.to_bits() == right.to_bits(),
+        (FieldValue::String(left), FieldValue::String(right)) => left == right,
+        (FieldValue::FormId { value: left, .. }, FieldValue::FormId { value: right, .. }) => {
+            left == right
+        }
+        (FieldValue::Bytes(left), FieldValue::Bytes(right)) => left == right,
+        (FieldValue::Struct(left), FieldValue::Struct(right)) => {
+            left.len() == right.len()
+                && left.iter().zip(right).all(|(left, right)| {
+                    left.node_id == right.node_id && handler_values_equal(&left.value, &right.value)
+                })
+        }
+        (FieldValue::Array(left), FieldValue::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| handler_values_equal(left, right))
+        }
+        (FieldValue::Absent, FieldValue::Absent) => true,
+        _ => false,
+    }
+}
+
+fn integer_handler_value(value: &FieldValue<'_>) -> Option<i128> {
+    match value {
+        FieldValue::Int(value) => Some(i128::from(*value)),
+        FieldValue::UInt(value) | FieldValue::Flags { value, .. } => Some(i128::from(*value)),
+        FieldValue::Enumeration { value, .. } => Some(i128::from(*value)),
+        _ => None,
     }
 }
 
@@ -893,6 +997,37 @@ mod tests {
         .expect_err("unrepresentable character should fail");
 
         assert!(error.to_string().contains("cannot represent"));
+    }
+
+    #[test]
+    fn after_set_equality_matches_owned_and_decoded_integer_shapes() {
+        let owned_shape = FieldValue::Struct(vec![crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: "TEST/0:Mode".to_owned(),
+            name: "Mode".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 4 },
+            value: FieldValue::Int(2),
+        }]);
+        let decoded_shape = FieldValue::Struct(vec![crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: "TEST/0:Mode".to_owned(),
+            name: "Mode".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 4 },
+            value: FieldValue::Enumeration {
+                value: 2,
+                name: Some("Reference".to_owned()),
+            },
+        }]);
+
+        assert!(handler_values_equal(&owned_shape, &decoded_shape));
+    }
+
+    #[test]
+    fn after_set_equality_detects_nested_array_changes() {
+        let old = FieldValue::Array(vec![FieldValue::UInt(1), FieldValue::UInt(2)]);
+        let new = FieldValue::Array(vec![FieldValue::UInt(1), FieldValue::UInt(3)]);
+
+        assert!(!handler_values_equal(&new, &old));
     }
 
     #[test]

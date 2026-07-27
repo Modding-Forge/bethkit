@@ -162,6 +162,7 @@ impl SemanticContext {
                 self.handler_record(record),
                 HandlerPhase::Conflict,
                 value,
+                None,
             )? {
                 HandlerOutput::ConflictPriority(priority) => priority,
                 _ => {
@@ -240,6 +241,7 @@ impl SemanticContext {
                 self.handler_record(record),
                 format.into(),
                 Some(&handler_value),
+                None,
             )? {
                 HandlerOutput::Text(value) => value,
                 _ => {
@@ -296,6 +298,7 @@ impl SemanticContext {
                 self.handler_record(record),
                 HandlerPhase::ParseEditValue,
                 Some(&input),
+                None,
             )? {
                 HandlerOutput::None => {}
                 HandlerOutput::Value(value) => {
@@ -375,6 +378,7 @@ impl SemanticContext {
                 self.handler_record(record),
                 HandlerPhase::Removability,
                 Some(&handler_value),
+                None,
             )? {
                 HandlerOutput::Boolean(value) => value,
                 _ => {
@@ -417,6 +421,7 @@ impl SemanticContext {
                 self.handler_record(record),
                 HandlerPhase::DecodeNormalize,
                 Some(&handler_value),
+                None,
             )? {
                 HandlerOutput::Value(transformed) => transformed.into_record_value(),
                 _ => {

@@ -411,6 +411,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 ),
                 HandlerPhase::Validation,
                 Some(&handler_value),
+                None,
             );
             let message = match outcome {
                 Ok(HandlerOutput::Text(message)) if !message.is_empty() => Some(message),

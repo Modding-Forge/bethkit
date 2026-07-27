@@ -185,6 +185,8 @@ pub struct HandlerInvocation<'a> {
     pub phase: HandlerPhase,
     /// Optional decoded value for value-oriented callback roles.
     pub value: Option<&'a FieldValue<'static>>,
+    /// Previous decoded value for stateful editor callbacks.
+    pub old_value: Option<&'a FieldValue<'static>>,
 }
 
 /// Versioned implementation of one stable semantic handler.
@@ -330,6 +332,7 @@ impl SemanticHandlerRegistry {
         record: HandlerRecordContext,
         phase: HandlerPhase,
         value: Option<&FieldValue<'static>>,
+        old_value: Option<&FieldValue<'static>>,
     ) -> Result<HandlerOutput> {
         let empty_configuration = serde_json::Value::Null;
         let (id, minimum_version, configuration) = match &binding.implementation {
@@ -365,6 +368,7 @@ impl SemanticHandlerRegistry {
                 },
                 phase,
                 value,
+                old_value,
             })
     }
 }
@@ -1320,6 +1324,7 @@ mod tests {
             },
             phase: HandlerPhase::Validation,
             value: None,
+            old_value: None,
         })?;
 
         assert!(matches!(
@@ -1372,6 +1377,7 @@ mod tests {
             },
             phase,
             value: Some(&value),
+            old_value: None,
         })?;
         match output {
             HandlerOutput::Text(value) => Ok(value),
@@ -1414,6 +1420,7 @@ mod tests {
             },
             phase,
             value: Some(value),
+            old_value: None,
         })
     }
 
