@@ -321,8 +321,56 @@ impl SchemaPackage {
             &self.manifest.required_handlers,
             limits,
         )?;
+        for record in &self.records {
+            validate_union_selector_bindings(&record.root, &self.callback_bindings)?;
+        }
         Ok(())
     }
+}
+
+fn validate_union_selector_bindings(node: &SchemaNode, bindings: &[CallbackBinding]) -> Result<()> {
+    if let SchemaNodeKind::Union {
+        selector: crate::UnionSelector::Callback { callback_id },
+        ..
+    } = &node.kind
+    {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.path == node.path && binding.callback_id == *callback_id)
+            .ok_or_else(|| {
+                SchemaError::InvalidGraph(format!(
+                    "union callback {callback_id} at {} has no binding",
+                    node.path
+                ))
+            })?;
+        if !matches!(
+            binding.implementation,
+            CallbackImplementation::BuiltIn { .. } | CallbackImplementation::CustomHandler { .. }
+        ) {
+            return Err(SchemaError::InvalidGraph(format!(
+                "union callback {callback_id} at {} is not a semantic handler",
+                node.path
+            )));
+        }
+    }
+    let children: Vec<&SchemaNode> = match &node.kind {
+        SchemaNodeKind::Sequence { children } => children.iter().collect(),
+        SchemaNodeKind::Choice { alternatives } => alternatives.iter().collect(),
+        SchemaNodeKind::Repeat { child, .. }
+        | SchemaNodeKind::Subrecord { payload: child, .. }
+        | SchemaNodeKind::Compressed { child, .. }
+        | SchemaNodeKind::Terminated { child, .. }
+        | SchemaNodeKind::Array { element: child, .. } => vec![child],
+        SchemaNodeKind::Struct { fields } => fields.iter().collect(),
+        SchemaNodeKind::Union { variants, .. } => variants.iter().collect(),
+        SchemaNodeKind::Primitive { .. }
+        | SchemaNodeKind::Custom { .. }
+        | SchemaNodeKind::Reference { .. } => Vec::new(),
+    };
+    for child in children {
+        validate_union_selector_bindings(child, bindings)?;
+    }
+    Ok(())
 }
 
 fn validate_callback_bindings(
@@ -642,6 +690,19 @@ fn validate_node(
             )));
         }
     }
+    if let SchemaNodeKind::Union {
+        selector: crate::UnionSelector::Callback { callback_id },
+        ..
+    } = &node.kind
+    {
+        validate_string(callback_id, limits)?;
+        if callback_id.trim().is_empty() {
+            return Err(SchemaError::InvalidGraph(format!(
+                "union callback identifier must not be empty at {}",
+                node.path
+            )));
+        }
+    }
 
     let children: Vec<&SchemaNode> = match &node.kind {
         SchemaNodeKind::Sequence { children } => children.iter().collect(),
@@ -677,7 +738,30 @@ fn validate_string(value: &str, limits: &SchemaLoadLimits) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ByteOrder, IntegerType, PrimitiveType, SchemaNodeKind};
+    use crate::{ByteOrder, IntegerType, PrimitiveType, SchemaNodeKind, UnionSelector};
+
+    /// Rejects callback-selected unions without an executable semantic binding.
+    #[test]
+    fn callback_union_requires_handler_binding(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let node = SchemaNode {
+            id: SchemaNodeId(0),
+            path: "TEST/value".to_owned(),
+            name: "Value".to_owned(),
+            required: true,
+            conflict_priority: crate::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Union {
+                selector: UnionSelector::Callback {
+                    callback_id: "union.select".to_owned(),
+                },
+                variants: Vec::new(),
+            },
+        };
+
+        assert!(validate_union_selector_bindings(&node, &[]).is_err());
+        Ok(())
+    }
 
     fn test_package() -> Result<SchemaPackage> {
         SchemaPackage::new(

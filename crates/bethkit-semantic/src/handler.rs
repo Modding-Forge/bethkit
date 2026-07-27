@@ -39,6 +39,8 @@ pub enum HandlerPhase {
     NativeValue,
     /// Conversion from edited text back to a typed value.
     ParseEditValue,
+    /// Dynamic selection of a schema union variant.
+    UnionSelection,
     /// Validation equivalent to xEdit's `ctCheck`.
     Validation,
     /// Transactional callback after a value is changed.

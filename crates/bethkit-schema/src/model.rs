@@ -455,6 +455,19 @@ pub enum ArrayCount {
     Remainder,
 }
 
+/// Rule selecting one variant of a union node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum UnionSelector {
+    /// Bounded declarative expression producing the zero-based variant index.
+    Expression(Expression),
+    /// Semantic callback producing the zero-based variant index.
+    Callback {
+        /// Callback role resolved through the package's handler bindings.
+        callback_id: String,
+    },
+}
+
 /// One node in the ordered schema grammar.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchemaNode {
@@ -531,10 +544,10 @@ pub enum SchemaNodeKind {
         /// Element count rule.
         count: ArrayCount,
     },
-    /// Union selected by a declarative expression.
+    /// Union selected by a declarative expression or semantic callback.
     Union {
-        /// Expression producing the zero-based variant index.
-        selector: Expression,
+        /// Rule producing the zero-based variant index.
+        selector: UnionSelector,
         /// Union variants.
         variants: Vec<SchemaNode>,
     },

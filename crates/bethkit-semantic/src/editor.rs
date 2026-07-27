@@ -2,12 +2,13 @@
 //!
 //! Lossless schema-guided record editing.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use bethkit_core::{Record, Signature, WritableRecord, WritableSubRecord};
 use bethkit_schema::{
     ArrayCount, ByteOrder, CallbackImplementation, EvalContext, EvalValue, IntegerType,
-    PrimitiveType, SchemaNode, SchemaNodeKind,
+    PrimitiveType, SchemaNode, SchemaNodeKind, UnionSelector,
 };
 
 use crate::value::{float_to_raw, handler_to_owned_value};
@@ -337,26 +338,8 @@ impl RecordEditor {
                 Ok(output)
             }
             SchemaNodeKind::Union { selector, variants } => {
-                for (index, variant) in variants.iter().enumerate() {
-                    let Ok(encoded) = self.encode_node(variant, value) else {
-                        continue;
-                    };
-                    let context = EvalContext {
-                        payload: &encoded,
-                        form_version: self.record.form_version,
-                        record_signature: self.record.signature.into(),
-                    };
-                    if matches!(
-                        selector.evaluate(&context, 1024),
-                        Ok(EvalValue::Int(selected)) if selected == index as i64
-                    ) {
-                        return Ok(encoded);
-                    }
-                }
-                Err(encode_error(
-                    &node.path,
-                    "value does not match the selected union variant",
-                ))
+                let variant = self.select_union_variant(node, selector, variants, value)?;
+                self.encode_node(variant, value)
             }
             SchemaNodeKind::Custom { decoder, .. } => self
                 .decoders
@@ -639,7 +622,7 @@ impl RecordEditor {
     fn select_union_variant<'a>(
         &self,
         node: &SchemaNode,
-        selector: &bethkit_schema::Expression,
+        selector: &UnionSelector,
         variants: &'a [SchemaNode],
         value: &OwnedFieldValue,
     ) -> Result<&'a SchemaNode> {
@@ -647,15 +630,53 @@ impl RecordEditor {
             let Ok(encoded) = self.encode_node(variant, value) else {
                 continue;
             };
-            let context = EvalContext {
-                payload: &encoded,
-                form_version: self.record.form_version,
-                record_signature: self.record.signature.into(),
+            let selected = match selector {
+                UnionSelector::Expression(expression) => {
+                    let context = EvalContext {
+                        payload: &encoded,
+                        form_version: self.record.form_version,
+                        record_signature: self.record.signature.into(),
+                    };
+                    match expression.evaluate(&context, 1024) {
+                        Ok(EvalValue::Int(selected)) => selected,
+                        _ => continue,
+                    }
+                }
+                UnionSelector::Callback { callback_id } => {
+                    let Some(binding) =
+                        self.registry
+                            .package()
+                            .callback_bindings()
+                            .iter()
+                            .find(|binding| {
+                                binding.path == node.path
+                                    && binding.callback_id.as_str() == callback_id
+                            })
+                    else {
+                        return Err(SemanticError::Handler {
+                            handler: callback_id.clone(),
+                            message: format!("union node {} has no callback binding", node.path),
+                        });
+                    };
+                    let raw_value = FieldValue::Bytes(Cow::Owned(encoded));
+                    match self.handlers.invoke(
+                        binding,
+                        self.handler_record(),
+                        HandlerPhase::UnionSelection,
+                        Some(&raw_value),
+                        None,
+                    )? {
+                        HandlerOutput::Integer(selected) => selected,
+                        _ => {
+                            return Err(SemanticError::Handler {
+                                handler: callback_id.clone(),
+                                message: "union selector returned a non-integer result".to_owned(),
+                            });
+                        }
+                    }
+                }
             };
-            if matches!(
-                selector.evaluate(&context, 1024),
-                Ok(EvalValue::Int(selected)) if selected == index as i64
-            ) {
+            if selected == index as i64 {
                 return Ok(variant);
             }
         }
@@ -1211,11 +1232,32 @@ mod tests {
     use std::sync::Arc;
 
     use bethkit_schema::{
-        ConflictPriority, SchemaGame, SchemaManifest, SchemaNodeId, SchemaPackage, SchemaRecord,
+        BuiltInOperation, CallbackBinding, CallbackImplementation, ConflictPriority,
+        HandlerRequirement, SchemaGame, SchemaManifest, SchemaNodeId, SchemaPackage, SchemaRecord,
         SchemaSignature, StringType, ValidationStatus, PACKAGE_FORMAT_VERSION,
     };
 
     use super::*;
+
+    struct SelectSecondUnionVariant;
+
+    impl crate::SemanticHandler for SelectSecondUnionVariant {
+        fn id(&self) -> &'static str {
+            "test.union_selector"
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn invoke(&self, invocation: crate::HandlerInvocation<'_>) -> Result<HandlerOutput> {
+            if invocation.phase == HandlerPhase::UnionSelection {
+                Ok(HandlerOutput::Integer(1))
+            } else {
+                Ok(HandlerOutput::None)
+            }
+        }
+    }
 
     fn windows_1252_string(zero_terminated: bool) -> PrimitiveType {
         PrimitiveType::String {
@@ -1336,6 +1378,120 @@ mod tests {
         Ok(())
     }
 
+    /// Selects an encoded union variant through its classified semantic callback.
+    #[test]
+    fn callback_union_encoding_dispatches_handler() -> Result<()> {
+        let integer = |id, width| SchemaNode {
+            id: SchemaNodeId(id),
+            path: format!("TEST/value/variants/{id}"),
+            name: format!("Variant {id}"),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::Integer {
+                    integer: IntegerType {
+                        width,
+                        signed: false,
+                        byte_order: ByteOrder::LittleEndian,
+                    },
+                },
+            },
+        };
+        let union = SchemaNode {
+            id: SchemaNodeId(20),
+            path: "TEST/value".to_owned(),
+            name: "Value".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Union {
+                selector: UnionSelector::Callback {
+                    callback_id: "union.select".to_owned(),
+                },
+                variants: vec![integer(21, 1), integer(22, 2)],
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "test.union_selector".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: union.clone(),
+            }],
+            vec![CallbackBinding {
+                path: union.path.clone(),
+                callback_id: "union.select".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "00".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "test.union_selector".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::Value::Null,
+                    },
+                },
+            }],
+        )?;
+        let mut handlers = SemanticHandlerRegistry::new();
+        handlers.register(Arc::new(SelectSecondUnionVariant));
+        let editor = RecordEditor {
+            registry: bethkit_schema::SchemaRegistry::new(Arc::new(package)),
+            decoders: crate::DecoderRegistry::builtin(),
+            handlers,
+            record: WritableRecord {
+                signature: Signature(*b"TEST"),
+                flags: bethkit_core::RecordFlags::empty(),
+                form_id: bethkit_core::FormId::NULL,
+                form_version: 44,
+                subrecords: Vec::new(),
+            },
+            localized: false,
+            decoded_values: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            editor.encode_node(&union, &OwnedFieldValue::UInt(7))?,
+            vec![7, 0]
+        );
+        Ok(())
+    }
+
+    fn test_manifest() -> SchemaManifest {
+        SchemaManifest {
+            format_version: PACKAGE_FORMAT_VERSION,
+            game: SchemaGame::SkyrimSe,
+            package_version: "test".to_owned(),
+            source_repository: "TES5Edit/TES5Edit".to_owned(),
+            source_tag: "test".to_owned(),
+            source_commit: "00".repeat(20),
+            source_archive_sha256: "00".repeat(32),
+            exporter_version: "test".to_owned(),
+            exporter_binary_sha256: "00".repeat(32),
+            exporter_map_sha256: "00".repeat(32),
+            exporter_patch_sha256: "00".repeat(32),
+            exporter_build_sha256: "00".repeat(32),
+            conversion_rules_sha256: "00".repeat(32),
+            minimum_bethkit_version: "0.4.0".to_owned(),
+            minimum_abi_version: 2,
+            validation_status: ValidationStatus::Candidate,
+            corpus_sha256: "00".repeat(32),
+            validated_records: 0,
+            byte_coverage: 0.0,
+            callbacks_total: 0,
+            callbacks_classified: 0,
+            required_decoders: Vec::new(),
+            required_handlers: Vec::new(),
+        }
+    }
+
     fn editor_with_reused_signature() -> Result<RecordEditor> {
         fn subrecord(id: u32, path: &str) -> SchemaNode {
             SchemaNode {
@@ -1363,31 +1519,7 @@ mod tests {
         }
 
         let package = SchemaPackage::new(
-            SchemaManifest {
-                format_version: PACKAGE_FORMAT_VERSION,
-                game: SchemaGame::SkyrimSe,
-                package_version: "test".to_owned(),
-                source_repository: "TES5Edit/TES5Edit".to_owned(),
-                source_tag: "test".to_owned(),
-                source_commit: "00".repeat(20),
-                source_archive_sha256: "00".repeat(32),
-                exporter_version: "test".to_owned(),
-                exporter_binary_sha256: "00".repeat(32),
-                exporter_map_sha256: "00".repeat(32),
-                exporter_patch_sha256: "00".repeat(32),
-                exporter_build_sha256: "00".repeat(32),
-                conversion_rules_sha256: "00".repeat(32),
-                minimum_bethkit_version: "0.4.0".to_owned(),
-                minimum_abi_version: 2,
-                validation_status: ValidationStatus::Candidate,
-                corpus_sha256: "00".repeat(32),
-                validated_records: 0,
-                byte_coverage: 0.0,
-                callbacks_total: 0,
-                callbacks_classified: 0,
-                required_decoders: Vec::new(),
-                required_handlers: Vec::new(),
-            },
+            test_manifest(),
             vec![SchemaRecord {
                 signature: SchemaSignature(*b"TEST"),
                 name: "Test".to_owned(),

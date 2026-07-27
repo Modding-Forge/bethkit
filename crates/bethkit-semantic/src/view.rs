@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use bethkit_core::{FormId, Record, Signature, SubRecord};
 use bethkit_schema::{
     ArrayCount, ByteOrder, CallbackImplementation, EvalContext, EvalValue, IntegerType,
-    PrimitiveType, SchemaNode, SchemaNodeKind, SchemaRecord, StringType,
+    PrimitiveType, SchemaNode, SchemaNodeKind, SchemaRecord, StringType, UnionSelector,
 };
 
 use crate::value::float_from_raw;
@@ -672,25 +672,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 Ok(FieldValue::Array(values))
             }
             SchemaNodeKind::Union { selector, variants } => {
-                let context = EvalContext {
-                    payload,
-                    form_version: self.record.header.form_version,
-                    record_signature: self.record.header.signature.into(),
-                };
-                let index: usize = match selector.evaluate(&context, 1024)? {
-                    EvalValue::Int(value) if value >= 0 => {
-                        usize::try_from(value).map_err(|_| SemanticError::Decode {
-                            path: node.path.clone(),
-                            message: "union selector exceeds platform size".to_owned(),
-                        })?
-                    }
-                    _ => {
-                        return Err(SemanticError::Decode {
-                            path: node.path.clone(),
-                            message: "union selector is not a non-negative integer".to_owned(),
-                        });
-                    }
-                };
+                let index = self.select_union_index(node, selector, payload)?;
                 let variant: &SchemaNode =
                     variants.get(index).ok_or_else(|| SemanticError::Decode {
                         path: node.path.clone(),
@@ -752,6 +734,78 @@ impl<'context, 'record> RecordView<'context, 'record> {
             .context
             .apply_normalizers(&node.path, self.record, decoded)?;
         apply_float_read_semantics(node, normalized)
+    }
+
+    fn select_union_index(
+        &self,
+        node: &SchemaNode,
+        selector: &UnionSelector,
+        payload: &[u8],
+    ) -> Result<usize> {
+        let selected = match selector {
+            UnionSelector::Expression(expression) => {
+                let context = EvalContext {
+                    payload,
+                    form_version: self.record.header.form_version,
+                    record_signature: self.record.header.signature.into(),
+                };
+                match expression.evaluate(&context, 1024)? {
+                    EvalValue::Int(value) => value,
+                    _ => {
+                        return Err(SemanticError::Decode {
+                            path: node.path.clone(),
+                            message: "union selector did not return an integer".to_owned(),
+                        });
+                    }
+                }
+            }
+            UnionSelector::Callback { callback_id } => {
+                let binding = self
+                    .context
+                    .registry()
+                    .package()
+                    .callback_bindings()
+                    .iter()
+                    .find(|binding| {
+                        binding.path == node.path && binding.callback_id == *callback_id
+                    })
+                    .ok_or_else(|| SemanticError::Handler {
+                        handler: callback_id.clone(),
+                        message: format!("union node {} has no callback binding", node.path),
+                    })?;
+                let value = FieldValue::Bytes(Cow::Owned(payload.to_vec()));
+                match self.context.handlers().invoke(
+                    binding,
+                    HandlerRecordContext::new(
+                        self.record.header.signature,
+                        self.record.header.form_id,
+                        self.record.header.form_version,
+                        self.context.registry().package().manifest().game,
+                    ),
+                    HandlerPhase::UnionSelection,
+                    Some(&value),
+                    None,
+                )? {
+                    HandlerOutput::Integer(value) => value,
+                    _ => {
+                        return Err(SemanticError::Handler {
+                            handler: callback_id.clone(),
+                            message: "union selector returned a non-integer result".to_owned(),
+                        });
+                    }
+                }
+            }
+        };
+        if selected < 0 {
+            return Err(SemanticError::Decode {
+                path: node.path.clone(),
+                message: "union selector returned a negative index".to_owned(),
+            });
+        }
+        usize::try_from(selected).map_err(|_| SemanticError::Decode {
+            path: node.path.clone(),
+            message: "union selector exceeds platform size".to_owned(),
+        })
     }
 
     fn node_applies(&self, node: &SchemaNode, payload: &[u8]) -> Result<bool> {
