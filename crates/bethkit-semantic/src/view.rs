@@ -710,6 +710,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
             }),
             SchemaNodeKind::Sequence { .. }
             | SchemaNodeKind::Choice { .. }
+            | SchemaNodeKind::SelectedChoice { .. }
             | SchemaNodeKind::Repeat { .. }
             | SchemaNodeKind::Subrecord { .. } => Err(SemanticError::Decode {
                 path: node.path.clone(),
@@ -923,7 +924,8 @@ fn top_level_subrecords(root: &SchemaNode) -> Vec<&SchemaNode> {
                     collect(child, output);
                 }
             }
-            SchemaNodeKind::Choice { alternatives } => {
+            SchemaNodeKind::Choice { alternatives }
+            | SchemaNodeKind::SelectedChoice { alternatives, .. } => {
                 for alternative in alternatives {
                     collect(alternative, output);
                 }

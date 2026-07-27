@@ -5,7 +5,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bethkit_core::{Signature, SubRecord, WritableSubRecord};
-use bethkit_schema::{EvalContext, EvalValue, SchemaNode, SchemaNodeKind};
+use bethkit_schema::{
+    ByteOrder, EvalContext, EvalValue, IntegerType, PrimitiveType, SchemaNode, SchemaNodeKind,
+    UnionSelector,
+};
 
 use crate::{Result, SemanticError};
 
@@ -147,6 +150,61 @@ fn match_node<'schema, T: GrammarInput>(
             }
             Ok(best)
         }
+        SchemaNodeKind::SelectedChoice {
+            selector,
+            alternatives,
+        } => {
+            let field_values = assigned_numeric_fields(&state, subrecords)?;
+            let payload = subrecords
+                .get(state.cursor)
+                .map_or(&[][..], GrammarInput::payload);
+            let index = match selector {
+                UnionSelector::Expression(expression) => {
+                    let context = EvalContext {
+                        payload,
+                        field_values: &field_values,
+                        form_version,
+                        record_signature: record_signature.into(),
+                    };
+                    match expression.evaluate(&context, 1024)? {
+                        EvalValue::Int(value) => value,
+                        EvalValue::Bool(_) => {
+                            return Err(SemanticError::Decode {
+                                path: node.path.clone(),
+                                message: "ordered choice selector returned a boolean".to_owned(),
+                            });
+                        }
+                    }
+                }
+                UnionSelector::Callback { callback_id } => {
+                    return Err(SemanticError::Handler {
+                        handler: callback_id.clone(),
+                        message: format!(
+                            "ordered choice {} retained a non-declarative selector",
+                            node.path
+                        ),
+                    });
+                }
+            };
+            let index = usize::try_from(index).map_err(|_| SemanticError::Decode {
+                path: node.path.clone(),
+                message: format!("ordered choice selected negative alternative {index}"),
+            })?;
+            let alternative = alternatives
+                .get(index)
+                .ok_or_else(|| SemanticError::Decode {
+                    path: node.path.clone(),
+                    message: format!("ordered choice alternative {index} does not exist"),
+                })?;
+            match_node(
+                alternative,
+                state,
+                record_signature,
+                form_version,
+                subrecords,
+                declared,
+            )
+        }
         SchemaNodeKind::Repeat {
             minimum,
             maximum,
@@ -225,6 +283,113 @@ fn condition_applies<T: GrammarInput>(
     }
 }
 
+fn assigned_numeric_fields<T: GrammarInput>(
+    state: &MatchState<'_>,
+    subrecords: &[T],
+) -> Result<BTreeMap<String, i64>> {
+    let mut values = BTreeMap::new();
+    for (index, assignment) in state.assignments.iter().enumerate() {
+        let (Some(node), Some(subrecord)) = (assignment, subrecords.get(index)) else {
+            continue;
+        };
+        if let SchemaNodeKind::Subrecord { payload, .. } = &node.kind {
+            collect_numeric_payload_fields(payload, subrecord.payload(), 0, &mut values)?;
+            if let Some(value) = numeric_payload_value(payload, subrecord.payload(), 0)? {
+                values.insert(node.path.clone(), value);
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn collect_numeric_payload_fields(
+    node: &SchemaNode,
+    payload: &[u8],
+    offset: usize,
+    values: &mut BTreeMap<String, i64>,
+) -> Result<Option<usize>> {
+    if let Some(value) = numeric_payload_value(node, payload, offset)? {
+        values.insert(node.path.clone(), value);
+    }
+    match &node.kind {
+        SchemaNodeKind::Struct { fields } => {
+            let mut cursor = offset;
+            for field in fields {
+                let Some(consumed) =
+                    collect_numeric_payload_fields(field, payload, cursor, values)?
+                else {
+                    return Ok(None);
+                };
+                cursor = cursor
+                    .checked_add(consumed)
+                    .ok_or_else(|| SemanticError::Decode {
+                        path: field.path.clone(),
+                        message: "numeric field cursor overflowed".to_owned(),
+                    })?;
+            }
+            Ok(Some(cursor - offset))
+        }
+        SchemaNodeKind::Primitive { primitive } => Ok(primitive_fixed_size(primitive)),
+        _ => Ok(None),
+    }
+}
+
+fn numeric_payload_value(node: &SchemaNode, payload: &[u8], offset: usize) -> Result<Option<i64>> {
+    let integer = match &node.kind {
+        SchemaNodeKind::Primitive {
+            primitive:
+                PrimitiveType::Integer { integer }
+                | PrimitiveType::Enumeration { integer, .. }
+                | PrimitiveType::Flags { integer, .. },
+        } => *integer,
+        _ => return Ok(None),
+    };
+    let width = integer.width as usize;
+    let bytes = payload
+        .get(offset..offset.saturating_add(width))
+        .ok_or_else(|| SemanticError::Decode {
+            path: node.path.clone(),
+            message: format!(
+                "selector field needs {width} bytes at offset {offset}, payload has {}",
+                payload.len()
+            ),
+        })?;
+    Ok(Some(decode_selector_integer(bytes, integer)))
+}
+
+fn decode_selector_integer(bytes: &[u8], integer: IntegerType) -> i64 {
+    let unsigned = match integer.byte_order {
+        ByteOrder::LittleEndian => bytes
+            .iter()
+            .enumerate()
+            .fold(0_u64, |value, (index, byte)| {
+                value | (u64::from(*byte) << (index * 8))
+            }),
+        ByteOrder::BigEndian => bytes
+            .iter()
+            .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte)),
+    };
+    if !integer.signed {
+        return unsigned as i64;
+    }
+    let shift = 64_u32.saturating_sub(u32::from(integer.width) * 8);
+    ((unsigned << shift) as i64) >> shift
+}
+
+fn primitive_fixed_size(primitive: &PrimitiveType) -> Option<usize> {
+    match primitive {
+        PrimitiveType::Integer { integer }
+        | PrimitiveType::Enumeration { integer, .. }
+        | PrimitiveType::Flags { integer, .. } => Some(integer.width as usize),
+        PrimitiveType::Float { width, .. } => Some(*width as usize),
+        PrimitiveType::FormId { .. } => Some(4),
+        PrimitiveType::String { string } => string.fixed_length.map(|length| length as usize),
+        PrimitiveType::Bytes { length } => length.map(|length| length as usize),
+        PrimitiveType::Unused { length } => Some(*length as usize),
+        PrimitiveType::PackedUnsigned => None,
+    }
+}
+
 fn skip_unknown<T: GrammarInput>(
     state: &mut MatchState<'_>,
     subrecords: &[T],
@@ -245,7 +410,8 @@ fn collect_signatures(node: &SchemaNode, output: &mut BTreeSet<Signature>) {
                 collect_signatures(child, output);
             }
         }
-        SchemaNodeKind::Choice { alternatives } => {
+        SchemaNodeKind::Choice { alternatives }
+        | SchemaNodeKind::SelectedChoice { alternatives, .. } => {
             for alternative in alternatives {
                 collect_signatures(alternative, output);
             }
@@ -476,6 +642,112 @@ mod tests {
                 Some("TEST/second")
             );
         }
+        Ok(())
+    }
+
+    /// Re-evaluates a declarative choice selector for every repeated group.
+    #[test]
+    fn ordered_match_selects_choice_from_latest_integer_field(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let type_path = "TEST/items/repeat/type/payload";
+        let type_node = SchemaNode {
+            id: SchemaNodeId(10),
+            path: "TEST/items/repeat/type".to_owned(),
+            name: "Type".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(*b"TYPE"),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(11),
+                    path: type_path.to_owned(),
+                    name: "Type".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Enumeration {
+                            integer: IntegerType {
+                                width: 1,
+                                signed: false,
+                                byte_order: ByteOrder::LittleEndian,
+                            },
+                            values: vec![(0, "A".to_owned()), (1, "B".to_owned())],
+                        },
+                    },
+                }),
+            },
+        };
+        let mut alternative_a = subrecord_node(20, *b"AAAA", true);
+        alternative_a.path = "TEST/items/repeat/choice/0:A".to_owned();
+        let mut alternative_b = subrecord_node(30, *b"BBBB", true);
+        alternative_b.path = "TEST/items/repeat/choice/1:B".to_owned();
+        let root = SchemaNode {
+            id: SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Repeat {
+                minimum: 0,
+                maximum: None,
+                child: Box::new(SchemaNode {
+                    id: SchemaNodeId(1),
+                    path: "TEST/items/repeat".to_owned(),
+                    name: "Item".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            type_node,
+                            SchemaNode {
+                                id: SchemaNodeId(2),
+                                path: "TEST/items/repeat/choice".to_owned(),
+                                name: "Choice".to_owned(),
+                                required: true,
+                                conflict_priority: ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::SelectedChoice {
+                                    selector: UnionSelector::Expression(
+                                        bethkit_schema::Expression::ReadField {
+                                            path: type_path.to_owned(),
+                                        },
+                                    ),
+                                    alternatives: vec![alternative_a, alternative_b],
+                                },
+                            },
+                        ],
+                    },
+                }),
+            },
+        };
+        let subrecords = vec![
+            SubRecord {
+                signature: Signature(*b"TYPE"),
+                data: SubRecordData::Owned(vec![1]),
+            },
+            subrecord(*b"BBBB"),
+            SubRecord {
+                signature: Signature(*b"TYPE"),
+                data: SubRecordData::Owned(vec![0]),
+            },
+            subrecord(*b"AAAA"),
+        ];
+
+        let matched = interpret(&root, Signature(*b"TEST"), 44, &subrecords)?;
+
+        assert_eq!(
+            matched.assignments[1].map(|node| node.path.as_str()),
+            Some("TEST/items/repeat/choice/1:B")
+        );
+        assert_eq!(
+            matched.assignments[3].map(|node| node.path.as_str()),
+            Some("TEST/items/repeat/choice/0:A")
+        );
+        assert!(matched.violations.is_empty());
         Ok(())
     }
 }

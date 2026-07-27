@@ -1139,7 +1139,8 @@ fn top_level_subrecords(root: &SchemaNode) -> Vec<&SchemaNode> {
                     collect(child, output);
                 }
             }
-            SchemaNodeKind::Choice { alternatives } => {
+            SchemaNodeKind::Choice { alternatives }
+            | SchemaNodeKind::SelectedChoice { alternatives, .. } => {
                 for alternative in alternatives {
                     collect(alternative, output);
                 }
@@ -1160,7 +1161,8 @@ fn find_node_by_path<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaN
     }
     let children: Vec<&SchemaNode> = match &node.kind {
         SchemaNodeKind::Sequence { children } => children.iter().collect(),
-        SchemaNodeKind::Choice { alternatives } => alternatives.iter().collect(),
+        SchemaNodeKind::Choice { alternatives }
+        | SchemaNodeKind::SelectedChoice { alternatives, .. } => alternatives.iter().collect(),
         SchemaNodeKind::Repeat { child, .. }
         | SchemaNodeKind::Subrecord { payload: child, .. }
         | SchemaNodeKind::Array { element: child, .. }
@@ -1191,7 +1193,8 @@ fn find_containing_subrecord<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a
         }
         let children: Vec<&SchemaNode> = match &node.kind {
             SchemaNodeKind::Sequence { children } => children.iter().collect(),
-            SchemaNodeKind::Choice { alternatives } => alternatives.iter().collect(),
+            SchemaNodeKind::Choice { alternatives }
+            | SchemaNodeKind::SelectedChoice { alternatives, .. } => alternatives.iter().collect(),
             SchemaNodeKind::Repeat { child, .. }
             | SchemaNodeKind::Subrecord { payload: child, .. }
             | SchemaNodeKind::Array { element: child, .. }

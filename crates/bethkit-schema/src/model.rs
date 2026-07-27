@@ -460,7 +460,7 @@ pub enum ArrayCount {
     Remainder,
 }
 
-/// Rule selecting one variant of a union node.
+/// Rule selecting one variant of a union or ordered-choice node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UnionSelector {
@@ -513,6 +513,13 @@ pub enum SchemaNodeKind {
     },
     /// Exactly one matching child alternative.
     Choice {
+        /// Alternative child nodes.
+        alternatives: Vec<SchemaNode>,
+    },
+    /// Exactly one ordered child selected before grammar matching.
+    SelectedChoice {
+        /// Rule producing the zero-based alternative index.
+        selector: UnionSelector,
         /// Alternative child nodes.
         alternatives: Vec<SchemaNode>,
     },

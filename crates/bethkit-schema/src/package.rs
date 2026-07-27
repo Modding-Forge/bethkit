@@ -339,6 +339,10 @@ fn validate_semantic_selector_bindings(
             selector: crate::UnionSelector::Callback { callback_id },
             ..
         }
+        | SchemaNodeKind::SelectedChoice {
+            selector: crate::UnionSelector::Callback { callback_id },
+            ..
+        }
         | SchemaNodeKind::Array {
             count: crate::ArrayCount::Callback { callback_id },
             ..
@@ -367,7 +371,8 @@ fn validate_semantic_selector_bindings(
     }
     let children: Vec<&SchemaNode> = match &node.kind {
         SchemaNodeKind::Sequence { children } => children.iter().collect(),
-        SchemaNodeKind::Choice { alternatives } => alternatives.iter().collect(),
+        SchemaNodeKind::Choice { alternatives }
+        | SchemaNodeKind::SelectedChoice { alternatives, .. } => alternatives.iter().collect(),
         SchemaNodeKind::Repeat { child, .. }
         | SchemaNodeKind::Subrecord { payload: child, .. }
         | SchemaNodeKind::Compressed { child, .. }
@@ -705,12 +710,16 @@ fn validate_node(
     if let SchemaNodeKind::Union {
         selector: crate::UnionSelector::Callback { callback_id },
         ..
+    }
+    | SchemaNodeKind::SelectedChoice {
+        selector: crate::UnionSelector::Callback { callback_id },
+        ..
     } = &node.kind
     {
         validate_string(callback_id, limits)?;
         if callback_id.trim().is_empty() {
             return Err(SchemaError::InvalidGraph(format!(
-                "union callback identifier must not be empty at {}",
+                "variant selector callback identifier must not be empty at {}",
                 node.path
             )));
         }
@@ -731,7 +740,8 @@ fn validate_node(
 
     let children: Vec<&SchemaNode> = match &node.kind {
         SchemaNodeKind::Sequence { children } => children.iter().collect(),
-        SchemaNodeKind::Choice { alternatives } => alternatives.iter().collect(),
+        SchemaNodeKind::Choice { alternatives }
+        | SchemaNodeKind::SelectedChoice { alternatives, .. } => alternatives.iter().collect(),
         SchemaNodeKind::Repeat { child, .. }
         | SchemaNodeKind::Subrecord { payload: child, .. }
         | SchemaNodeKind::Compressed { child, .. }
@@ -759,11 +769,24 @@ fn validate_expression_field_order(
     }
     match &node.kind {
         SchemaNodeKind::Sequence { children } => {
+            let mut local_fields = visible_fields.clone();
             for child in children {
-                validate_expression_field_order(child, &BTreeSet::new(), limits)?;
+                validate_expression_field_order(child, &local_fields, limits)?;
+                collect_expression_field_paths(child, &mut local_fields);
             }
         }
         SchemaNodeKind::Choice { alternatives } => {
+            for alternative in alternatives {
+                validate_expression_field_order(alternative, visible_fields, limits)?;
+            }
+        }
+        SchemaNodeKind::SelectedChoice {
+            selector,
+            alternatives,
+        } => {
+            if let crate::UnionSelector::Expression(expression) = selector {
+                validate_expression_fields(expression, visible_fields, &node.path, limits)?;
+            }
             for alternative in alternatives {
                 validate_expression_field_order(alternative, visible_fields, limits)?;
             }
@@ -800,6 +823,43 @@ fn validate_expression_field_order(
         | SchemaNodeKind::Reference { .. } => {}
     }
     Ok(())
+}
+
+fn collect_expression_field_paths(node: &SchemaNode, paths: &mut BTreeSet<String>) {
+    paths.insert(node.path.clone());
+    match &node.kind {
+        SchemaNodeKind::Sequence { children } => {
+            for child in children {
+                collect_expression_field_paths(child, paths);
+            }
+        }
+        SchemaNodeKind::Choice { alternatives }
+        | SchemaNodeKind::SelectedChoice { alternatives, .. } => {
+            for alternative in alternatives {
+                collect_expression_field_paths(alternative, paths);
+            }
+        }
+        SchemaNodeKind::Repeat { child, .. }
+        | SchemaNodeKind::Subrecord { payload: child, .. }
+        | SchemaNodeKind::Array { element: child, .. }
+        | SchemaNodeKind::Compressed { child, .. }
+        | SchemaNodeKind::Terminated { child, .. } => {
+            collect_expression_field_paths(child, paths);
+        }
+        SchemaNodeKind::Struct { fields } => {
+            for field in fields {
+                collect_expression_field_paths(field, paths);
+            }
+        }
+        SchemaNodeKind::Union { variants, .. } => {
+            for variant in variants {
+                collect_expression_field_paths(variant, paths);
+            }
+        }
+        SchemaNodeKind::Primitive { .. }
+        | SchemaNodeKind::Custom { .. }
+        | SchemaNodeKind::Reference { .. } => {}
+    }
 }
 
 fn validate_expression_fields(

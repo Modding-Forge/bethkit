@@ -73,7 +73,8 @@ fn find_node<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaNode> {
     }
     match &node.kind {
         SchemaNodeKind::Sequence { children } => find_in_nodes(children, path),
-        SchemaNodeKind::Choice { alternatives } => find_in_nodes(alternatives, path),
+        SchemaNodeKind::Choice { alternatives }
+        | SchemaNodeKind::SelectedChoice { alternatives, .. } => find_in_nodes(alternatives, path),
         SchemaNodeKind::Repeat { child, .. }
         | SchemaNodeKind::Subrecord { payload: child, .. }
         | SchemaNodeKind::Array { element: child, .. }
