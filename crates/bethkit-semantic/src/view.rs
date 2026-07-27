@@ -101,6 +101,23 @@ impl<'context, 'record> RecordView<'context, 'record> {
             .format_value_as(self.record, path, value, format)
     }
 
+    /// Formats a decoded value using its sibling-value container.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the bound formatter rejects
+    /// the value or scope, or returns an invalid result.
+    pub fn format_value_as_in_scope(
+        &self,
+        path: &str,
+        value: &FieldValue<'_>,
+        scope: &FieldValue<'_>,
+        format: ValueFormat,
+    ) -> Result<Option<String>> {
+        self.context
+            .format_value_as_in_scope(self.record, path, value, scope, format)
+    }
+
     /// Parses edited xEdit text back to a typed value.
     ///
     /// # Errors

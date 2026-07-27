@@ -215,7 +215,39 @@ impl SemanticContext {
         value: &FieldValue<'_>,
         format: ValueFormat,
     ) -> Result<Option<String>> {
+        self.format_value_as_with_scope(record, path, value, None, format)
+    }
+
+    /// Formats a typed value using its decoded sibling-value container.
+    ///
+    /// This supplies the element context required by xEdit callbacks whose
+    /// result depends on another field in the same struct.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the formatter rejects the value
+    /// or scope, or returns a non-text result.
+    pub fn format_value_as_in_scope(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+        scope: &FieldValue<'_>,
+        format: ValueFormat,
+    ) -> Result<Option<String>> {
+        self.format_value_as_with_scope(record, path, value, Some(scope), format)
+    }
+
+    fn format_value_as_with_scope(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+        scope: Option<&FieldValue<'_>>,
+        format: ValueFormat,
+    ) -> Result<Option<String>> {
         let mut handler_value = value.to_handler_value();
+        let handler_scope = scope.map(FieldValue::to_handler_value);
         let mut formatted = self.format_string_enumeration(record, path, value, format);
         if let Some(text) = &formatted {
             handler_value = FieldValue::String(Cow::Owned(text.clone()));
@@ -241,12 +273,13 @@ impl SemanticContext {
             ) {
                 continue;
             }
-            let output = self.handlers.invoke(
+            let output = self.handlers.invoke_with_value_scope(
                 binding,
                 self.handler_record(record),
                 format.into(),
                 Some(&handler_value),
                 None,
+                handler_scope.as_ref(),
             )?;
             let text = match output {
                 HandlerOutput::None => continue,

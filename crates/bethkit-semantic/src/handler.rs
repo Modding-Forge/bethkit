@@ -266,6 +266,8 @@ pub struct HandlerInvocation<'a> {
     pub value: Option<&'a FieldValue<'static>>,
     /// Previous decoded value for stateful editor callbacks.
     pub old_value: Option<&'a FieldValue<'static>>,
+    /// Decoded container that owns the value and any sibling fields used by the callback.
+    pub value_scope: Option<&'a FieldValue<'static>>,
     /// Original main record for callbacks that inspect sibling subrecords.
     pub source_record: Option<&'a Record>,
     /// Transactional writable record for record-level editor callbacks.
@@ -309,6 +311,7 @@ pub struct FormLinkInfo {
     value: String,
     short_name: String,
     editor_id: Option<String>,
+    quest_aliases: Option<Vec<QuestAliasInfo>>,
 }
 
 impl FormLinkInfo {
@@ -318,12 +321,19 @@ impl FormLinkInfo {
             value: value.into(),
             short_name: short_name.into(),
             editor_id: None,
+            quest_aliases: None,
         }
     }
 
     /// Adds the exact editor ID used by xEdit's link-dependent callbacks.
     pub fn with_editor_id(mut self, editor_id: impl Into<String>) -> Self {
         self.editor_id = Some(editor_id.into());
+        self
+    }
+
+    /// Marks the resolved record as a quest and supplies its effective aliases.
+    pub fn with_quest_aliases(mut self, aliases: Vec<QuestAliasInfo>) -> Self {
+        self.quest_aliases = Some(aliases);
         self
     }
 
@@ -340,6 +350,38 @@ impl FormLinkInfo {
     /// Returns the linked record's editor ID when one is available.
     pub fn editor_id(&self) -> Option<&str> {
         self.editor_id.as_deref()
+    }
+
+    /// Returns effective quest aliases, or `None` when the record is not a quest.
+    pub fn quest_aliases(&self) -> Option<&[QuestAliasInfo]> {
+        self.quest_aliases.as_deref()
+    }
+}
+
+/// xEdit-compatible metadata for one effective quest alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestAliasInfo {
+    index: i64,
+    editor_id: String,
+}
+
+impl QuestAliasInfo {
+    /// Creates quest-alias metadata.
+    pub fn new(index: i64, editor_id: impl Into<String>) -> Self {
+        Self {
+            index,
+            editor_id: editor_id.into(),
+        }
+    }
+
+    /// Returns the numeric alias identifier.
+    pub fn index(&self) -> i64 {
+        self.index
+    }
+
+    /// Returns the alias editor ID, which may be empty.
+    pub fn editor_id(&self) -> &str {
+        &self.editor_id
     }
 }
 
@@ -403,6 +445,20 @@ enum HandlerRecordSource<'a> {
     Writable(&'a WritableRecord),
 }
 
+struct HandlerInvocationAccess<'a> {
+    source: HandlerRecordSource<'a>,
+    value_scope: Option<&'a FieldValue<'static>>,
+}
+
+impl Default for HandlerInvocationAccess<'_> {
+    fn default() -> Self {
+        Self {
+            source: HandlerRecordSource::None,
+            value_scope: None,
+        }
+    }
+}
+
 impl SemanticHandlerRegistry {
     /// Creates an empty handler registry.
     pub fn new() -> Self {
@@ -434,6 +490,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatItemSummary { resolver: None }));
         registry.register(Arc::new(FormatFactionRelation { resolver: None }));
         registry.register(Arc::new(FormatObjectProperty { resolver: None }));
+        registry.register(Arc::new(FormatVmadObjectAlias { resolver: None }));
         registry.register(Arc::new(FormatLandscapePosition));
         registry.register(Arc::new(FormatClimateMoons));
         registry.register(Arc::new(FormatIdleAnimationGroup));
@@ -488,6 +545,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatObjectProperty {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatVmadObjectAlias {
             resolver: Some(resolver),
         }));
     }
@@ -546,7 +606,35 @@ impl SemanticHandlerRegistry {
         self.invoke_with_records(
             binding,
             record,
-            HandlerRecordSource::None,
+            HandlerInvocationAccess::default(),
+            phase,
+            value,
+            old_value,
+        )
+    }
+
+    /// Executes a binding with its decoded sibling-value container.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the binding is not executable or the
+    /// selected handler rejects the invocation.
+    pub fn invoke_with_value_scope<'a>(
+        &self,
+        binding: &'a CallbackBinding,
+        record: HandlerRecordContext,
+        phase: HandlerPhase,
+        value: Option<&'a FieldValue<'static>>,
+        old_value: Option<&'a FieldValue<'static>>,
+        value_scope: Option<&'a FieldValue<'static>>,
+    ) -> Result<HandlerOutput> {
+        self.invoke_with_records(
+            binding,
+            record,
+            HandlerInvocationAccess {
+                source: HandlerRecordSource::None,
+                value_scope,
+            },
             phase,
             value,
             old_value,
@@ -575,7 +663,11 @@ impl SemanticHandlerRegistry {
         self.invoke_with_records(
             binding,
             record,
-            source_record.map_or(HandlerRecordSource::None, HandlerRecordSource::ReadOnly),
+            HandlerInvocationAccess {
+                source: source_record
+                    .map_or(HandlerRecordSource::None, HandlerRecordSource::ReadOnly),
+                value_scope: None,
+            },
             phase,
             value,
             old_value,
@@ -600,7 +692,10 @@ impl SemanticHandlerRegistry {
         self.invoke_with_records(
             binding,
             record,
-            HandlerRecordSource::Writable(source_record),
+            HandlerInvocationAccess {
+                source: HandlerRecordSource::Writable(source_record),
+                value_scope: None,
+            },
             phase,
             value,
             old_value,
@@ -611,7 +706,7 @@ impl SemanticHandlerRegistry {
         &self,
         binding: &'a CallbackBinding,
         record: HandlerRecordContext,
-        source: HandlerRecordSource<'a>,
+        access: HandlerInvocationAccess<'a>,
         phase: HandlerPhase,
         value: Option<&'a FieldValue<'static>>,
         old_value: Option<&'a FieldValue<'static>>,
@@ -651,11 +746,12 @@ impl SemanticHandlerRegistry {
                 phase,
                 value,
                 old_value,
-                source_record: match source {
+                value_scope: access.value_scope,
+                source_record: match access.source {
                     HandlerRecordSource::ReadOnly(record) => Some(record),
                     HandlerRecordSource::None | HandlerRecordSource::Writable(_) => None,
                 },
-                source_writable_record: match source {
+                source_writable_record: match access.source {
                     HandlerRecordSource::Writable(record) => Some(record),
                     HandlerRecordSource::None | HandlerRecordSource::ReadOnly(_) => None,
                 },
@@ -1590,6 +1686,236 @@ impl SemanticHandler for FormatObjectProperty {
             return Ok(HandlerOutput::None);
         };
         Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct FormatVmadObjectAlias {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for FormatVmadObjectAlias {
+    fn id(&self) -> &'static str {
+        "format.vmad_object_alias"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(vmad_alias_error(
+                    "VMAD object-alias edit parsing requires text",
+                ));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Int(parse_vmad_alias(
+                value,
+            ))));
+        }
+        let raw = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                vmad_alias_error("VMAD object-alias formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| vmad_alias_error("VMAD object alias exceeds i64"))?;
+        let form_id_path =
+            configured_text(self.id(), invocation.context.configuration, "form_id_path")?;
+        let Some((form_id, targets)) = invocation
+            .value_scope
+            .and_then(|scope| scoped_form_id(scope, form_id_path))
+        else {
+            return Ok(HandlerOutput::Text(String::new()));
+        };
+        Ok(HandlerOutput::Text(format_vmad_object_alias(
+            raw,
+            invocation.phase,
+            invocation.context.game,
+            form_id,
+            targets,
+            self.resolver.as_deref(),
+            handler_record_context(&invocation.context),
+        )?))
+    }
+}
+
+fn scoped_form_id<'a>(
+    value: &'a FieldValue<'static>,
+    target_path: &str,
+) -> Option<(FormId, &'a [Signature])> {
+    match value {
+        FieldValue::Struct(values) => {
+            for value in values {
+                if value.path == target_path {
+                    if let FieldValue::FormId { value, targets } = &value.value {
+                        return Some((*value, targets));
+                    }
+                    return None;
+                }
+                if let Some(found) = scoped_form_id(&value.value, target_path) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        FieldValue::Array(values) => values
+            .iter()
+            .find_map(|value| scoped_form_id(value, target_path)),
+        _ => None,
+    }
+}
+
+fn format_vmad_object_alias(
+    raw: i64,
+    phase: HandlerPhase,
+    game: SchemaGame,
+    quest_form_id: FormId,
+    targets: &[Signature],
+    resolver: Option<&dyn FormLinkResolver>,
+    source: HandlerRecordContext,
+) -> Result<String> {
+    if phase == HandlerPhase::SortKey {
+        return Ok(format!("{:08X}", raw as u64));
+    }
+    let mut result = unresolved_vmad_alias(raw, phase, game)?;
+    if vmad_alias_is_sentinel(raw, game)
+        && !matches!(
+            phase,
+            HandlerPhase::NativeValue | HandlerPhase::ParseEditValue
+        )
+    {
+        return Ok(result);
+    }
+    let Some(link) =
+        resolver.and_then(|resolver| resolver.resolve_form_id(source, quest_form_id, targets))
+    else {
+        return Ok(result);
+    };
+    let Some(aliases) = link.quest_aliases() else {
+        return Ok(match phase {
+            HandlerPhase::Display => format!(
+                "{raw} <Warning: \"{}\" is not a Quest record>",
+                link.short_name()
+            ),
+            HandlerPhase::Summary => raw.to_string(),
+            HandlerPhase::Validation => {
+                format!("<Warning: \"{}\" is not a Quest record>", link.short_name())
+            }
+            _ => result,
+        });
+    };
+    if let Some(alias) = aliases.iter().find(|alias| alias.index() == raw) {
+        let include_index = phase != HandlerPhase::Summary
+            || !matches!(
+                game,
+                SchemaGame::SkyrimLe | SchemaGame::SkyrimSe | SchemaGame::SkyrimVr
+            );
+        result = if include_index {
+            format_vmad_alias_label(alias)
+        } else {
+            alias.editor_id().to_owned()
+        };
+        if phase == HandlerPhase::Validation {
+            result.clear();
+        }
+        return Ok(result);
+    }
+    Ok(match phase {
+        HandlerPhase::Display => format!(
+            "{raw} <Warning: Quest Alias not found in \"{}\">",
+            link.value()
+        ),
+        HandlerPhase::Summary => raw.to_string(),
+        HandlerPhase::Validation => {
+            format!("<Warning: Quest Alias not found in \"{}\">", link.value())
+        }
+        _ => result,
+    })
+}
+
+fn unresolved_vmad_alias(raw: i64, phase: HandlerPhase, game: SchemaGame) -> Result<String> {
+    let player_sentinel = matches!(
+        game,
+        SchemaGame::Fallout4
+            | SchemaGame::Fallout4Vr
+            | SchemaGame::Fallout76
+            | SchemaGame::Starfield
+    );
+    let none_summary_empty = matches!(
+        game,
+        SchemaGame::SkyrimLe | SchemaGame::SkyrimSe | SchemaGame::SkyrimVr | SchemaGame::Starfield
+    );
+    let text = match phase {
+        HandlerPhase::Display if raw == -1 => "None".to_owned(),
+        HandlerPhase::Summary if raw == -1 && none_summary_empty => String::new(),
+        HandlerPhase::Summary if raw == -1 => "None".to_owned(),
+        HandlerPhase::Display | HandlerPhase::Summary if raw == -2 && player_sentinel => {
+            "Player".to_owned()
+        }
+        HandlerPhase::Display => format!("{raw} <Warning: Could not resolve alias>"),
+        HandlerPhase::Summary => raw.to_string(),
+        HandlerPhase::EditValue if raw == -1 => "None".to_owned(),
+        HandlerPhase::EditValue => raw.to_string(),
+        HandlerPhase::Validation if raw == -1 || (raw == -2 && player_sentinel) => String::new(),
+        HandlerPhase::Validation => "<Warning: Could not resolve alias>".to_owned(),
+        HandlerPhase::NativeValue => String::new(),
+        HandlerPhase::DecodeNormalize
+        | HandlerPhase::ParseEditValue
+        | HandlerPhase::UnionSelection
+        | HandlerPhase::ArrayCount
+        | HandlerPhase::AfterSet
+        | HandlerPhase::ReferenceResolution
+        | HandlerPhase::Conflict
+        | HandlerPhase::RecordMetadata
+        | HandlerPhase::Removability
+        | HandlerPhase::SortKey => String::new(),
+    };
+    Ok(text)
+}
+
+fn vmad_alias_is_sentinel(raw: i64, game: SchemaGame) -> bool {
+    raw == -1
+        || raw == -2
+            && matches!(
+                game,
+                SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+                    | SchemaGame::Starfield
+            )
+}
+
+fn format_vmad_alias_label(alias: &QuestAliasInfo) -> String {
+    let mut text = alias.index().to_string();
+    while text.len() < 3 {
+        text.insert(0, '0');
+    }
+    if !alias.editor_id().is_empty() {
+        text.push(' ');
+        text.push_str(alias.editor_id());
+    }
+    text
+}
+
+fn parse_vmad_alias(value: &str) -> i64 {
+    if value == "None" {
+        return -1;
+    }
+    let value = value.trim();
+    let end = value
+        .char_indices()
+        .take_while(|(_, value)| *value == '-' || value.is_ascii_digit())
+        .map(|(index, value)| index + value.len_utf8())
+        .last()
+        .unwrap_or(0);
+    value[..end].parse::<i32>().map(i64::from).unwrap_or(-1)
+}
+
+fn vmad_alias_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.vmad_object_alias".to_owned(),
+        message: message.into(),
     }
 }
 
@@ -4840,10 +5166,23 @@ mod tests {
             form_id: FormId,
             _targets: &[Signature],
         ) -> Option<FormLinkInfo> {
-            (form_id == FormId(0x1234)).then(|| {
-                FormLinkInfo::new("[00001234] Example Faction", "Example Item [MISC:00001234]")
-                    .with_editor_id("ExampleActorValue")
-            })
+            match form_id {
+                FormId(0x1234) => Some(
+                    FormLinkInfo::new("[00001234] Example Faction", "Example Item [MISC:00001234]")
+                        .with_editor_id("ExampleActorValue"),
+                ),
+                FormId(0x5678) => Some(
+                    FormLinkInfo::new(
+                        "Example Quest [QUST:00005678]",
+                        "Example Quest [QUST:00005678]",
+                    )
+                    .with_quest_aliases(vec![
+                        QuestAliasInfo::new(7, "Target"),
+                        QuestAliasInfo::new(12, ""),
+                    ]),
+                ),
+                _ => None,
+            }
         }
     }
 
@@ -5381,6 +5720,7 @@ mod tests {
             phase: HandlerPhase::Display,
             value: Some(&rgb),
             old_value: None,
+            value_scope: None,
             source_record: None,
             source_writable_record: None,
         })?;
@@ -5546,6 +5886,131 @@ mod tests {
             format_item_summary(&value, Some(&TestFormLinkResolver), source)?,
             Some("3x Example Item [MISC:00001234]".to_owned())
         );
+        Ok(())
+    }
+
+    /// Resolves VMAD object aliases through their sibling quest FormID.
+    #[test]
+    fn vmad_object_alias_formatter_matches_xedit_scope_and_game_policies(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let form_id_path = "TEST/Object/FormID";
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.vmad_object_alias",
+            serde_json::json!({ "form_id_path": form_id_path }),
+        );
+        let scope = FieldValue::Struct(vec![crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: form_id_path.to_owned(),
+            name: "FormID".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 4 },
+            value: FieldValue::FormId {
+                value: FormId(0x5678),
+                targets: vec![Signature(*b"QUST")],
+            },
+        }]);
+        let alias = FieldValue::Int(7);
+        let unknown = FieldValue::Int(8);
+        let none = FieldValue::Int(-1);
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let skyrim =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let fallout =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Fallout4);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                skyrim,
+                HandlerPhase::Display,
+                Some(&alias),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "007 Target"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                skyrim,
+                HandlerPhase::Summary,
+                Some(&alias),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "Target"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                fallout,
+                HandlerPhase::Summary,
+                Some(&alias),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "007 Target"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                skyrim,
+                HandlerPhase::Display,
+                Some(&unknown),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text)
+                if text
+                    == "8 <Warning: Quest Alias not found in \"Example Quest \
+                        [QUST:00005678]\">"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                skyrim,
+                HandlerPhase::Summary,
+                Some(&none),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text.is_empty()
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                fallout,
+                HandlerPhase::Summary,
+                Some(&none),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "None"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                skyrim,
+                HandlerPhase::Display,
+                Some(&alias),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text.is_empty()
+        ));
+        let edit = FieldValue::String(Cow::Borrowed("007 Target"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                skyrim,
+                HandlerPhase::ParseEditValue,
+                Some(&edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(7))
+        ));
         Ok(())
     }
 
@@ -7646,6 +8111,7 @@ mod tests {
             phase: HandlerPhase::Validation,
             value: None,
             old_value: None,
+            value_scope: None,
             source_record: None,
             source_writable_record: None,
         })?;
@@ -7701,6 +8167,7 @@ mod tests {
             phase,
             value: Some(&value),
             old_value: None,
+            value_scope: None,
             source_record: None,
             source_writable_record: None,
         })?;
@@ -7746,6 +8213,7 @@ mod tests {
             phase,
             value: Some(value),
             old_value: None,
+            value_scope: None,
             source_record: None,
             source_writable_record: None,
         })
