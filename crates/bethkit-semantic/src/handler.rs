@@ -796,6 +796,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatItemSummary { resolver: None }));
         registry.register(Arc::new(FormatFactionRelation { resolver: None }));
         registry.register(Arc::new(FormatObjectProperty { resolver: None }));
+        registry.register(Arc::new(FormatCrowdProperty { resolver: None }));
         registry.register(Arc::new(FormatVmadObjectAlias { resolver: None }));
         registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
         registry.register(Arc::new(FormatCtdaVariableName { resolver: None }));
@@ -896,6 +897,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatObjectProperty {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatCrowdProperty {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatVmadObjectAlias {
@@ -2098,6 +2102,10 @@ struct FormatObjectProperty {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatCrowdProperty {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 impl SemanticHandler for FormatObjectProperty {
     fn id(&self) -> &'static str {
         "format.object_property"
@@ -2119,6 +2127,36 @@ impl SemanticHandler for FormatObjectProperty {
             value,
             self.resolver.as_deref(),
             handler_record_context(&invocation.context),
+        )?
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+impl SemanticHandler for FormatCrowdProperty {
+    fn id(&self) -> &'static str {
+        "format.crowd_property"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::Summary {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "crowd property summary requires a value".to_owned(),
+        })?;
+        let Some(text) = format_linked_float_property(
+            value,
+            self.resolver.as_deref(),
+            handler_record_context(&invocation.context),
+            self.id(),
         )?
         else {
             return Ok(HandlerOutput::None);
@@ -7433,23 +7471,32 @@ fn format_object_property(
     resolver: Option<&dyn FormLinkResolver>,
     source: HandlerRecordContext,
 ) -> Result<Option<String>> {
-    let fields = struct_fields(value, "format.object_property")?;
-    let [actor_value, property_value, ..] = fields else {
+    format_linked_float_property(value, resolver, source, "format.object_property")
+}
+
+fn format_linked_float_property(
+    value: &FieldValue<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+    source: HandlerRecordContext,
+    handler: &str,
+) -> Result<Option<String>> {
+    let fields = struct_fields(value, handler)?;
+    let [linked_value, property_value, remaining @ ..] = fields else {
         return Err(summary_error(
-            "format.object_property",
-            "object property requires actor value and value fields",
+            handler,
+            "linked property requires form and value fields",
         ));
     };
-    let FieldValue::FormId { value, targets } = &actor_value.value else {
+    let FieldValue::FormId { value, targets } = &linked_value.value else {
         return Err(summary_error(
-            "format.object_property",
-            "object property requires a FormID as its first field",
+            handler,
+            "linked property requires a FormID as its first field",
         ));
     };
     let FieldValue::Float(property_value) = property_value.value else {
         return Err(summary_error(
-            "format.object_property",
-            "object property requires a floating-point second field",
+            handler,
+            "linked property requires a floating-point second field",
         ));
     };
     let Some(link) =
@@ -7460,10 +7507,23 @@ fn format_object_property(
     let Some(editor_id) = link.editor_id() else {
         return Ok(None);
     };
-    Ok(Some(format!(
-        "{editor_id} = {}",
-        format_delphi_general(property_value, 5)
-    )))
+    let mut text = format!("{editor_id} = {}", format_delphi_general(property_value, 5));
+    if matches!(source.game, SchemaGame::Fallout76 | SchemaGame::Starfield) {
+        if let Some(crate::NamedValue {
+            value: FieldValue::FormId { value, targets },
+            ..
+        }) = remaining.first()
+        {
+            if let Some(curve) =
+                resolver.and_then(|resolver| resolver.resolve_form_id(source, *value, targets))
+            {
+                text.push_str(" {Curve Table: ");
+                text.push_str(curve.short_name());
+                text.push('}');
+            }
+        }
+    }
+    Ok(Some(text))
 }
 
 fn struct_fields<'a>(
@@ -7681,7 +7741,15 @@ mod tests {
                 ),
                 FormId(0x2468) => Some(
                     FormLinkInfo::new("[00002468] Example Actor", "Example Actor [NPC_:00002468]")
-                        .with_signature(Signature(*b"NPC_")),
+                        .with_signature(Signature(*b"NPC_"))
+                        .with_editor_id("ExampleActor"),
+                ),
+                FormId(0x4567) => Some(
+                    FormLinkInfo::new(
+                        "Example Curve [CURV:00004567]",
+                        "Example Curve [CURV:00004567]",
+                    )
+                    .with_signature(Signature(*b"CURV")),
                 ),
                 FormId(0x3456) => Some(
                     FormLinkInfo::new(
@@ -9129,6 +9197,48 @@ mod tests {
 
         // then
         assert_eq!(result, Some("ExampleActorValue = 12.346".to_owned()));
+        Ok(())
+    }
+
+    /// Matches xEdit's Starfield crowd-property summary including curve metadata.
+    #[test]
+    fn crowd_property_summary_includes_curve_table() -> TestResult {
+        let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: format!("TEST/{name}"),
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let value = FieldValue::Struct(vec![
+            field(
+                "Actor",
+                FieldValue::FormId {
+                    value: FormId(0x2468),
+                    targets: vec![Signature(*b"NPC_")],
+                },
+            ),
+            field("Value", FieldValue::Float(0.125)),
+            field(
+                "Curve Table",
+                FieldValue::FormId {
+                    value: FormId(0x4567),
+                    targets: vec![Signature(*b"CURV")],
+                },
+            ),
+        ]);
+        let source =
+            HandlerRecordContext::new(Signature(*b"ACHR"), FormId::NULL, 0, SchemaGame::Starfield);
+
+        assert_eq!(
+            format_linked_float_property(
+                &value,
+                Some(&TestFormLinkResolver),
+                source,
+                "format.crowd_property",
+            )?,
+            Some("ExampleActor = 0.125 {Curve Table: Example Curve [CURV:00004567]}".to_owned())
+        );
         Ok(())
     }
 
