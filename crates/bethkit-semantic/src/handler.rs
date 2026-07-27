@@ -426,6 +426,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatFactionRelation { resolver: None }));
         registry.register(Arc::new(FormatObjectProperty { resolver: None }));
         registry.register(Arc::new(FormatLandscapePosition));
+        registry.register(Arc::new(FormatClimateMoons));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
@@ -1609,6 +1610,52 @@ impl SemanticHandler for FormatLandscapePosition {
             HandlerPhase::Validation if !(0..=288).contains(&value) => {
                 format!("<Out of range: {value}>")
             }
+            HandlerPhase::Validation => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct FormatClimateMoons;
+
+impl SemanticHandler for FormatClimateMoons {
+    fn id(&self) -> &'static str {
+        "format.climate_moons"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(climate_moons_error(
+                    "climate moon edit parsing requires text",
+                ));
+            };
+            let value = parse_delphi_integer(value, self.id())?;
+            return Ok(if value < 0 {
+                HandlerOutput::Value(FieldValue::Int(value))
+            } else {
+                HandlerOutput::Value(FieldValue::UInt(value as u64))
+            });
+        }
+
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                climate_moons_error("climate moon formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| climate_moons_error("climate moon value exceeds i64"))?;
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary => {
+                format_climate_moons(value, invocation.context.game)
+            }
+            HandlerPhase::SortKey => format!("{value:02X}"),
+            HandlerPhase::EditValue | HandlerPhase::NativeValue => value.to_string(),
             HandlerPhase::Validation => String::new(),
             _ => return Ok(HandlerOutput::None),
         };
@@ -3245,6 +3292,26 @@ fn landscape_position_error(message: impl Into<String>) -> SemanticError {
     }
 }
 
+fn format_climate_moons(value: i64, game: SchemaGame) -> String {
+    let legacy_fallout = matches!(game, SchemaGame::Fallout3 | SchemaGame::FalloutNv);
+    let masser_mask = if legacy_fallout { 128 } else { 64 };
+    let secunda_mask = if legacy_fallout { 64 } else { 128 };
+    let prefix = match (value & masser_mask != 0, value & secunda_mask != 0) {
+        (true, true) => "Masser, Secunda",
+        (true, false) => "Masser",
+        (false, true) => "Secunda",
+        (false, false) => "No Moon",
+    };
+    format!("{prefix} / {}", value % 64)
+}
+
+fn climate_moons_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.climate_moons".to_owned(),
+        message: message.into(),
+    }
+}
+
 fn set_model_info_count(
     headers: &mut [FieldValue<'static>],
     index: usize,
@@ -4831,6 +4898,64 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::UInt(288))
+        ));
+        Ok(())
+    }
+
+    /// Matches the xEdit climate moon masks for modern and legacy Fallout games.
+    #[test]
+    fn climate_moon_formatter_matches_xedit_game_masks() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.climate_moons",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let value = FieldValue::UInt(64);
+
+        // when / then
+        for (game, expected) in [
+            (SchemaGame::SkyrimSe, "Masser / 0"),
+            (SchemaGame::Fallout4, "Masser / 0"),
+            (SchemaGame::Fallout3, "Secunda / 0"),
+            (SchemaGame::FalloutNv, "Secunda / 0"),
+        ] {
+            let context = HandlerRecordContext::new(Signature(*b"CLMT"), FormId::NULL, 0, game);
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::Display,
+                    Some(&value),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
+
+        let both = FieldValue::UInt(255);
+        let context =
+            HandlerRecordContext::new(Signature(*b"CLMT"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::Summary,
+                Some(&both),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "Masser, Secunda / 63"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::SortKey,
+                Some(&both),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "FF"
         ));
         Ok(())
     }
