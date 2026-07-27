@@ -10,7 +10,7 @@ use bethkit_schema::{
     CallbackBinding, CallbackImplementation, ConditionFunctionTable, ConflictPriority, SchemaGame,
 };
 
-use crate::{FieldValue, OwnedFieldValue, Result, SemanticError};
+use crate::{value::float_from_raw, FieldValue, OwnedFieldValue, Result, SemanticError};
 
 pub(crate) fn is_validation_binding(binding: &CallbackBinding) -> bool {
     matches!(
@@ -764,6 +764,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
         registry.register(Arc::new(ModelInfoArrayCount));
+        registry.register(Arc::new(WorldspaceOffsetColumnCount));
         registry.register(Arc::new(SelectCtdaParameter { table: None }));
         registry.register(Arc::new(SelectCoedOwner { resolver: None }));
         registry.register(Arc::new(SelectNoteData));
@@ -3937,6 +3938,66 @@ impl SemanticHandler for ModelInfoArrayCount {
             .unwrap_or(0);
         Ok(HandlerOutput::Integer(i64::from(count)))
     }
+}
+
+struct WorldspaceOffsetColumnCount;
+
+impl SemanticHandler for WorldspaceOffsetColumnCount {
+    fn id(&self) -> &'static str {
+        "array.worldspace_offset_columns"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ArrayCount {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(min_x) = worldspace_bound_x(&invocation, Signature(*b"NAM0"), self.id())? else {
+            return Ok(HandlerOutput::Integer(0));
+        };
+        let Some(max_x) = worldspace_bound_x(&invocation, Signature(*b"NAM9"), self.id())? else {
+            return Ok(HandlerOutput::Integer(0));
+        };
+        let count = max_x.wrapping_sub(min_x).wrapping_add(1) as u32;
+        Ok(HandlerOutput::Integer(i64::from(count)))
+    }
+}
+
+fn worldspace_bound_x(
+    invocation: &HandlerInvocation<'_>,
+    signature: Signature,
+    handler: &str,
+) -> Result<Option<i32>> {
+    let Some(bytes) = source_subrecord_bytes(invocation, signature, handler)? else {
+        return Ok(None);
+    };
+    let raw = bytes
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(f32::from_le_bytes)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("{signature} worldspace bound is shorter than four bytes"),
+        })?;
+    if !raw.is_finite() {
+        return Ok(None);
+    }
+    let scale = if invocation.context.game == SchemaGame::Starfield {
+        1.0 / 100.0
+    } else {
+        1.0 / 4096.0
+    };
+    let scaled = float_from_raw(f64::from(raw), scale, 6).round_ties_even();
+    if scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
+        return Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("{signature} worldspace X bound exceeds i32"),
+        });
+    }
+    Ok(Some(scaled as i32))
 }
 
 struct SelectCtdaParameter {
@@ -10892,6 +10953,50 @@ mod tests {
         )?;
 
         assert!(matches!(output, HandlerOutput::Integer(3)));
+        Ok(())
+    }
+
+    /// Derives xEdit worldspace offset columns from NAM0 and NAM9 X bounds.
+    #[test]
+    fn worldspace_offset_column_count_matches_xedit_bounds() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "array.count",
+            "array.worldspace_offset_columns",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+
+        // when / then
+        for (game, min_x, max_x, expected) in [
+            (SchemaGame::SkyrimSe, -8192.0_f32, 4096.0_f32, 4_i64),
+            (SchemaGame::SkyrimSe, 2048.0, 6144.0, 3),
+            (SchemaGame::Starfield, -100.0, 200.0, 4),
+        ] {
+            let record = test_record(
+                *b"WRLD",
+                &[
+                    (*b"NAM0", [min_x.to_le_bytes(), [0; 4]].concat()),
+                    (*b"NAM9", [max_x.to_le_bytes(), [0; 4]].concat()),
+                    (*b"OFST", vec![0; 16]),
+                ],
+            )?;
+            let context = HandlerRecordContext::new(Signature(*b"WRLD"), FormId::NULL, 0, game);
+            assert!(matches!(
+                handlers.invoke_with_subrecord(
+                    &binding,
+                    context,
+                    HandlerSubrecordSource::ReadOnly {
+                        record: &record,
+                        index: 2,
+                    },
+                    HandlerPhase::ArrayCount,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(count) if count == expected
+            ));
+        }
         Ok(())
     }
 
