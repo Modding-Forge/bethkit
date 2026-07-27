@@ -396,6 +396,65 @@ impl SemanticContext {
         Ok(removable)
     }
 
+    /// Returns xEdit's dynamic sorting decision for a subrecord-array path.
+    ///
+    /// `None` means the schema path has no dynamic `is_sorted` callback; the
+    /// caller must then use the array's static schema ordering metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError::Handler`] when the callback is not executable,
+    /// is bound more than once, or returns a non-boolean result.
+    pub fn array_is_sorted(&self, record: &Record, path: &str) -> Result<Option<bool>> {
+        let mut decision = None;
+        for binding in self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| {
+                binding.path == path && binding.callback_id == "subrecord_array.is_sorted"
+            })
+        {
+            if decision.is_some() {
+                return Err(SemanticError::Handler {
+                    handler: binding.callback_id.clone(),
+                    message: "array sorting callback is bound more than once".to_owned(),
+                });
+            }
+            if !matches!(
+                binding.implementation,
+                CallbackImplementation::BuiltIn { .. }
+                    | CallbackImplementation::CustomHandler { .. }
+            ) {
+                return Err(SemanticError::Handler {
+                    handler: binding.callback_id.clone(),
+                    message: "array sorting callback is not executable".to_owned(),
+                });
+            }
+            decision = Some(
+                match self.handlers.invoke_with_source_record(
+                    binding,
+                    self.handler_record(record),
+                    Some(record),
+                    HandlerPhase::RecordMetadata,
+                    None,
+                    None,
+                )? {
+                    HandlerOutput::Boolean(value) => value,
+                    _ => {
+                        return Err(SemanticError::Handler {
+                            handler: binding.callback_id.clone(),
+                            message: "array sorting callback returned a non-boolean result"
+                                .to_owned(),
+                        });
+                    }
+                },
+            );
+        }
+        Ok(decision)
+    }
+
     pub(crate) fn apply_normalizers<'a>(
         &self,
         path: &str,

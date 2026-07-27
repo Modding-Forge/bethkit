@@ -289,6 +289,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ModelInfoConflictPriority));
         registry.register(Arc::new(IgnoreEmptyConflictPriority));
         registry.register(Arc::new(CellWaterConflictPriority));
+        registry.register(Arc::new(ConstantMetadataBoolean));
         registry.register(Arc::new(FormatRgb));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
@@ -529,6 +530,34 @@ impl SemanticHandler for CellWaterConflictPriority {
         } else {
             ConflictPriority::Normal
         }))
+    }
+}
+
+struct ConstantMetadataBoolean;
+
+impl SemanticHandler for ConstantMetadataBoolean {
+    fn id(&self) -> &'static str {
+        "metadata.constant_boolean"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::RecordMetadata {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation
+            .context
+            .configuration
+            .get("value")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "constant metadata decision requires a boolean value".to_owned(),
+            })?;
+        Ok(HandlerOutput::Boolean(value))
     }
 }
 
@@ -1796,6 +1825,33 @@ mod tests {
                 HandlerOutput::ConflictPriority(priority) if priority == expected
             ));
         }
+        Ok(())
+    }
+
+    /// Returns the configured xEdit record-metadata decision exactly.
+    #[test]
+    fn constant_metadata_boolean_preserves_false() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "FLST/FormIDs".to_owned(),
+            callback_id: "subrecord_array.is_sorted".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-never-sorted".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "metadata.constant_boolean".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({ "value": false }),
+                },
+            },
+        };
+        let output = SemanticHandlerRegistry::builtin().invoke(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"FLST"), FormId::NULL, 0, SchemaGame::SkyrimSe),
+            HandlerPhase::RecordMetadata,
+            None,
+            None,
+        )?;
+        assert!(matches!(output, HandlerOutput::Boolean(false)));
         Ok(())
     }
 
