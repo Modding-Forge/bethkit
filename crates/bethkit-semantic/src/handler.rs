@@ -22,6 +22,14 @@ pub(crate) fn is_validation_binding(binding: &CallbackBinding) -> bool {
     )
 }
 
+pub(crate) fn runs_during_validation(binding: &CallbackBinding) -> bool {
+    is_validation_binding(binding)
+        || matches!(
+            binding.callback_id.as_str(),
+            "integer.formatter" | "string.formatter"
+        )
+}
+
 /// Runtime phase in which a semantic callback is invoked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandlerPhase {
@@ -417,6 +425,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatItemSummary { resolver: None }));
         registry.register(Arc::new(FormatFactionRelation { resolver: None }));
         registry.register(Arc::new(FormatObjectProperty { resolver: None }));
+        registry.register(Arc::new(FormatLandscapePosition));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
@@ -1551,6 +1560,57 @@ impl SemanticHandler for FormatObjectProperty {
         )?
         else {
             return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct FormatLandscapePosition;
+
+impl SemanticHandler for FormatLandscapePosition {
+    fn id(&self) -> &'static str {
+        "format.landscape_position"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(landscape_position_error(
+                    "landscape position edit parsing requires text",
+                ));
+            };
+            let value = parse_delphi_integer(value, self.id())?;
+            return Ok(if value < 0 {
+                HandlerOutput::Value(FieldValue::Int(value))
+            } else {
+                HandlerOutput::Value(FieldValue::UInt(value as u64))
+            });
+        }
+
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                landscape_position_error("landscape position formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| landscape_position_error("landscape position exceeds i64"))?;
+        let row = value / 17;
+        let column = value % 17;
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary => {
+                format!("{value} -> {row}:{column}")
+            }
+            HandlerPhase::SortKey => format!("{row:02X}{column:02X}"),
+            HandlerPhase::EditValue | HandlerPhase::NativeValue => value.to_string(),
+            HandlerPhase::Validation if !(0..=288).contains(&value) => {
+                format!("<Out of range: {value}>")
+            }
+            HandlerPhase::Validation => String::new(),
+            _ => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Text(text))
     }
@@ -3134,6 +3194,57 @@ fn callback_integer(value: &FieldValue<'_>, handler: &str) -> Result<i128> {
     }
 }
 
+fn parse_delphi_integer(value: &str, handler: &str) -> Result<i64> {
+    let value = value.trim();
+    let (negative, value) = if let Some(value) = value.strip_prefix('-') {
+        (true, value)
+    } else {
+        (false, value.strip_prefix('+').unwrap_or(value))
+    };
+    let (radix, digits) = value
+        .strip_prefix('$')
+        .map_or_else(
+            || {
+                value
+                    .strip_prefix("0x")
+                    .or_else(|| value.strip_prefix("0X"))
+                    .map(|digits| (16, digits))
+            },
+            |digits| Some((16, digits)),
+        )
+        .unwrap_or((10, value));
+    let magnitude = u64::from_str_radix(digits, radix).map_err(|error| SemanticError::Handler {
+        handler: handler.to_owned(),
+        message: format!("invalid integer edit value {value:?}: {error}"),
+    })?;
+    if negative {
+        let maximum = i64::MAX as u64 + 1;
+        if magnitude > maximum {
+            return Err(SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!("integer edit value -{value} is below i64"),
+            });
+        }
+        if magnitude == maximum {
+            Ok(i64::MIN)
+        } else {
+            Ok(-(magnitude as i64))
+        }
+    } else {
+        i64::try_from(magnitude).map_err(|_| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("integer edit value {value} exceeds i64"),
+        })
+    }
+}
+
+fn landscape_position_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.landscape_position".to_owned(),
+        message: message.into(),
+    }
+}
+
 fn set_model_info_count(
     headers: &mut [FieldValue<'static>],
     index: usize,
@@ -4640,6 +4751,87 @@ mod tests {
 
         // then
         assert_eq!(result, Some("ExampleActorValue = 12.346".to_owned()));
+        Ok(())
+    }
+
+    /// Matches xEdit's `wbAtxtPosition` formatting, editing, and range checking.
+    #[test]
+    fn landscape_position_formatter_matches_xedit_grid() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.landscape_position",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"LAND"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+
+        // when / then
+        for (value, display, sort_key) in [
+            (0, "0 -> 0:0", "0000"),
+            (16, "16 -> 0:16", "0010"),
+            (17, "17 -> 1:0", "0100"),
+            (288, "288 -> 16:16", "1010"),
+        ] {
+            let value = FieldValue::UInt(value);
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::Display,
+                    Some(&value),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == display
+            ));
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::SortKey,
+                    Some(&value),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == sort_key
+            ));
+        }
+
+        let valid = FieldValue::UInt(288);
+        let invalid = FieldValue::UInt(289);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::Validation,
+                Some(&valid),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text.is_empty()
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::Validation,
+                Some(&invalid),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "<Out of range: 289>"
+        ));
+        assert!(runs_during_validation(&binding));
+
+        let edit = FieldValue::String(Cow::Borrowed("$0120"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::ParseEditValue,
+                Some(&edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(288))
+        ));
         Ok(())
     }
 

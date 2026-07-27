@@ -406,9 +406,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
             .callback_bindings()
             .iter()
             .filter(|binding| {
-                binding.path == path
-                    && binding.callback_id == "def.value_transform"
-                    && crate::handler::is_validation_binding(binding)
+                binding.path == path && crate::handler::runs_during_validation(binding)
             })
         {
             if !matches!(
