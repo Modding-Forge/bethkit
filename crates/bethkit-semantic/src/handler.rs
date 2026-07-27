@@ -782,6 +782,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectMorrowindGlobalValue));
         registry.register(Arc::new(SelectOblivionMiscActorValue));
         registry.register(Arc::new(SelectPerkEffectData));
+        registry.register(Arc::new(SelectPerkEntryPointData));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -4131,6 +4132,8 @@ struct SelectOblivionMiscActorValue;
 
 struct SelectPerkEffectData;
 
+struct SelectPerkEntryPointData;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4590,6 +4593,48 @@ impl SemanticHandler for SelectPerkEffectData {
             .copied()
             .unwrap_or_default();
         Ok(HandlerOutput::Integer(i64::from(effect_type)))
+    }
+}
+
+impl SemanticHandler for SelectPerkEntryPointData {
+    fn id(&self) -> &'static str {
+        "select.perk_entry_point_data"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let mut selected = source_subrecord_bytes(&invocation, Signature(*b"EPFT"), self.id())?
+            .and_then(|bytes| bytes.first())
+            .copied()
+            .unwrap_or_default();
+        if selected == 2 {
+            let function = source_subrecord_bytes(&invocation, Signature(*b"DATA"), self.id())?
+                .and_then(|bytes| bytes.get(1))
+                .copied()
+                .unwrap_or_default();
+            selected = match invocation.context.game {
+                SchemaGame::Fallout3 | SchemaGame::FalloutNv if function == 5 => 5,
+                SchemaGame::SkyrimLe
+                | SchemaGame::SkyrimSe
+                | SchemaGame::SkyrimVr
+                | SchemaGame::Fallout4
+                | SchemaGame::Fallout4Vr
+                | SchemaGame::Fallout76
+                | SchemaGame::Starfield
+                    if matches!(function, 5 | 12 | 13 | 14) =>
+                {
+                    8
+                }
+                _ => selected,
+            };
+        }
+        Ok(HandlerOutput::Integer(i64::from(selected)))
     }
 }
 
@@ -9936,6 +9981,82 @@ mod tests {
                 HandlerOutput::Integer(selected) if selected == expected
             ));
         }
+        Ok(())
+    }
+
+    /// Selects repeated PERK entry-point data with each game's xEdit remapping.
+    #[test]
+    fn perk_entry_point_data_selector_matches_xedit_remapping() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.perk_entry_point_data",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+
+        // when / then
+        for (game, function, expected) in [
+            (SchemaGame::Fallout3, 5_u8, 5_i64),
+            (SchemaGame::FalloutNv, 12, 2),
+            (SchemaGame::SkyrimLe, 5, 8),
+            (SchemaGame::SkyrimSe, 12, 8),
+            (SchemaGame::Fallout4, 13, 8),
+            (SchemaGame::Fallout76, 14, 8),
+            (SchemaGame::Starfield, 4, 2),
+        ] {
+            let context = HandlerRecordContext::new(Signature(*b"PERK"), FormId::NULL, 0, game);
+            let record = test_record(
+                *b"PERK",
+                &[
+                    (*b"DATA", vec![0, function, 0]),
+                    (*b"EPFT", vec![2]),
+                    (*b"EPFD", vec![0; 8]),
+                ],
+            )?;
+            assert!(matches!(
+                handlers.invoke_with_subrecord(
+                    &binding,
+                    context,
+                    HandlerSubrecordSource::ReadOnly {
+                        record: &record,
+                        index: 2,
+                    },
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
+
+        let context =
+            HandlerRecordContext::new(Signature(*b"PERK"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let record = test_record(
+            *b"PERK",
+            &[
+                (*b"DATA", vec![0, 5, 0]),
+                (*b"EPFT", vec![2]),
+                (*b"EPFD", vec![0; 8]),
+                (*b"DATA", vec![0, 4, 0]),
+                (*b"EPFT", vec![7]),
+                (*b"EPFD", vec![0; 4]),
+            ],
+        )?;
+        assert!(matches!(
+            handlers.invoke_with_subrecord(
+                &binding,
+                context,
+                HandlerSubrecordSource::ReadOnly {
+                    record: &record,
+                    index: 5,
+                },
+                HandlerPhase::UnionSelection,
+                None,
+                None,
+            )?,
+            HandlerOutput::Integer(7)
+        ));
         Ok(())
     }
 
