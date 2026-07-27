@@ -3753,6 +3753,15 @@ impl SemanticHandler for FixedHexIntegerFormatter {
 
     fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
         if invocation.phase == HandlerPhase::ParseEditValue {
+            if invocation
+                .context
+                .configuration
+                .get("plain_hex_edit")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return parse_plain_hex_handler_value(invocation.value, self.id());
+            }
             return parse_integer_handler_value(
                 invocation.value,
                 self.id(),
@@ -6937,6 +6946,29 @@ fn parse_integer_handler_value(
     })
 }
 
+fn parse_plain_hex_handler_value(
+    value: Option<&FieldValue<'static>>,
+    handler: &str,
+) -> Result<HandlerOutput> {
+    let Some(FieldValue::String(value)) = value else {
+        return Err(integer_formatter_error(
+            handler,
+            "plain hexadecimal edit parsing requires text",
+        ));
+    };
+    // xEdit's wbHexStrToInt prefers the first space over a colon and returns zero
+    // instead of rejecting malformed user input.
+    let digits = value
+        .find(' ')
+        .or_else(|| value.find(':'))
+        .map_or(value.as_ref(), |index| &value[..index]);
+    let parsed = u64::from_str_radix(digits, 16)
+        .ok()
+        .and_then(|value| i64::try_from(value).ok())
+        .unwrap_or(0);
+    Ok(HandlerOutput::Value(FieldValue::UInt(parsed as u64)))
+}
+
 fn idle_animation_group_name(value: i64, legacy_fallout: bool) -> Option<&'static str> {
     if legacy_fallout {
         match value {
@@ -9556,6 +9588,61 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::UInt(0x1234))
+        ));
+        Ok(())
+    }
+
+    /// Matches xEdit's plain hexadecimal formatter and forgiving edit parser.
+    #[test]
+    fn fixed_hex_integer_formatter_matches_wb_hex_str_to_int() -> TestResult {
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.fixed_hex_integer",
+            serde_json::json!({ "width": 8, "plain_hex_edit": true }),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"RACE"), FormId::NULL, 0, SchemaGame::Fallout4);
+        let value = FieldValue::UInt(0x89AB_CDEF);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::EditValue,
+                Some(&value),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "89ABCDEF"
+        ));
+        for (input, expected) in [
+            ("0000ABCD", 0xABCD),
+            ("0000ABCD ignored", 0xABCD),
+            ("0000ABCD:ignored", 0xABCD),
+            ("$0000ABCD", 0),
+            ("not-hex", 0),
+        ] {
+            let edit = FieldValue::String(Cow::Borrowed(input));
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::ParseEditValue,
+                    Some(&edit),
+                    None,
+                )?,
+                HandlerOutput::Value(FieldValue::UInt(value)) if value == expected
+            ));
+        }
+        let edit = FieldValue::String(Cow::Borrowed("0000ABCD:ignored later"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::ParseEditValue,
+                Some(&edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(0))
         ));
         Ok(())
     }
