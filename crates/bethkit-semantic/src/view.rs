@@ -14,8 +14,9 @@ use bethkit_schema::{
 use crate::value::float_from_raw;
 use crate::{
     grammar::interpret, ByteSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, FieldOrigin,
-    FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, NamedValue, ParsedEditValue,
-    Result, SemanticContext, SemanticError, SemanticLink, ValidationReport, ValueFormat,
+    FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, HandlerSubrecordSource,
+    NamedValue, ParsedEditValue, Result, SemanticContext, SemanticError, SemanticLink,
+    ValidationReport, ValueFormat,
 };
 
 /// One decoded top-level record field.
@@ -236,7 +237,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     let data: &'record [u8] = subrecord.as_bytes();
                     let mut field_values = BTreeMap::new();
                     let (value, consumed): (FieldValue<'record>, usize) =
-                        self.decode_node(payload, data, data, 0, &mut field_values)?;
+                        self.decode_node(payload, data, data, 0, index, &mut field_values)?;
                     if consumed != data.len() {
                         return Err(SemanticError::Decode {
                             path: payload.path.clone(),
@@ -529,6 +530,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
         payload: &'a [u8],
         current: &'a [u8],
         offset: usize,
+        source_subrecord_index: usize,
         field_values: &mut BTreeMap<String, i64>,
     ) -> Result<(FieldValue<'a>, usize)> {
         if !self.node_applies(node, payload, field_values)? {
@@ -572,8 +574,14 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             path: field.path.clone(),
                             message: "struct cursor exceeded payload".to_owned(),
                         })?;
-                    let (value, consumed): (FieldValue<'a>, usize) =
-                        self.decode_node(field, payload, remaining, offset + cursor, field_values)?;
+                    let (value, consumed): (FieldValue<'a>, usize) = self.decode_node(
+                        field,
+                        payload,
+                        remaining,
+                        offset + cursor,
+                        source_subrecord_index,
+                        field_values,
+                    )?;
                     values.push(NamedValue {
                         node_id: field.id,
                         path: field.path.clone(),
@@ -643,7 +651,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     ArrayCount::Remainder => (0, None),
                     ArrayCount::Expression { .. } | ArrayCount::Callback { .. } => (
                         0,
-                        Some(self.resolve_array_count(node, count, payload, field_values)?),
+                        Some(self.resolve_array_count(
+                            node,
+                            count,
+                            payload,
+                            source_subrecord_index,
+                            field_values,
+                        )?),
                     ),
                 };
                 if prefix_size > current.len() {
@@ -671,6 +685,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         payload,
                         remaining,
                         offset + cursor,
+                        source_subrecord_index,
                         field_values,
                     )?;
                     if consumed == 0 {
@@ -701,13 +716,26 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 Ok((FieldValue::Array(values), cursor))
             }
             SchemaNodeKind::Union { selector, variants } => {
-                let index = self.select_union_index(node, selector, payload, field_values)?;
+                let index = self.select_union_index(
+                    node,
+                    selector,
+                    payload,
+                    source_subrecord_index,
+                    field_values,
+                )?;
                 let variant: &SchemaNode =
                     variants.get(index).ok_or_else(|| SemanticError::Decode {
                         path: node.path.clone(),
                         message: format!("union variant {index} does not exist"),
                     })?;
-                self.decode_node(variant, payload, current, offset, field_values)
+                self.decode_node(
+                    variant,
+                    payload,
+                    current,
+                    offset,
+                    source_subrecord_index,
+                    field_values,
+                )
             }
             SchemaNodeKind::Custom { decoder, .. } => {
                 let decoded = self
@@ -729,8 +757,14 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 Ok((decoded.value, decoded.consumed))
             }
             SchemaNodeKind::Terminated { terminator, child } => {
-                let (value, body_size) =
-                    self.decode_node(child, payload, current, offset, field_values)?;
+                let (value, body_size) = self.decode_node(
+                    child,
+                    payload,
+                    current,
+                    offset,
+                    source_subrecord_index,
+                    field_values,
+                )?;
                 let actual = current
                     .get(body_size)
                     .ok_or_else(|| SemanticError::Decode {
@@ -796,6 +830,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
         node: &SchemaNode,
         selector: &UnionSelector,
         payload: &[u8],
+        source_subrecord_index: usize,
         field_values: &BTreeMap<String, i64>,
     ) -> Result<usize> {
         let selected = match selector {
@@ -820,6 +855,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 node,
                 callback_id,
                 payload,
+                source_subrecord_index,
                 HandlerPhase::UnionSelection,
             )?,
         };
@@ -840,6 +876,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
         node: &SchemaNode,
         count: &ArrayCount,
         payload: &[u8],
+        source_subrecord_index: usize,
         field_values: &BTreeMap<String, i64>,
     ) -> Result<usize> {
         let value = match count {
@@ -860,9 +897,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     }
                 }
             }
-            ArrayCount::Callback { callback_id } => {
-                self.invoke_integer_callback(node, callback_id, payload, HandlerPhase::ArrayCount)?
-            }
+            ArrayCount::Callback { callback_id } => self.invoke_integer_callback(
+                node,
+                callback_id,
+                payload,
+                source_subrecord_index,
+                HandlerPhase::ArrayCount,
+            )?,
             _ => {
                 return Err(SemanticError::Decode {
                     path: node.path.clone(),
@@ -887,6 +928,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
         node: &SchemaNode,
         callback_id: &str,
         payload: &[u8],
+        source_subrecord_index: usize,
         phase: HandlerPhase,
     ) -> Result<i64> {
         let binding = self
@@ -903,7 +945,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 message: format!("schema node {} has no callback binding", node.path),
             })?;
         let value = FieldValue::Bytes(Cow::Owned(payload.to_vec()));
-        match self.context.handlers().invoke_with_source_record(
+        match self.context.handlers().invoke_with_subrecord(
             binding,
             HandlerRecordContext::new(
                 self.record.header.signature,
@@ -911,7 +953,10 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 self.record.header.form_version,
                 self.context.registry().package().manifest().game,
             ),
-            Some(self.record),
+            HandlerSubrecordSource::ReadOnly {
+                record: self.record,
+                index: source_subrecord_index,
+            },
             phase,
             Some(&value),
             None,
@@ -1674,6 +1719,12 @@ mod tests {
         }
 
         fn invoke(&self, invocation: crate::HandlerInvocation<'_>) -> Result<HandlerOutput> {
+            if invocation.source_subrecord_index != Some(0) {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "test union selector received the wrong subrecord index".to_owned(),
+                });
+            }
             let record = invocation
                 .source_record
                 .ok_or_else(|| SemanticError::Handler {

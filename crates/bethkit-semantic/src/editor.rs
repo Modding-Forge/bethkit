@@ -15,8 +15,8 @@ use crate::value::{float_to_raw, handler_to_owned_value};
 use crate::{
     grammar::{interpret_writable, RepeatScope},
     FieldValue, HandlerMutation, HandlerOutput, HandlerPhase, HandlerRecordContext,
-    OwnedFieldValue, ParsedEditValue, Result, SemanticContext, SemanticError,
-    SemanticHandlerRegistry,
+    HandlerSubrecordSource, OwnedFieldValue, ParsedEditValue, Result, SemanticContext,
+    SemanticError, SemanticHandlerRegistry,
 };
 
 #[derive(Clone)]
@@ -99,8 +99,8 @@ impl RecordEditor {
         let normalized = self.normalize_value(&payload.path, value)?;
         let old_value = self.decoded_values.get(&(path.to_owned(), occurrence));
         let (normalized, mutations) = self.apply_after_set_tree(payload, &normalized, old_value)?;
-        let encoded: Vec<u8> = self.encode_node(payload, &normalized)?;
-        let decoded = self.owned_to_handler_value(payload, &normalized)?;
+        let encoded: Vec<u8> = self.encode_node_at(payload, &normalized, Some(index))?;
+        let decoded = self.owned_to_handler_value_at(payload, &normalized, Some(index))?;
         let mut candidate = clone_record(&self.record);
         let mut decoded_values = self.decoded_values.clone();
         candidate.subrecords[index].data = encoded;
@@ -173,10 +173,10 @@ impl RecordEditor {
             let (updated, mut mutations) =
                 self.apply_after_set_tree(payload, &updated, Some(&current))?;
             mutations.extend_from_slice(parsed.mutations());
-            let encoded = self.encode_node(payload, &updated)?;
-            let decoded = self.owned_to_handler_value(payload, &updated)?;
             let index =
                 self.assigned_subrecord_index(&self.record, &parent.path, parent_occurrence)?;
+            let encoded = self.encode_node_at(payload, &updated, Some(index))?;
+            let decoded = self.owned_to_handler_value_at(payload, &updated, Some(index))?;
             let mut candidate = clone_record(&self.record);
             let mut decoded_values = self.decoded_values.clone();
             candidate.subrecords[index].data = encoded;
@@ -276,8 +276,9 @@ impl RecordEditor {
         let occurrence = self.assigned_occurrence_count(&self.record, path)?;
         let normalized = self.normalize_value(&payload.path, value)?;
         let (normalized, mutations) = self.apply_after_set_tree(payload, &normalized, None)?;
-        let encoded: Vec<u8> = self.encode_node(payload, &normalized)?;
-        let decoded = self.owned_to_handler_value(payload, &normalized)?;
+        let encoded: Vec<u8> = self.encode_node_at(payload, &normalized, Some(insertion_index))?;
+        let decoded =
+            self.owned_to_handler_value_at(payload, &normalized, Some(insertion_index))?;
         let mut candidate = clone_record(&self.record);
         candidate.subrecords.insert(
             insertion_index,
@@ -425,9 +426,18 @@ impl RecordEditor {
     }
 
     fn encode_node(&self, node: &SchemaNode, value: &OwnedFieldValue) -> Result<Vec<u8>> {
+        self.encode_node_at(node, value, None)
+    }
+
+    fn encode_node_at(
+        &self,
+        node: &SchemaNode,
+        value: &OwnedFieldValue,
+        source_subrecord_index: Option<usize>,
+    ) -> Result<Vec<u8>> {
         let mut field_values = self.expression_field_values();
         collect_owned_expression_field_values(node, value, &mut field_values);
-        self.encode_node_with_fields(node, value, &field_values)
+        self.encode_node_with_fields(node, value, &field_values, source_subrecord_index)
     }
 
     fn encode_node_with_fields(
@@ -435,6 +445,7 @@ impl RecordEditor {
         node: &SchemaNode,
         value: &OwnedFieldValue,
         field_values: &BTreeMap<String, i64>,
+        source_subrecord_index: Option<usize>,
     ) -> Result<Vec<u8>> {
         match &node.kind {
             SchemaNodeKind::Primitive { primitive } => {
@@ -456,7 +467,12 @@ impl RecordEditor {
                 }
                 let mut output: Vec<u8> = Vec::new();
                 for (field, value) in fields.iter().zip(values) {
-                    output.extend(self.encode_node_with_fields(field, value, field_values)?);
+                    output.extend(self.encode_node_with_fields(
+                        field,
+                        value,
+                        field_values,
+                        source_subrecord_index,
+                    )?);
                 }
                 Ok(output)
             }
@@ -512,14 +528,25 @@ impl RecordEditor {
                     | ArrayCount::Remainder => {}
                 }
                 for value in values {
-                    output.extend(self.encode_node_with_fields(element, value, field_values)?);
+                    output.extend(self.encode_node_with_fields(
+                        element,
+                        value,
+                        field_values,
+                        source_subrecord_index,
+                    )?);
                 }
                 Ok(output)
             }
             SchemaNodeKind::Union { selector, variants } => {
-                let variant =
-                    self.select_union_variant(node, selector, variants, value, field_values)?;
-                self.encode_node_with_fields(variant, value, field_values)
+                let variant = self.select_union_variant(
+                    node,
+                    selector,
+                    variants,
+                    value,
+                    field_values,
+                    source_subrecord_index,
+                )?;
+                self.encode_node_with_fields(variant, value, field_values, source_subrecord_index)
             }
             SchemaNodeKind::Custom { decoder, .. } => self
                 .decoders
@@ -527,7 +554,12 @@ impl RecordEditor {
                 .ok_or_else(|| SemanticError::MissingDecoder(decoder.clone()))?
                 .encode(value),
             SchemaNodeKind::Terminated { terminator, child } => {
-                let mut output = self.encode_node_with_fields(child, value, field_values)?;
+                let mut output = self.encode_node_with_fields(
+                    child,
+                    value,
+                    field_values,
+                    source_subrecord_index,
+                )?;
                 output.push(*terminator);
                 Ok(output)
             }
@@ -674,7 +706,7 @@ impl RecordEditor {
             }
             (SchemaNodeKind::Union { selector, variants }, _) => {
                 let variant =
-                    self.select_union_variant(node, selector, variants, value, field_values)?;
+                    self.select_union_variant(node, selector, variants, value, field_values, None)?;
                 self.apply_after_set_tree_with_fields(variant, value, old_value, field_values)?
             }
             (
@@ -688,7 +720,7 @@ impl RecordEditor {
         self.apply_local_default_mutations(node, &mut updated, &mut mutations, field_values)?;
         self.apply_local_set_mutations(node, &mut updated, &mut mutations)?;
         let handler_value =
-            self.owned_to_handler_value_with_fields(node, &updated, field_values)?;
+            self.owned_to_handler_value_with_fields(node, &updated, field_values, None)?;
         if old_value.is_some_and(|old| handler_values_equal(&handler_value, old)) {
             return Ok((updated, mutations));
         }
@@ -707,7 +739,7 @@ impl RecordEditor {
                 continue;
             }
             let handler_value =
-                self.owned_to_handler_value_with_fields(node, &updated, field_values)?;
+                self.owned_to_handler_value_with_fields(node, &updated, field_values, None)?;
             match self.handlers.invoke(
                 binding,
                 self.handler_record(),
@@ -909,8 +941,14 @@ impl RecordEditor {
                 }
             }
             (SchemaNodeKind::Union { selector, variants }, current) => {
-                let variant =
-                    self.select_union_variant(node, selector, variants, current, field_values)?;
+                let variant = self.select_union_variant(
+                    node,
+                    selector,
+                    variants,
+                    current,
+                    field_values,
+                    None,
+                )?;
                 return self.nested_value_at_with_fields(
                     variant,
                     current,
@@ -1008,8 +1046,14 @@ impl RecordEditor {
                 }
             }
             (SchemaNodeKind::Union { selector, variants }, current) => {
-                let variant =
-                    self.select_union_variant(node, selector, variants, current, field_values)?;
+                let variant = self.select_union_variant(
+                    node,
+                    selector,
+                    variants,
+                    current,
+                    field_values,
+                    None,
+                )?;
                 if self.set_nested_value_with_fields(
                     variant,
                     current,
@@ -1087,8 +1131,14 @@ impl RecordEditor {
                 }
             }
             (SchemaNodeKind::Union { selector, variants }, current) => {
-                let variant =
-                    self.select_union_variant(node, selector, variants, current, field_values)?;
+                let variant = self.select_union_variant(
+                    node,
+                    selector,
+                    variants,
+                    current,
+                    field_values,
+                    None,
+                )?;
                 if self.reset_nested_value_with_fields(
                     variant,
                     current,
@@ -1247,9 +1297,12 @@ impl RecordEditor {
         variants: &'a [SchemaNode],
         value: &OwnedFieldValue,
         field_values: &BTreeMap<String, i64>,
+        source_subrecord_index: Option<usize>,
     ) -> Result<&'a SchemaNode> {
         for (index, variant) in variants.iter().enumerate() {
-            let Ok(encoded) = self.encode_node_with_fields(variant, value, field_values) else {
+            let Ok(encoded) =
+                self.encode_node_with_fields(variant, value, field_values, source_subrecord_index)
+            else {
                 continue;
             };
             let selected = match selector {
@@ -1282,14 +1335,29 @@ impl RecordEditor {
                         });
                     };
                     let raw_value = FieldValue::Bytes(Cow::Owned(encoded));
-                    match self.handlers.invoke_with_writable_record(
-                        binding,
-                        self.handler_record(),
-                        &self.record,
-                        HandlerPhase::UnionSelection,
-                        Some(&raw_value),
-                        None,
-                    )? {
+                    let output = if let Some(source_subrecord_index) = source_subrecord_index {
+                        self.handlers.invoke_with_subrecord(
+                            binding,
+                            self.handler_record(),
+                            HandlerSubrecordSource::Writable {
+                                record: &self.record,
+                                index: source_subrecord_index,
+                            },
+                            HandlerPhase::UnionSelection,
+                            Some(&raw_value),
+                            None,
+                        )?
+                    } else {
+                        self.handlers.invoke_with_writable_record(
+                            binding,
+                            self.handler_record(),
+                            &self.record,
+                            HandlerPhase::UnionSelection,
+                            Some(&raw_value),
+                            None,
+                        )?
+                    };
+                    match output {
                         HandlerOutput::Integer(selected) => selected,
                         _ => {
                             return Err(SemanticError::Handler {
@@ -1323,9 +1391,18 @@ impl RecordEditor {
         node: &SchemaNode,
         value: &OwnedFieldValue,
     ) -> Result<FieldValue<'static>> {
+        self.owned_to_handler_value_at(node, value, None)
+    }
+
+    fn owned_to_handler_value_at(
+        &self,
+        node: &SchemaNode,
+        value: &OwnedFieldValue,
+        source_subrecord_index: Option<usize>,
+    ) -> Result<FieldValue<'static>> {
         let mut field_values = self.expression_field_values();
         collect_owned_expression_field_values(node, value, &mut field_values);
-        self.owned_to_handler_value_with_fields(node, value, &field_values)
+        self.owned_to_handler_value_with_fields(node, value, &field_values, source_subrecord_index)
     }
 
     fn owned_to_handler_value_with_fields(
@@ -1333,6 +1410,7 @@ impl RecordEditor {
         node: &SchemaNode,
         value: &OwnedFieldValue,
         field_values: &BTreeMap<String, i64>,
+        source_subrecord_index: Option<usize>,
     ) -> Result<FieldValue<'static>> {
         match (&node.kind, value) {
             (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
@@ -1359,6 +1437,7 @@ impl RecordEditor {
                                 field,
                                 value,
                                 field_values,
+                                source_subrecord_index,
                             )?,
                         })
                     })
@@ -1367,20 +1446,43 @@ impl RecordEditor {
             }
             (SchemaNodeKind::Array { element, .. }, OwnedFieldValue::Array(values)) => values
                 .iter()
-                .map(|value| self.owned_to_handler_value_with_fields(element, value, field_values))
+                .map(|value| {
+                    self.owned_to_handler_value_with_fields(
+                        element,
+                        value,
+                        field_values,
+                        source_subrecord_index,
+                    )
+                })
                 .collect::<Result<Vec<_>>>()
                 .map(FieldValue::Array),
             (SchemaNodeKind::Union { selector, variants }, _) => {
-                let variant =
-                    self.select_union_variant(node, selector, variants, value, field_values)?;
-                self.owned_to_handler_value_with_fields(variant, value, field_values)
+                let variant = self.select_union_variant(
+                    node,
+                    selector,
+                    variants,
+                    value,
+                    field_values,
+                    source_subrecord_index,
+                )?;
+                self.owned_to_handler_value_with_fields(
+                    variant,
+                    value,
+                    field_values,
+                    source_subrecord_index,
+                )
             }
             (
                 SchemaNodeKind::Subrecord { payload, .. }
                 | SchemaNodeKind::Compressed { child: payload, .. }
                 | SchemaNodeKind::Terminated { child: payload, .. },
                 _,
-            ) => self.owned_to_handler_value_with_fields(payload, value, field_values),
+            ) => self.owned_to_handler_value_with_fields(
+                payload,
+                value,
+                field_values,
+                source_subrecord_index,
+            ),
             _ => Ok(owned_leaf_to_handler_value(value)),
         }
     }
@@ -1410,8 +1512,8 @@ impl RecordEditor {
                     let node = self.find_node(&path)?;
                     if let SchemaNodeKind::Subrecord { signature, payload } = &node.kind {
                         let signature = Signature::from(*signature);
-                        let encoded = self.encode_node(payload, &value)?;
                         let index = self.assigned_subrecord_index(record, &path, occurrence)?;
+                        let encoded = self.encode_node_at(payload, &value, Some(index))?;
                         if record.subrecords[index].signature != signature {
                             return Err(SemanticError::Encode {
                                 path,
@@ -1420,7 +1522,8 @@ impl RecordEditor {
                             });
                         }
                         record.subrecords[index].data = encoded;
-                        let decoded = self.owned_to_handler_value(payload, &value)?;
+                        let decoded =
+                            self.owned_to_handler_value_at(payload, &value, Some(index))?;
                         decoded_values.insert((path, occurrence), decoded);
                     } else {
                         self.apply_nested_set(record, decoded_values, &path, occurrence, value)?;
@@ -2995,6 +3098,7 @@ mod tests {
         fn invoke(&self, invocation: crate::HandlerInvocation<'_>) -> Result<HandlerOutput> {
             if invocation.phase == HandlerPhase::UnionSelection {
                 assert!(invocation.source_writable_record.is_some());
+                assert_eq!(invocation.source_subrecord_index, Some(0));
                 Ok(HandlerOutput::Integer(1))
             } else {
                 Ok(HandlerOutput::None)
@@ -3540,7 +3644,7 @@ mod tests {
         };
 
         assert_eq!(
-            editor.encode_node(&union, &OwnedFieldValue::UInt(7))?,
+            editor.encode_node_at(&union, &OwnedFieldValue::UInt(7), Some(0))?,
             vec![7, 0]
         );
         Ok(())

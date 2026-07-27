@@ -298,6 +298,26 @@ pub struct HandlerInvocation<'a> {
     pub source_record: Option<&'a Record>,
     /// Transactional writable record for record-level editor callbacks.
     pub source_writable_record: Option<&'a WritableRecord>,
+    /// Top-level subrecord being decoded or encoded, when the callback is payload-local.
+    pub source_subrecord_index: Option<usize>,
+}
+
+/// Exact top-level subrecord source supplied to a payload-local callback.
+pub enum HandlerSubrecordSource<'a> {
+    /// Immutable parsed record and the active subrecord index.
+    ReadOnly {
+        /// Parsed source record.
+        record: &'a Record,
+        /// Active top-level subrecord index.
+        index: usize,
+    },
+    /// Transactional record and the active subrecord index.
+    Writable {
+        /// Transactional source record.
+        record: &'a WritableRecord,
+        /// Active top-level subrecord index.
+        index: usize,
+    },
 }
 
 /// Versioned implementation of one stable semantic handler.
@@ -667,6 +687,7 @@ enum HandlerRecordSource<'a> {
 pub(crate) struct HandlerInvocationAccess<'a> {
     source: HandlerRecordSource<'a>,
     value_scope: Option<&'a FieldValue<'static>>,
+    source_subrecord_index: Option<usize>,
 }
 
 impl<'a> HandlerInvocationAccess<'a> {
@@ -677,6 +698,7 @@ impl<'a> HandlerInvocationAccess<'a> {
         Self {
             source: HandlerRecordSource::ReadOnly(record),
             value_scope,
+            source_subrecord_index: None,
         }
     }
 }
@@ -686,6 +708,7 @@ impl Default for HandlerInvocationAccess<'_> {
         Self {
             source: HandlerRecordSource::None,
             value_scope: None,
+            source_subrecord_index: None,
         }
     }
 }
@@ -745,6 +768,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectCoedOwner { resolver: None }));
         registry.register(Arc::new(SelectNoteData));
         registry.register(Arc::new(SelectSoundDescriptorData));
+        registry.register(Arc::new(SelectAudioEffectData));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -911,6 +935,7 @@ impl SemanticHandlerRegistry {
             HandlerInvocationAccess {
                 source: HandlerRecordSource::None,
                 value_scope,
+                source_subrecord_index: None,
             },
             phase,
             value,
@@ -944,6 +969,44 @@ impl SemanticHandlerRegistry {
                 source: source_record
                     .map_or(HandlerRecordSource::None, HandlerRecordSource::ReadOnly),
                 value_scope: None,
+                source_subrecord_index: None,
+            },
+            phase,
+            value,
+            old_value,
+        )
+    }
+
+    /// Executes a payload callback with its exact top-level source-subrecord position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the binding is not executable or the
+    /// selected handler rejects the invocation.
+    pub fn invoke_with_subrecord<'a>(
+        &self,
+        binding: &'a CallbackBinding,
+        record: HandlerRecordContext,
+        source: HandlerSubrecordSource<'a>,
+        phase: HandlerPhase,
+        value: Option<&'a FieldValue<'static>>,
+        old_value: Option<&'a FieldValue<'static>>,
+    ) -> Result<HandlerOutput> {
+        let (source, source_subrecord_index) = match source {
+            HandlerSubrecordSource::ReadOnly { record, index } => {
+                (HandlerRecordSource::ReadOnly(record), index)
+            }
+            HandlerSubrecordSource::Writable { record, index } => {
+                (HandlerRecordSource::Writable(record), index)
+            }
+        };
+        self.invoke_with_records(
+            binding,
+            record,
+            HandlerInvocationAccess {
+                source,
+                value_scope: None,
+                source_subrecord_index: Some(source_subrecord_index),
             },
             phase,
             value,
@@ -972,6 +1035,7 @@ impl SemanticHandlerRegistry {
             HandlerInvocationAccess {
                 source: HandlerRecordSource::Writable(source_record),
                 value_scope: None,
+                source_subrecord_index: None,
             },
             phase,
             value,
@@ -1032,6 +1096,7 @@ impl SemanticHandlerRegistry {
                     HandlerRecordSource::Writable(record) => Some(record),
                     HandlerRecordSource::None | HandlerRecordSource::ReadOnly(_) => None,
                 },
+                source_subrecord_index: access.source_subrecord_index,
             })
     }
 }
@@ -3880,6 +3945,8 @@ struct SelectNoteData;
 
 struct SelectSoundDescriptorData;
 
+struct SelectAudioEffectData;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4077,22 +4144,65 @@ impl SemanticHandler for SelectSoundDescriptorData {
     }
 }
 
+impl SemanticHandler for SelectAudioEffectData {
+    fn id(&self) -> &'static str {
+        "select.audio_effect_data"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(bytes) = source_subrecord_bytes(&invocation, Signature(*b"KNAM"), self.id())?
+        else {
+            return Ok(HandlerOutput::Integer(0));
+        };
+        let value = bytes
+            .get(..4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "AECH KNAM payload is shorter than four bytes".to_owned(),
+            })?;
+        let selected = match value {
+            0xEF57_5F7F => 1,
+            0x1883_7B4F => 2,
+            _ => 0,
+        };
+        Ok(HandlerOutput::Integer(selected))
+    }
+}
+
 fn source_subrecord_bytes<'a>(
     invocation: &HandlerInvocation<'a>,
     signature: Signature,
     handler: &str,
 ) -> Result<Option<&'a [u8]>> {
     if let Some(record) = invocation.source_record {
-        return Ok(record
-            .subrecords()?
+        let subrecords = record.subrecords()?;
+        let end = invocation
+            .source_subrecord_index
+            .unwrap_or(subrecords.len())
+            .min(subrecords.len());
+        return Ok(subrecords[..end]
             .iter()
+            .rev()
             .find(|subrecord| subrecord.signature == signature)
             .map(bethkit_core::SubRecord::as_bytes));
     }
     if let Some(record) = invocation.source_writable_record {
-        return Ok(record
-            .subrecords
+        let end = invocation
+            .source_subrecord_index
+            .unwrap_or(record.subrecords.len())
+            .min(record.subrecords.len());
+        return Ok(record.subrecords[..end]
             .iter()
+            .rev()
             .find(|subrecord| subrecord.signature == signature)
             .map(|subrecord| subrecord.data.as_slice()));
     }
@@ -7299,6 +7409,7 @@ mod tests {
             value_scope: None,
             source_record: None,
             source_writable_record: None,
+            source_subrecord_index: None,
         })?;
         assert!(matches!(display, HandlerOutput::None));
         Ok(())
@@ -8904,6 +9015,48 @@ mod tests {
         Ok(())
     }
 
+    /// Selects each repeated AECH payload from its nearest preceding KNAM type.
+    #[test]
+    fn audio_effect_selector_uses_exact_subrecord_position() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.audio_effect_data",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"AECH"), FormId::NULL, 0, SchemaGame::Fallout4);
+        let record = test_record(
+            *b"AECH",
+            &[
+                (*b"KNAM", 0x8648_04BE_u32.to_le_bytes().to_vec()),
+                (*b"DNAM", vec![0; 20]),
+                (*b"KNAM", 0x1883_7B4F_u32.to_le_bytes().to_vec()),
+                (*b"DNAM", vec![0; 16]),
+            ],
+        )?;
+
+        // when / then
+        for (source_index, expected) in [(1_usize, 0_i64), (3, 2)] {
+            assert!(matches!(
+                handlers.invoke_with_subrecord(
+                    &binding,
+                    context,
+                    HandlerSubrecordSource::ReadOnly {
+                        record: &record,
+                        index: source_index,
+                    },
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
+        Ok(())
+    }
+
     /// Selects Starfield CTDA parameter variants from the exported xEdit table.
     #[test]
     fn ctda_parameter_selector_uses_function_table_and_flags() -> Result<()> {
@@ -10407,6 +10560,7 @@ mod tests {
             value_scope: None,
             source_record: None,
             source_writable_record: None,
+            source_subrecord_index: None,
         })?;
 
         assert!(matches!(
@@ -10463,6 +10617,7 @@ mod tests {
             value_scope: None,
             source_record: None,
             source_writable_record: None,
+            source_subrecord_index: None,
         })?;
         match output {
             HandlerOutput::Text(value) => Ok(value),
@@ -10509,6 +10664,7 @@ mod tests {
             value_scope: None,
             source_record: None,
             source_writable_record: None,
+            source_subrecord_index: None,
         })
     }
 

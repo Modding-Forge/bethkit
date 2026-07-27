@@ -27,10 +27,11 @@ pub use editor::RecordEditor;
 pub use error::{Result, SemanticError};
 pub use handler::{
     FormLinkInfo, FormLinkResolver, HandlerContext, HandlerInvocation, HandlerMutation,
-    HandlerOutput, HandlerPhase, HandlerRecordContext, NextObjectIdResolver, QuestAliasInfo,
-    QuestObjectiveInfo, QuestStageInfo, RecordGridCell, RecordIndexKey, ResourceHashResolver,
-    ScriptVariableInfo, ScriptVariableMetadata, SemanticHandler, SemanticHandlerRegistry,
-    SemanticLink, ValueFormat, WwiseGuidInfo, WwiseGuidResolver,
+    HandlerOutput, HandlerPhase, HandlerRecordContext, HandlerSubrecordSource,
+    NextObjectIdResolver, QuestAliasInfo, QuestObjectiveInfo, QuestStageInfo, RecordGridCell,
+    RecordIndexKey, ResourceHashResolver, ScriptVariableInfo, ScriptVariableMetadata,
+    SemanticHandler, SemanticHandlerRegistry, SemanticLink, ValueFormat, WwiseGuidInfo,
+    WwiseGuidResolver,
 };
 pub use validation::{Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationReport};
 pub use value::{ByteSpan, FieldOrigin, FieldValue, NamedValue, OwnedFieldValue};
