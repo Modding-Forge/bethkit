@@ -539,24 +539,49 @@ impl<'context, 'record> RecordView<'context, 'record> {
             SchemaNodeKind::Array { element, count } => {
                 let (prefix_size, element_count): (usize, Option<usize>) = match count {
                     ArrayCount::Fixed { count } => (0, Some(*count as usize)),
-                    ArrayCount::Prefixed { integer } => {
+                    ArrayCount::Prefixed {
+                        integer,
+                        terminator,
+                    } => {
                         let count: u64 = decode_unsigned_integer(*integer, current, &node.path)?;
                         let count: usize =
                             usize::try_from(count).map_err(|_| SemanticError::Decode {
                                 path: node.path.clone(),
                                 message: "array count exceeds platform size".to_owned(),
                             })?;
-                        (integer.width as usize, Some(count))
+                        (
+                            array_prefix_size(
+                                integer.width as usize,
+                                *terminator,
+                                current,
+                                &node.path,
+                            )?,
+                            Some(count),
+                        )
                     }
-                    ArrayCount::PackedPrefixed { square } => {
+                    ArrayCount::PackedPrefixed { square, terminator } => {
                         let (count, width) = decode_packed_unsigned(current, &node.path)?;
                         let count = array_count_value(count, *square, &node.path)?;
-                        (width, Some(count))
+                        (
+                            array_prefix_size(width, *terminator, current, &node.path)?,
+                            Some(count),
+                        )
                     }
-                    ArrayCount::SquaredPrefixed { integer } => {
+                    ArrayCount::SquaredPrefixed {
+                        integer,
+                        terminator,
+                    } => {
                         let count = decode_unsigned_integer(*integer, current, &node.path)?;
                         let count = array_count_value(count, true, &node.path)?;
-                        (integer.width as usize, Some(count))
+                        (
+                            array_prefix_size(
+                                integer.width as usize,
+                                *terminator,
+                                current,
+                                &node.path,
+                            )?,
+                            Some(count),
+                        )
                     }
                     ArrayCount::Remainder => (0, None),
                     ArrayCount::Expression { expression } => {
@@ -691,6 +716,21 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     });
                 }
                 Ok(decoded.value)
+            }
+            SchemaNodeKind::Terminated { terminator, child } => {
+                let (actual, body) = current.split_last().ok_or_else(|| SemanticError::Decode {
+                    path: node.path.clone(),
+                    message: "terminated value is missing its terminator".to_owned(),
+                })?;
+                if actual != terminator {
+                    return Err(SemanticError::Decode {
+                        path: node.path.clone(),
+                        message: format!(
+                            "expected terminator 0x{terminator:02X}, got 0x{actual:02X}"
+                        ),
+                    });
+                }
+                self.decode_node(child, payload, body, offset)
             }
             SchemaNodeKind::Compressed { .. } => Err(SemanticError::Decode {
                 path: node.path.clone(),
@@ -1240,23 +1280,35 @@ fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usi
         SchemaNodeKind::Array { element, count } => {
             let (mut cursor, count) = match count {
                 ArrayCount::Fixed { count } => (0, Some(*count as usize)),
-                ArrayCount::Prefixed { integer } => {
+                ArrayCount::Prefixed {
+                    integer,
+                    terminator,
+                } => {
                     let count =
                         usize::try_from(decode_unsigned_integer(*integer, data, &node.path)?)
                             .map_err(|_| SemanticError::Decode {
                                 path: node.path.clone(),
                                 message: "array count exceeds platform size".to_owned(),
                             })?;
-                    (integer.width as usize, Some(count))
+                    (
+                        array_prefix_size(integer.width as usize, *terminator, data, &node.path)?,
+                        Some(count),
+                    )
                 }
-                ArrayCount::PackedPrefixed { square } => {
+                ArrayCount::PackedPrefixed { square, terminator } => {
                     let (count, width) = decode_packed_unsigned(data, &node.path)?;
-                    (width, Some(array_count_value(count, *square, &node.path)?))
+                    (
+                        array_prefix_size(width, *terminator, data, &node.path)?,
+                        Some(array_count_value(count, *square, &node.path)?),
+                    )
                 }
-                ArrayCount::SquaredPrefixed { integer } => {
+                ArrayCount::SquaredPrefixed {
+                    integer,
+                    terminator,
+                } => {
                     let count = decode_unsigned_integer(*integer, data, &node.path)?;
                     (
-                        integer.width as usize,
+                        array_prefix_size(integer.width as usize, *terminator, data, &node.path)?,
                         Some(array_count_value(count, true, &node.path)?),
                     )
                 }
@@ -1298,6 +1350,25 @@ fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usi
             }
             Ok(cursor)
         }
+        SchemaNodeKind::Terminated { terminator, child } => {
+            let child_size = node_data_size(child, data, localized)?;
+            let actual = data.get(child_size).ok_or_else(|| SemanticError::Decode {
+                path: node.path.clone(),
+                message: "terminated value is missing its terminator".to_owned(),
+            })?;
+            if actual != terminator {
+                return Err(SemanticError::Decode {
+                    path: node.path.clone(),
+                    message: format!("expected terminator 0x{terminator:02X}, got 0x{actual:02X}"),
+                });
+            }
+            child_size
+                .checked_add(1)
+                .ok_or_else(|| SemanticError::Decode {
+                    path: node.path.clone(),
+                    message: "terminated value size overflowed".to_owned(),
+                })
+        }
         _ => Ok(fixed_node_size(node).unwrap_or(data.len())),
     }
 }
@@ -1335,8 +1406,40 @@ fn fixed_node_size(node: &SchemaNode) -> Option<usize> {
                 | ArrayCount::Remainder => None,
             }
         }
+        SchemaNodeKind::Terminated { child, .. } => fixed_node_size(child)?.checked_add(1),
         _ => None,
     }
+}
+
+fn array_prefix_size(
+    integer_size: usize,
+    terminator: Option<u8>,
+    data: &[u8],
+    path: &str,
+) -> Result<usize> {
+    let Some(expected) = terminator else {
+        return Ok(integer_size);
+    };
+    let actual = data
+        .get(integer_size)
+        .ok_or_else(|| SemanticError::Decode {
+            path: path.to_owned(),
+            message: "array count prefix is missing its terminator".to_owned(),
+        })?;
+    if *actual != expected {
+        return Err(SemanticError::Decode {
+            path: path.to_owned(),
+            message: format!(
+                "expected array prefix terminator 0x{expected:02X}, got 0x{actual:02X}"
+            ),
+        });
+    }
+    integer_size
+        .checked_add(1)
+        .ok_or_else(|| SemanticError::Decode {
+            path: path.to_owned(),
+            message: "array prefix size overflowed".to_owned(),
+        })
 }
 
 fn decode_length_error(path: &str, expected: usize, actual: usize) -> SemanticError {
@@ -1349,6 +1452,48 @@ fn decode_length_error(path: &str, expected: usize, actual: usize) -> SemanticEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn terminated_byte_node() -> SchemaNode {
+        SchemaNode {
+            id: bethkit_schema::SchemaNodeId(1),
+            path: "TEST/value".to_owned(),
+            name: "Value".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Terminated {
+                terminator: 0xff,
+                child: Box::new(SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(2),
+                    path: "TEST/value/body".to_owned(),
+                    name: "Body".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Integer {
+                            integer: IntegerType {
+                                width: 1,
+                                signed: false,
+                                byte_order: ByteOrder::LittleEndian,
+                            },
+                        },
+                    },
+                }),
+            },
+        }
+    }
+
+    /// Includes and validates a structural terminator without consuming the following field.
+    #[test]
+    fn terminated_node_size_stops_after_terminator(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let node = terminated_byte_node();
+
+        assert_eq!(node_data_size(&node, &[7, 0xff, 9], false)?, 2);
+        assert!(node_data_size(&node, &[7, 0, 9], false).is_err());
+        Ok(())
+    }
 
     /// Matches xEdit's packed 6/14/30-bit unsigned counter decoding.
     #[test]
@@ -1392,7 +1537,10 @@ mod tests {
                         },
                     },
                 }),
-                count: ArrayCount::PackedPrefixed { square: true },
+                count: ArrayCount::PackedPrefixed {
+                    square: true,
+                    terminator: None,
+                },
             },
         };
 
@@ -1434,11 +1582,16 @@ mod tests {
                         signed: false,
                         byte_order: ByteOrder::LittleEndian,
                     },
+                    terminator: Some(0x7c),
                 },
             },
         };
 
-        assert_eq!(node_data_size(&node, b"\x02\x01\0\x02\0tail", false)?, 5);
+        assert_eq!(
+            node_data_size(&node, b"\x02\x7c\x01\0\x02\0tail", false)?,
+            6
+        );
+        assert!(node_data_size(&node, b"\x02\x00\x01\0\x02\0tail", false).is_err());
         Ok(())
     }
 
@@ -1516,6 +1669,7 @@ mod tests {
                         signed: false,
                         byte_order,
                     },
+                    terminator: None,
                 },
             },
         };

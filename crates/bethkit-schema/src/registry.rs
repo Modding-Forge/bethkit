@@ -77,7 +77,8 @@ fn find_node<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaNode> {
         SchemaNodeKind::Repeat { child, .. }
         | SchemaNodeKind::Subrecord { payload: child, .. }
         | SchemaNodeKind::Array { element: child, .. }
-        | SchemaNodeKind::Compressed { child, .. } => find_node(child, path),
+        | SchemaNodeKind::Compressed { child, .. }
+        | SchemaNodeKind::Terminated { child, .. } => find_node(child, path),
         SchemaNodeKind::Struct { fields } => find_in_nodes(fields, path),
         SchemaNodeKind::Union { variants, .. } => find_in_nodes(variants, path),
         SchemaNodeKind::Primitive { .. }

@@ -426,16 +426,25 @@ pub enum ArrayCount {
     Prefixed {
         /// Integer layout used by the count prefix.
         integer: IntegerType,
+        /// Optional structural byte following the count prefix.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminator: Option<u8>,
     },
     /// Element count uses xEdit's packed 6/14/30-bit unsigned encoding.
     PackedPrefixed {
         /// Square the decoded value for a square matrix.
         square: bool,
+        /// Optional structural byte following the count prefix.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminator: Option<u8>,
     },
     /// Element count is the square of a fixed-width prefix.
     SquaredPrefixed {
         /// Unsigned integer layout used by the matrix dimension.
         integer: IntegerType,
+        /// Optional structural byte following the count prefix.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminator: Option<u8>,
     },
     /// Count is read from an expression.
     Expression {
@@ -541,6 +550,13 @@ pub enum SchemaNodeKind {
         /// Compression algorithm identifier.
         algorithm: String,
         /// Decompressed child definition.
+        child: Box<SchemaNode>,
+    },
+    /// Child value followed by one structural terminator byte.
+    Terminated {
+        /// Required byte after the encoded child.
+        terminator: u8,
+        /// Value preceding the terminator.
         child: Box<SchemaNode>,
     },
     /// Reference to another node by stable path.

@@ -624,7 +624,8 @@ fn validate_node(
     }
     if let SchemaNodeKind::Array {
         count:
-            crate::ArrayCount::Prefixed { integer } | crate::ArrayCount::SquaredPrefixed { integer },
+            crate::ArrayCount::Prefixed { integer, .. }
+            | crate::ArrayCount::SquaredPrefixed { integer, .. },
         ..
     } = &node.kind
     {
@@ -648,6 +649,7 @@ fn validate_node(
         SchemaNodeKind::Repeat { child, .. }
         | SchemaNodeKind::Subrecord { payload: child, .. }
         | SchemaNodeKind::Compressed { child, .. }
+        | SchemaNodeKind::Terminated { child, .. }
         | SchemaNodeKind::Array { element: child, .. } => vec![child],
         SchemaNodeKind::Struct { fields } => fields.iter().collect(),
         SchemaNodeKind::Union { variants, .. } => variants.iter().collect(),

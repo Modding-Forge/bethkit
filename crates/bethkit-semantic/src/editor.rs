@@ -293,7 +293,10 @@ impl RecordEditor {
                             format!("array expects {count} elements, got {}", values.len()),
                         ));
                     }
-                    ArrayCount::Prefixed { integer } => {
+                    ArrayCount::Prefixed {
+                        integer,
+                        terminator,
+                    } => {
                         if integer.signed {
                             return Err(encode_error(
                                 &node.path,
@@ -303,12 +306,17 @@ impl RecordEditor {
                         let count: u64 = u64::try_from(values.len())
                             .map_err(|_| encode_error(&node.path, "array count exceeds u64"))?;
                         output.extend(encode_integer(*integer, count, &node.path)?);
+                        output.extend(terminator);
                     }
-                    ArrayCount::PackedPrefixed { square } => {
+                    ArrayCount::PackedPrefixed { square, terminator } => {
                         let count = array_prefix_count(values.len(), *square, &node.path)?;
                         output.extend(encode_packed_unsigned(count, &node.path)?);
+                        output.extend(terminator);
                     }
-                    ArrayCount::SquaredPrefixed { integer } => {
+                    ArrayCount::SquaredPrefixed {
+                        integer,
+                        terminator,
+                    } => {
                         if integer.signed {
                             return Err(encode_error(
                                 &node.path,
@@ -317,6 +325,7 @@ impl RecordEditor {
                         }
                         let count = array_prefix_count(values.len(), true, &node.path)?;
                         output.extend(encode_integer(*integer, count, &node.path)?);
+                        output.extend(terminator);
                     }
                     ArrayCount::Fixed { .. }
                     | ArrayCount::Expression { .. }
@@ -354,6 +363,11 @@ impl RecordEditor {
                 .get(decoder)
                 .ok_or_else(|| SemanticError::MissingDecoder(decoder.clone()))?
                 .encode(value),
+            SchemaNodeKind::Terminated { terminator, child } => {
+                let mut output = self.encode_node(child, value)?;
+                output.push(*terminator);
+                Ok(output)
+            }
             _ => Err(SemanticError::Encode {
                 path: node.path.clone(),
                 message: "this schema node requires a specialized encoder".to_owned(),
@@ -466,7 +480,8 @@ impl RecordEditor {
             }
             (
                 SchemaNodeKind::Subrecord { payload, .. }
-                | SchemaNodeKind::Compressed { child: payload, .. },
+                | SchemaNodeKind::Compressed { child: payload, .. }
+                | SchemaNodeKind::Terminated { child: payload, .. },
                 _,
             ) => self.apply_after_set_tree(payload, value, old_value)?,
             _ => (value.clone(), Vec::new()),
@@ -608,7 +623,8 @@ impl RecordEditor {
             }
             (
                 SchemaNodeKind::Subrecord { payload, .. }
-                | SchemaNodeKind::Compressed { child: payload, .. },
+                | SchemaNodeKind::Compressed { child: payload, .. }
+                | SchemaNodeKind::Terminated { child: payload, .. },
                 current,
             ) => {
                 if self.set_nested_value(payload, current, target_path, occurrence, replacement)? {
@@ -692,7 +708,8 @@ impl RecordEditor {
             }
             (
                 SchemaNodeKind::Subrecord { payload, .. }
-                | SchemaNodeKind::Compressed { child: payload, .. },
+                | SchemaNodeKind::Compressed { child: payload, .. }
+                | SchemaNodeKind::Terminated { child: payload, .. },
                 _,
             ) => self.owned_to_handler_value(payload, value),
             _ => Ok(owned_leaf_to_handler_value(value)),
@@ -951,7 +968,8 @@ fn find_node_by_path<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaN
         SchemaNodeKind::Repeat { child, .. }
         | SchemaNodeKind::Subrecord { payload: child, .. }
         | SchemaNodeKind::Array { element: child, .. }
-        | SchemaNodeKind::Compressed { child, .. } => vec![child],
+        | SchemaNodeKind::Compressed { child, .. }
+        | SchemaNodeKind::Terminated { child, .. } => vec![child],
         SchemaNodeKind::Struct { fields } => fields.iter().collect(),
         SchemaNodeKind::Union { variants, .. } => variants.iter().collect(),
         _ => Vec::new(),
@@ -1225,6 +1243,96 @@ mod tests {
         assert!(encode_packed_unsigned(0x4000_0000, "TEST").is_err());
         assert_eq!(array_prefix_count(16, true, "TEST")?, 4);
         assert!(array_prefix_count(15, true, "TEST").is_err());
+        Ok(())
+    }
+
+    /// Appends the structural terminator after encoding the wrapped value.
+    #[test]
+    fn terminated_node_encoding_appends_terminator() -> Result<()> {
+        let editor = editor_with_reused_signature()?;
+        let node = SchemaNode {
+            id: SchemaNodeId(10),
+            path: "TEST/value".to_owned(),
+            name: "Value".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Terminated {
+                terminator: 0xff,
+                child: Box::new(SchemaNode {
+                    id: SchemaNodeId(11),
+                    path: "TEST/value/body".to_owned(),
+                    name: "Body".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Integer {
+                            integer: IntegerType {
+                                width: 1,
+                                signed: false,
+                                byte_order: ByteOrder::LittleEndian,
+                            },
+                        },
+                    },
+                }),
+            },
+        };
+
+        assert_eq!(
+            editor.encode_node(&node, &OwnedFieldValue::UInt(7))?,
+            vec![7, 0xff]
+        );
+        Ok(())
+    }
+
+    /// Writes a separator after an xEdit array count prefix.
+    #[test]
+    fn array_count_encoding_appends_prefix_terminator() -> Result<()> {
+        let editor = editor_with_reused_signature()?;
+        let node = SchemaNode {
+            id: SchemaNodeId(12),
+            path: "TEST/items".to_owned(),
+            name: "Items".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Array {
+                element: Box::new(SchemaNode {
+                    id: SchemaNodeId(13),
+                    path: "TEST/items/element".to_owned(),
+                    name: "Element".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Integer {
+                            integer: IntegerType {
+                                width: 1,
+                                signed: false,
+                                byte_order: ByteOrder::LittleEndian,
+                            },
+                        },
+                    },
+                }),
+                count: ArrayCount::Prefixed {
+                    integer: IntegerType {
+                        width: 1,
+                        signed: false,
+                        byte_order: ByteOrder::LittleEndian,
+                    },
+                    terminator: Some(0x7c),
+                },
+            },
+        };
+
+        assert_eq!(
+            editor.encode_node(
+                &node,
+                &OwnedFieldValue::Array(vec![OwnedFieldValue::UInt(1), OwnedFieldValue::UInt(2),]),
+            )?,
+            vec![2, 0x7c, 1, 2]
+        );
         Ok(())
     }
 

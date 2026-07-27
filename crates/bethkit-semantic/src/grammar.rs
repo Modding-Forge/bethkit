@@ -250,6 +250,7 @@ fn collect_signatures(node: &SchemaNode, output: &mut BTreeSet<Signature>) {
         }
         SchemaNodeKind::Repeat { child, .. }
         | SchemaNodeKind::Compressed { child, .. }
+        | SchemaNodeKind::Terminated { child, .. }
         | SchemaNodeKind::Array { element: child, .. } => collect_signatures(child, output),
         SchemaNodeKind::Subrecord { signature, .. } => {
             output.insert(Signature::from(*signature));
