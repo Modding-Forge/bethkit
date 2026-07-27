@@ -759,6 +759,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatIdleAnimationGroup));
         registry.register(Arc::new(FormatWeatherClassification));
         registry.register(Arc::new(FixedHexIntegerFormatter));
+        registry.register(Arc::new(ScaledInt4Formatter));
         registry.register(Arc::new(NextObjectIdFormatter { resolver: None }));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
@@ -3483,6 +3484,68 @@ impl SemanticHandler for FormatWeatherClassification {
 }
 
 struct FixedHexIntegerFormatter;
+
+struct ScaledInt4Formatter;
+
+impl SemanticHandler for ScaledInt4Formatter {
+    fn id(&self) -> &'static str {
+        "format.scaled_int4"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(input)) = invocation.value else {
+                return Err(integer_formatter_error(
+                    self.id(),
+                    "scaled integer edit parsing requires text",
+                ));
+            };
+            let parsed = input.trim().parse::<f64>().map_err(|error| {
+                integer_formatter_error(
+                    self.id(),
+                    format!("invalid scaled integer edit value {input:?}: {error}"),
+                )
+            })?;
+            let scaled = parsed * 10_000.0;
+            if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+                return Err(integer_formatter_error(
+                    self.id(),
+                    "scaled integer edit value exceeds i64",
+                ));
+            }
+            let value = scaled.round_ties_even() as i64;
+            return Ok(if value < 0 {
+                HandlerOutput::Value(FieldValue::Int(value))
+            } else {
+                HandlerOutput::Value(FieldValue::UInt(value as u64))
+            });
+        }
+
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                integer_formatter_error(self.id(), "scaled integer formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| integer_formatter_error(self.id(), "scaled integer value exceeds i64"))?;
+        let fixed = format!("{:.4}", value as f64 / 10_000.0);
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => fixed,
+            HandlerPhase::SortKey => {
+                let padded = format!("{fixed:0>22}");
+                format!("{}{padded}", if value < 0 { '-' } else { '+' })
+            }
+            HandlerPhase::Validation => String::new(),
+            HandlerPhase::NativeValue => value.to_string(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
 
 impl SemanticHandler for FixedHexIntegerFormatter {
     fn id(&self) -> &'static str {
@@ -8904,6 +8967,62 @@ mod tests {
             )?,
             HandlerOutput::Value(FieldValue::UInt(0x1234))
         ));
+        Ok(())
+    }
+
+    /// Matches xEdit's scaled four-decimal formatter and edit parser.
+    #[test]
+    fn scaled_int4_formatter_matches_xedit() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.scaled_int4",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"REGN"), FormId::NULL, 0, SchemaGame::Oblivion);
+
+        // when / then
+        for (value, expected) in [
+            (0_i64, "0.0000"),
+            (1, "0.0001"),
+            (10_000, "1.0000"),
+            (-12_345, "-1.2345"),
+        ] {
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::Display,
+                    Some(&FieldValue::Int(value)),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::SortKey,
+                Some(&FieldValue::Int(-12_345)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "-000000000000000-1.2345"
+        ));
+        for (input, expected) in [("1.23445", 12_344_i64), ("1.23455", 12_346)] {
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::ParseEditValue,
+                    Some(&FieldValue::String(input.into())),
+                    None,
+                )?,
+                HandlerOutput::Value(FieldValue::UInt(value)) if value == expected as u64
+            ));
+        }
         Ok(())
     }
 
