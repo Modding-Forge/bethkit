@@ -1282,9 +1282,10 @@ impl RecordEditor {
                         });
                     };
                     let raw_value = FieldValue::Bytes(Cow::Owned(encoded));
-                    match self.handlers.invoke(
+                    match self.handlers.invoke_with_writable_record(
                         binding,
                         self.handler_record(),
+                        &self.record,
                         HandlerPhase::UnionSelection,
                         Some(&raw_value),
                         None,
@@ -2993,6 +2994,7 @@ mod tests {
 
         fn invoke(&self, invocation: crate::HandlerInvocation<'_>) -> Result<HandlerOutput> {
             if invocation.phase == HandlerPhase::UnionSelection {
+                assert!(invocation.source_writable_record.is_some());
                 Ok(HandlerOutput::Integer(1))
             } else {
                 Ok(HandlerOutput::None)

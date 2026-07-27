@@ -903,7 +903,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 message: format!("schema node {} has no callback binding", node.path),
             })?;
         let value = FieldValue::Bytes(Cow::Owned(payload.to_vec()));
-        match self.context.handlers().invoke(
+        match self.context.handlers().invoke_with_source_record(
             binding,
             HandlerRecordContext::new(
                 self.record.header.signature,
@@ -911,6 +911,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 self.record.header.form_version,
                 self.context.registry().package().manifest().game,
             ),
+            Some(self.record),
             phase,
             Some(&value),
             None,
@@ -1654,10 +1655,38 @@ mod tests {
     use bethkit_core::{GameContext, Record};
     use bethkit_io::SliceCursor;
     use bethkit_schema::{
+        BuiltInOperation, CallbackBinding, CallbackImplementation, HandlerRequirement,
         SchemaManifest, SchemaPackage, SchemaSignature, ValidationStatus, PACKAGE_FORMAT_VERSION,
     };
 
     use super::*;
+    use crate::SemanticHandlerRegistry;
+
+    struct SourceRecordUnionSelector;
+
+    impl crate::SemanticHandler for SourceRecordUnionSelector {
+        fn id(&self) -> &'static str {
+            "test.source_record_union"
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn invoke(&self, invocation: crate::HandlerInvocation<'_>) -> Result<HandlerOutput> {
+            let record = invocation
+                .source_record
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "test union selector requires the source record".to_owned(),
+                })?;
+            let has_data = record
+                .subrecords()?
+                .iter()
+                .any(|subrecord| subrecord.signature == Signature(*b"DATA"));
+            Ok(HandlerOutput::Integer(i64::from(has_data)))
+        }
+    }
 
     fn terminated_byte_node() -> SchemaNode {
         SchemaNode {
@@ -1847,6 +1876,108 @@ mod tests {
                 if matches!(items.as_slice(), [FieldValue::UInt(10), FieldValue::UInt(11)])
         ));
         assert!(matches!(values[2].value, FieldValue::UInt(99)));
+        Ok(())
+    }
+
+    /// Supplies the original record to callback-selected unions while decoding.
+    #[test]
+    fn callback_union_decoding_receives_source_record(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let integer = |id, width| SchemaNode {
+            id: bethkit_schema::SchemaNodeId(id),
+            path: format!("TEST/0:Data/payload/variants/{id}"),
+            name: format!("Variant {id}"),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::Integer {
+                    integer: IntegerType {
+                        width,
+                        signed: false,
+                        byte_order: ByteOrder::LittleEndian,
+                    },
+                },
+            },
+        };
+        let union_path = "TEST/0:Data/payload";
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(1),
+                    path: "TEST/0:Data".to_owned(),
+                    name: "Data".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Subrecord {
+                        signature: SchemaSignature(*b"DATA"),
+                        payload: Box::new(SchemaNode {
+                            id: bethkit_schema::SchemaNodeId(2),
+                            path: union_path.to_owned(),
+                            name: "Payload".to_owned(),
+                            required: true,
+                            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Union {
+                                selector: UnionSelector::Callback {
+                                    callback_id: "union.select".to_owned(),
+                                },
+                                variants: vec![integer(3, 1), integer(4, 2)],
+                            },
+                        }),
+                    },
+                }],
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "test.source_record_union".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root,
+            }],
+            vec![CallbackBinding {
+                path: union_path.to_owned(),
+                callback_id: "union.select".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "00".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "test.source_record_union".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::Value::Null,
+                    },
+                },
+            }],
+        )?;
+        let mut handlers = SemanticHandlerRegistry::new();
+        handlers.register(Arc::new(SourceRecordUnionSelector));
+        let context = SemanticContext::new_with_handlers(
+            Arc::new(package),
+            crate::DecoderRegistry::builtin(),
+            handlers,
+        )?;
+        let record_bytes = test_record_bytes(b"TEST", b"DATA", &[7, 0]);
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::sse())?;
+
+        let fields = context.view(&record, false)?.fields()?;
+
+        assert!(matches!(fields[0].value, FieldValue::UInt(7)));
         Ok(())
     }
 
