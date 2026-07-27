@@ -277,6 +277,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ModelInfoCounts));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
+        registry.register(Arc::new(CtdaTypeFormatter));
         registry.register(Arc::new(InvalidModelInfoValidation));
         registry.register(Arc::new(WwiseGuidFormatter { resolver: None }));
         registry
@@ -898,6 +899,195 @@ impl SemanticHandler for CtdaTypeAfterSet {
     }
 }
 
+struct CtdaTypeFormatter;
+
+impl SemanticHandler for CtdaTypeFormatter {
+    fn id(&self) -> &'static str {
+        "format.ctda_type"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let FieldValue::String(value) =
+                invocation.value.ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "CTDA Type edit parsing requires text".to_owned(),
+                })?
+            else {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "CTDA Type edit parsing requires text".to_owned(),
+                });
+            };
+            return Ok(HandlerOutput::Value(FieldValue::UInt(
+                parse_ctda_type_edit_value(
+                    value,
+                    matches!(
+                        invocation.context.game,
+                        SchemaGame::Fallout3 | SchemaGame::FalloutNv
+                    ),
+                ),
+            )));
+        }
+        let value = u64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "CTDA Type formatting requires an integer value".to_owned(),
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "CTDA Type value must be non-negative".to_owned(),
+        })?;
+        let legacy = matches!(
+            invocation.context.game,
+            SchemaGame::Fallout3 | SchemaGame::FalloutNv
+        );
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary => {
+                format_ctda_type_display(value, legacy)
+            }
+            HandlerPhase::SortKey => format!("{value:02X}"),
+            HandlerPhase::EditValue => format_ctda_type_edit_value(
+                value,
+                match invocation.context.game {
+                    SchemaGame::Fallout3 => 6,
+                    _ => 8,
+                },
+                legacy,
+            ),
+            HandlerPhase::NativeValue => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+fn format_ctda_type_display(value: u64, legacy: bool) -> String {
+    let operator = match value & if legacy { 0xF0 } else { 0xE0 } {
+        0x00 => "Equal to",
+        0x20 => "Not equal to",
+        0x40 => "Greater than",
+        0x60 => "Greater than or equal to",
+        0x80 => "Less than",
+        0xA0 => "Less than or equal to",
+        _ => "<Unknown Compare operator>",
+    };
+    let mut flags = Vec::new();
+    if value & 0x01 != 0 {
+        flags.push("Or".to_owned());
+    }
+    if value & 0x02 != 0 {
+        flags.push(if legacy {
+            "Run on target".to_owned()
+        } else {
+            "Use aliases".to_owned()
+        });
+    }
+    if value & 0x04 != 0 {
+        flags.push("Use global".to_owned());
+    }
+    if legacy {
+        if value & 0x08 != 0 {
+            flags.push("<Unknown: 3>".to_owned());
+        }
+    } else {
+        if value & 0x08 != 0 {
+            flags.push("Use packdata".to_owned());
+        }
+        if value & 0x10 != 0 {
+            flags.push("Swap Subject and Target".to_owned());
+        }
+    }
+    if flags.is_empty() {
+        operator.to_owned()
+    } else {
+        format!("{operator} / {}", flags.join(", "))
+    }
+}
+
+fn format_ctda_type_edit_value(value: u64, width: usize, legacy: bool) -> String {
+    let mut output = vec![b'0'; width];
+    match value & 0xE0 {
+        0x00 => output[0] = b'1',
+        0x40 => output[1] = b'1',
+        0x60 => {
+            output[0] = b'1';
+            output[1] = b'1';
+        }
+        0x80 => output[2] = b'1',
+        0xA0 => {
+            output[0] = b'1';
+            output[2] = b'1';
+        }
+        _ => {}
+    }
+    if value & 0x01 != 0 {
+        output[3] = b'1';
+    }
+    if legacy {
+        if value & 0x04 != 0 {
+            output[4] = b'1';
+        }
+        if value & 0x02 != 0 {
+            output[5] = b'1';
+        }
+    } else {
+        if value & 0x02 != 0 {
+            output[4] = b'1';
+        }
+        if value & 0x04 != 0 {
+            output[5] = b'1';
+        }
+        if value & 0x08 != 0 {
+            output[6] = b'1';
+        }
+        if value & 0x10 != 0 {
+            output[7] = b'1';
+        }
+    }
+    output.into_iter().map(char::from).collect()
+}
+
+fn parse_ctda_type_edit_value(value: &str, legacy: bool) -> u64 {
+    let mut bits = value.bytes().chain(std::iter::repeat(b'0'));
+    let equal = bits.next() == Some(b'1');
+    let greater = bits.next() == Some(b'1');
+    let lesser = bits.next() == Some(b'1');
+    let mut result = match (equal, greater, lesser) {
+        (true, true, false) => 0x60,
+        (true, false, true) => 0xA0,
+        (false, true, true) => 0x20,
+        (false, true, false) => 0x40,
+        (false, false, true) => 0x80,
+        (false, false, false) => 0x20,
+        _ => 0x00,
+    };
+    if bits.next() == Some(b'1') {
+        result |= 0x01;
+    }
+    if legacy {
+        if bits.next() == Some(b'1') {
+            result |= 0x04;
+        }
+        if bits.next() == Some(b'1') {
+            result |= 0x02;
+        }
+    } else {
+        for mask in [0x02, 0x04, 0x08, 0x10] {
+            if bits.next() == Some(b'1') {
+                result |= mask;
+            }
+        }
+    }
+    result
+}
+
 struct InvalidModelInfoValidation;
 
 impl SemanticHandler for InvalidModelInfoValidation {
@@ -1110,6 +1300,8 @@ fn single_same_value(left: f64, right: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
 
     struct TestResourceHashResolver;
@@ -1573,6 +1765,98 @@ mod tests {
             ] if comparison == "TEST/0:CTDA/payload/2:Comparison Value"
                 && run_on == "TEST/0:CTDA/payload/7:Run On"
                 && kind == "TEST/0:CTDA/payload/0:Type"
+        ));
+        Ok(())
+    }
+
+    /// Preserves xEdit's game-specific CTDA type display and edit bit layout.
+    #[test]
+    fn ctda_type_formatter_round_trips_modern_and_legacy_layouts() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/0:CTDA/payload/0:Type".to_owned(),
+            callback_id: "integer.formatter".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-ctda-type-formatter".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "format.ctda_type".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let modern = FieldValue::UInt(0x75);
+        let modern_record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                modern_record,
+                HandlerPhase::Display,
+                Some(&modern),
+                None,
+            )?,
+            HandlerOutput::Text(text)
+                if text
+                    == "Greater than or equal to / Or, Use global, Swap Subject and Target"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                modern_record,
+                HandlerPhase::EditValue,
+                Some(&modern),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "11010101"
+        ));
+        let modern_edit = FieldValue::String(Cow::Borrowed("11010101"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                modern_record,
+                HandlerPhase::ParseEditValue,
+                Some(&modern_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(0x75))
+        ));
+
+        let legacy = FieldValue::UInt(0xA7);
+        let legacy_record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Fallout3);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                legacy_record,
+                HandlerPhase::Display,
+                Some(&legacy),
+                None,
+            )?,
+            HandlerOutput::Text(text)
+                if text == "Less than or equal to / Or, Run on target, Use global"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                legacy_record,
+                HandlerPhase::EditValue,
+                Some(&legacy),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "101111"
+        ));
+        let legacy_edit = FieldValue::String(Cow::Borrowed("101111"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                legacy_record,
+                HandlerPhase::ParseEditValue,
+                Some(&legacy_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(0xA7))
         ));
         Ok(())
     }

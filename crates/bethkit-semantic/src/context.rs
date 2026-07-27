@@ -282,7 +282,10 @@ impl SemanticContext {
             .iter()
             .filter(|binding| {
                 binding.path == path
-                    && binding.callback_id == "def.value_transform"
+                    && matches!(
+                        binding.callback_id.as_str(),
+                        "def.value_transform" | "integer.formatter" | "string.formatter"
+                    )
                     && !crate::handler::is_validation_binding(binding)
             })
         {
