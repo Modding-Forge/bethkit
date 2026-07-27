@@ -743,6 +743,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ModelInfoArrayCount));
         registry.register(Arc::new(SelectCtdaParameter { table: None }));
         registry.register(Arc::new(SelectCoedOwner { resolver: None }));
+        registry.register(Arc::new(SelectNoteData));
+        registry.register(Arc::new(SelectSoundDescriptorData));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -3874,6 +3876,10 @@ struct SelectCoedOwner {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct SelectNoteData;
+
+struct SelectSoundDescriptorData;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4009,6 +4015,91 @@ impl SemanticHandler for SelectCoedOwner {
         };
         Ok(HandlerOutput::Integer(selected))
     }
+}
+
+impl SemanticHandler for SelectNoteData {
+    fn id(&self) -> &'static str {
+        "select.note_data"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(bytes) = source_subrecord_bytes(&invocation, Signature(*b"DNAM"), self.id())?
+        else {
+            return Ok(HandlerOutput::Integer(0));
+        };
+        let value = *bytes.first().ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "NOTE DNAM payload is empty".to_owned(),
+        })?;
+        let selected = match value {
+            0 => 1,
+            1 => 2,
+            3 => 3,
+            _ => 0,
+        };
+        Ok(HandlerOutput::Integer(selected))
+    }
+}
+
+impl SemanticHandler for SelectSoundDescriptorData {
+    fn id(&self) -> &'static str {
+        "select.sound_descriptor_data"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(bytes) = source_subrecord_bytes(&invocation, Signature(*b"CNAM"), self.id())?
+        else {
+            return Ok(HandlerOutput::Integer(0));
+        };
+        let value = bytes
+            .get(..4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "SNDR CNAM payload is shorter than four bytes".to_owned(),
+            })?;
+        Ok(HandlerOutput::Integer(i64::from(value == 0xED15_7AE3)))
+    }
+}
+
+fn source_subrecord_bytes<'a>(
+    invocation: &HandlerInvocation<'a>,
+    signature: Signature,
+    handler: &str,
+) -> Result<Option<&'a [u8]>> {
+    if let Some(record) = invocation.source_record {
+        return Ok(record
+            .subrecords()?
+            .iter()
+            .find(|subrecord| subrecord.signature == signature)
+            .map(bethkit_core::SubRecord::as_bytes));
+    }
+    if let Some(record) = invocation.source_writable_record {
+        return Ok(record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == signature)
+            .map(|subrecord| subrecord.data.as_slice()));
+    }
+    Err(SemanticError::Handler {
+        handler: handler.to_owned(),
+        message: "subrecord-dependent union requires its source record".to_owned(),
+    })
 }
 
 fn select_ctda_flag_variant(
@@ -8717,6 +8808,99 @@ mod tests {
                 HandlerOutput::Integer(selected) if selected == expected
             ));
         }
+        Ok(())
+    }
+
+    /// Selects NOTE payload layouts from the record-level DNAM type.
+    #[test]
+    fn note_data_selector_matches_xedit_type_mapping() -> TestResult {
+        // given
+        let binding =
+            test_metadata_binding("union.select", "select.note_data", serde_json::json!({}));
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"NOTE"), FormId::NULL, 0, SchemaGame::Fallout4);
+
+        // when / then
+        for (note_type, expected) in [(0_u8, 1_i64), (1, 2), (2, 0), (3, 3), (255, 0)] {
+            let record = test_record(*b"NOTE", &[(*b"DNAM", vec![note_type])])?;
+            assert!(matches!(
+                handlers.invoke_with_source_record(
+                    &binding,
+                    context,
+                    Some(&record),
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
+        let record = test_record(*b"NOTE", &[])?;
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &binding,
+                context,
+                Some(&record),
+                HandlerPhase::UnionSelection,
+                None,
+                None,
+            )?,
+            HandlerOutput::Integer(0)
+        ));
+        Ok(())
+    }
+
+    /// Selects the AutoWeapon SNDR layout from read-only and writable records.
+    #[test]
+    fn sound_descriptor_selector_matches_xedit_type_mapping() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.sound_descriptor_data",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"SNDR"), FormId::NULL, 0, SchemaGame::Fallout76);
+        let auto_weapon = test_record(
+            *b"SNDR",
+            &[(*b"CNAM", 0xED15_7AE3_u32.to_le_bytes().to_vec())],
+        )?;
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &binding,
+                context,
+                Some(&auto_weapon),
+                HandlerPhase::UnionSelection,
+                None,
+                None,
+            )?,
+            HandlerOutput::Integer(1)
+        ));
+        let standard = WritableRecord {
+            signature: Signature(*b"SNDR"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"CNAM"),
+                data: 0x1EEF_540A_u32.to_le_bytes().to_vec(),
+            }],
+        };
+        assert!(matches!(
+            handlers.invoke_with_writable_record(
+                &binding,
+                context,
+                &standard,
+                HandlerPhase::UnionSelection,
+                None,
+                None,
+            )?,
+            HandlerOutput::Integer(0)
+        ));
         Ok(())
     }
 
