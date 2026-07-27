@@ -429,6 +429,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatClimateMoons));
         registry.register(Arc::new(FormatIdleAnimationGroup));
         registry.register(Arc::new(FormatWeatherClassification));
+        registry.register(Arc::new(FixedHexIntegerFormatter));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
@@ -1758,6 +1759,70 @@ impl SemanticHandler for FormatWeatherClassification {
             HandlerPhase::Validation => {
                 name.map_or_else(|| format!("<Unknown: {masked}>"), |_| String::new())
             }
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct FixedHexIntegerFormatter;
+
+impl SemanticHandler for FixedHexIntegerFormatter {
+    fn id(&self) -> &'static str {
+        "format.fixed_hex_integer"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            return parse_integer_handler_value(
+                invocation.value,
+                self.id(),
+                "fixed hexadecimal edit parsing requires text",
+            );
+        }
+        let value = u64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                integer_formatter_error(
+                    self.id(),
+                    "fixed hexadecimal formatting requires an integer",
+                )
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| {
+            integer_formatter_error(self.id(), "fixed hexadecimal value must be non-negative")
+        })?;
+        let width = invocation
+            .context
+            .configuration
+            .get("width")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|width| usize::try_from(width).ok())
+            .filter(|width| (1..=16).contains(width))
+            .ok_or_else(|| {
+                integer_formatter_error(
+                    self.id(),
+                    "fixed hexadecimal width must be between 1 and 16",
+                )
+            })?;
+        let hexadecimal = format!("{value:0width$X}");
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::SortKey => hexadecimal,
+            HandlerPhase::EditValue => {
+                let prefix = invocation
+                    .context
+                    .configuration
+                    .get("edit_prefix")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                format!("{prefix}{hexadecimal}")
+            }
+            HandlerPhase::NativeValue => value.to_string(),
+            HandlerPhase::Validation => String::new(),
             _ => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Text(text))
@@ -5232,6 +5297,52 @@ mod tests {
                 HandlerOutput::Text(text) if text == expected_check
             ));
         }
+        Ok(())
+    }
+
+    /// Matches xEdit's fixed-width Morrowind object-index text and edit prefix.
+    #[test]
+    fn fixed_hex_integer_formatter_matches_morrowind_index() -> TestResult {
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.fixed_hex_integer",
+            serde_json::json!({ "width": 8, "edit_prefix": "$" }),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"REFR"), FormId::NULL, 0, SchemaGame::Morrowind);
+        let value = FieldValue::UInt(0x1234);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::Display,
+                Some(&value),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "00001234"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::EditValue,
+                Some(&value),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "$00001234"
+        ));
+        let edit = FieldValue::String(Cow::Borrowed("$00001234"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::ParseEditValue,
+                Some(&edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(0x1234))
+        ));
         Ok(())
     }
 
