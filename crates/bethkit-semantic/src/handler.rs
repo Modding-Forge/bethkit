@@ -427,6 +427,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatObjectProperty { resolver: None }));
         registry.register(Arc::new(FormatLandscapePosition));
         registry.register(Arc::new(FormatClimateMoons));
+        registry.register(Arc::new(FormatIdleAnimationGroup));
+        registry.register(Arc::new(FormatWeatherClassification));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
@@ -1657,6 +1659,105 @@ impl SemanticHandler for FormatClimateMoons {
             HandlerPhase::SortKey => format!("{value:02X}"),
             HandlerPhase::EditValue | HandlerPhase::NativeValue => value.to_string(),
             HandlerPhase::Validation => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct FormatIdleAnimationGroup;
+
+impl SemanticHandler for FormatIdleAnimationGroup {
+    fn id(&self) -> &'static str {
+        "format.idle_animation_group"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            return parse_integer_handler_value(
+                invocation.value,
+                self.id(),
+                "idle animation edit parsing requires text",
+            );
+        }
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                integer_formatter_error(self.id(), "idle animation formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| integer_formatter_error(self.id(), "idle animation value exceeds i64"))?;
+        let legacy_fallout = matches!(
+            invocation.context.game,
+            SchemaGame::Fallout3 | SchemaGame::FalloutNv
+        );
+        let masked = value & if legacy_fallout { !0xC0 } else { !0x80 };
+        let name = idle_animation_group_name(masked, legacy_fallout);
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary => {
+                let mut text = name.map_or_else(|| format!("<Unknown: {masked}>"), str::to_owned);
+                if value & 0x80 == 0 {
+                    text.push_str(", Must return a file");
+                }
+                text
+            }
+            HandlerPhase::SortKey => format!("{value:02X}"),
+            HandlerPhase::EditValue | HandlerPhase::NativeValue => value.to_string(),
+            HandlerPhase::Validation => {
+                name.map_or_else(|| format!("<Unknown: {masked}>"), |_| String::new())
+            }
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct FormatWeatherClassification;
+
+impl SemanticHandler for FormatWeatherClassification {
+    fn id(&self) -> &'static str {
+        "format.weather_classification"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            return parse_integer_handler_value(
+                invocation.value,
+                self.id(),
+                "weather classification edit parsing requires text",
+            );
+        }
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                integer_formatter_error(
+                    self.id(),
+                    "weather classification formatting requires an integer",
+                )
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| {
+            integer_formatter_error(self.id(), "weather classification value exceeds i64")
+        })?;
+        let masked = value & !192;
+        let name = weather_classification_name(masked, invocation.context.game);
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary => {
+                name.map_or_else(|| format!("<Unknown: {masked}>"), str::to_owned)
+            }
+            HandlerPhase::SortKey => format!("{value:02X}"),
+            HandlerPhase::EditValue | HandlerPhase::NativeValue => value.to_string(),
+            HandlerPhase::Validation => {
+                name.map_or_else(|| format!("<Unknown: {masked}>"), |_| String::new())
+            }
             _ => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Text(text))
@@ -3338,6 +3439,70 @@ fn climate_moons_error(message: impl Into<String>) -> SemanticError {
     }
 }
 
+fn parse_integer_handler_value(
+    value: Option<&FieldValue<'static>>,
+    handler: &str,
+    missing_message: &str,
+) -> Result<HandlerOutput> {
+    let Some(FieldValue::String(value)) = value else {
+        return Err(integer_formatter_error(handler, missing_message));
+    };
+    let value = parse_delphi_integer(value, handler)?;
+    Ok(if value < 0 {
+        HandlerOutput::Value(FieldValue::Int(value))
+    } else {
+        HandlerOutput::Value(FieldValue::UInt(value as u64))
+    })
+}
+
+fn idle_animation_group_name(value: i64, legacy_fallout: bool) -> Option<&'static str> {
+    if legacy_fallout {
+        match value {
+            0 => Some("Idle"),
+            1 => Some("Movement"),
+            2 => Some("Left Arm"),
+            3 => Some("Left Hand"),
+            4 => Some("Weapon"),
+            5 => Some("Weapon Up"),
+            6 => Some("Weapon Down"),
+            7 => Some("Special Idle"),
+            20 => Some("Whole Body"),
+            21 => Some("Upper Body"),
+            _ => None,
+        }
+    } else {
+        match value {
+            0 => Some("Lower Body"),
+            1 => Some("Left Arm"),
+            2 => Some("Left Hand"),
+            3 => Some("Right Arm"),
+            4 => Some("Special Idle"),
+            5 => Some("Whole Body"),
+            6 => Some("Upper Body"),
+            _ => None,
+        }
+    }
+}
+
+fn weather_classification_name(value: i64, game: SchemaGame) -> Option<&'static str> {
+    match value {
+        0 => Some("None"),
+        1 => Some("Pleasant"),
+        2 => Some("Cloudy"),
+        3 if game == SchemaGame::Oblivion => Some("Unknown 3"),
+        4 => Some("Rainy"),
+        8 => Some("Snow"),
+        _ => None,
+    }
+}
+
+fn integer_formatter_error(handler: &str, message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: handler.to_owned(),
+        message: message.into(),
+    }
+}
+
 fn set_model_info_count(
     headers: &mut [FieldValue<'static>],
     index: usize,
@@ -4983,6 +5148,90 @@ mod tests {
             )?,
             HandlerOutput::Text(text) if text == "FF"
         ));
+        Ok(())
+    }
+
+    /// Matches the legacy xEdit idle-group names, flags, and validation.
+    #[test]
+    fn idle_animation_formatter_matches_xedit_games() -> TestResult {
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.idle_animation_group",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        for (game, value, expected) in [
+            (SchemaGame::Oblivion, 5, "Whole Body, Must return a file"),
+            (SchemaGame::Fallout3, 5, "Weapon Up, Must return a file"),
+            (SchemaGame::FalloutNv, 0x95, "Upper Body"),
+        ] {
+            let context = HandlerRecordContext::new(Signature(*b"IDLE"), FormId::NULL, 0, game);
+            let value = FieldValue::UInt(value);
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::Display,
+                    Some(&value),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
+
+        let invalid = FieldValue::UInt(22);
+        let context =
+            HandlerRecordContext::new(Signature(*b"IDLE"), FormId::NULL, 0, SchemaGame::Fallout3);
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::Validation,
+                Some(&invalid),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "<Unknown: 22>"
+        ));
+        Ok(())
+    }
+
+    /// Matches Oblivion's extra weather class and Fallout's stricter validation.
+    #[test]
+    fn weather_classification_formatter_matches_xedit_games() -> TestResult {
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.weather_classification",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let value = FieldValue::UInt(3);
+        for (game, expected_display, expected_check) in [
+            (SchemaGame::Oblivion, "Unknown 3", ""),
+            (SchemaGame::Fallout3, "<Unknown: 3>", "<Unknown: 3>"),
+            (SchemaGame::FalloutNv, "<Unknown: 3>", "<Unknown: 3>"),
+        ] {
+            let context = HandlerRecordContext::new(Signature(*b"WTHR"), FormId::NULL, 0, game);
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::Display,
+                    Some(&value),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected_display
+            ));
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::Validation,
+                    Some(&value),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected_check
+            ));
+        }
         Ok(())
     }
 
