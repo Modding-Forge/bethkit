@@ -1711,6 +1711,7 @@ impl SemanticHandler for FormatVmadObjectAlias {
             };
             return Ok(HandlerOutput::Value(FieldValue::Int(parse_vmad_alias(
                 value,
+                invocation.context.game,
             ))));
         }
         let raw = i64::try_from(callback_integer(
@@ -1898,9 +1899,20 @@ fn format_vmad_alias_label(alias: &QuestAliasInfo) -> String {
     text
 }
 
-fn parse_vmad_alias(value: &str) -> i64 {
+fn parse_vmad_alias(value: &str, game: SchemaGame) -> i64 {
     if value == "None" {
         return -1;
+    }
+    if value == "Player"
+        && matches!(
+            game,
+            SchemaGame::Fallout4
+                | SchemaGame::Fallout4Vr
+                | SchemaGame::Fallout76
+                | SchemaGame::Starfield
+        )
+    {
+        return -2;
     }
     let value = value.trim();
     let end = value
@@ -6010,6 +6022,27 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::Int(7))
+        ));
+        let player = FieldValue::String(Cow::Borrowed("Player"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                fallout,
+                HandlerPhase::ParseEditValue,
+                Some(&player),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(-2))
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                skyrim,
+                HandlerPhase::ParseEditValue,
+                Some(&player),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(-1))
         ));
         Ok(())
     }
