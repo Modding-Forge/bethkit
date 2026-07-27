@@ -290,7 +290,10 @@ impl SemanticContext {
                     && !crate::handler::is_validation_binding(binding)
                     && matches!(
                         binding.callback_id.as_str(),
-                        "def.value_transform" | "integer.formatter" | "string.formatter"
+                        "def.value_transform"
+                            | "integer.formatter"
+                            | "integer.overlay"
+                            | "string.formatter"
                     )
             })
         {
@@ -311,6 +314,10 @@ impl SemanticContext {
             )?;
             let text = match output {
                 HandlerOutput::None => continue,
+                HandlerOutput::Value(value) => {
+                    handler_value = value;
+                    continue;
+                }
                 HandlerOutput::Text(value) => value,
                 _ => {
                     return Err(SemanticError::Handler {
@@ -372,7 +379,13 @@ impl SemanticContext {
             .package()
             .callback_bindings()
             .iter()
-            .filter(|binding| binding.path == path && binding.callback_id == "value.links_to")
+            .filter(|binding| {
+                binding.path == path
+                    && matches!(
+                        binding.callback_id.as_str(),
+                        "integer.overlay" | "value.links_to"
+                    )
+            })
         {
             if !matches!(
                 binding.implementation,

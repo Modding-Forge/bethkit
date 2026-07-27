@@ -268,6 +268,11 @@ pub enum HandlerOutput {
 /// Stable target identity returned by an xEdit link callback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticLink {
+    /// One resolved main record.
+    Record {
+        /// File-local FormID of the target record.
+        form_id: FormId,
+    },
     /// One effective alias inside a resolved quest record.
     QuestAlias {
         /// File-local FormID of the quest reference used by the source value.
@@ -470,6 +475,19 @@ pub trait FormLinkResolver: Send + Sync {
     ) -> Option<FormLinkInfo> {
         None
     }
+
+    /// Resolves the inherited quest FormID used by a condition in its record context.
+    ///
+    /// This covers parent-group relationships that cannot be derived from the
+    /// bytes of one main record, including INFO to DIAL and Starfield's parent
+    /// quest fallbacks.
+    fn resolve_condition_quest_form_id(
+        &self,
+        _source: HandlerRecordContext,
+        _record: &Record,
+    ) -> Option<FormId> {
+        None
+    }
 }
 
 /// Metadata associated with one Wwise object GUID.
@@ -577,6 +595,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatObjectProperty { resolver: None }));
         registry.register(Arc::new(FormatVmadObjectAlias { resolver: None }));
         registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
+        registry.register(Arc::new(OverlayCtdaQuest { resolver: None }));
+        registry.register(Arc::new(FormatCtdaContextQuestStage { resolver: None }));
         registry.register(Arc::new(FormatCtdaConditionAlias { resolver: None }));
         registry.register(Arc::new(FormatCtdaStringParameter));
         registry.register(Arc::new(ResolveVmadObjectAliasLink { resolver: None }));
@@ -640,6 +660,12 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatCtdaQuestStage {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(OverlayCtdaQuest {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatCtdaContextQuestStage {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatCtdaConditionAlias {
@@ -1324,6 +1350,23 @@ fn configured_optional_text<'a>(
     }
 }
 
+fn configured_optional_bool(
+    handler: &str,
+    configuration: &serde_json::Value,
+    key: &str,
+) -> Result<Option<bool>> {
+    match configuration.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!("callback configuration `{key}` must be a boolean"),
+            }),
+    }
+}
+
 fn configured_signature(
     handler: &str,
     configuration: &serde_json::Value,
@@ -1799,6 +1842,14 @@ struct FormatCtdaQuestStage {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct OverlayCtdaQuest {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+struct FormatCtdaContextQuestStage {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 struct FormatCtdaConditionAlias {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
@@ -1971,6 +2022,118 @@ impl SemanticHandler for FormatCtdaQuestStage {
     }
 }
 
+impl SemanticHandler for OverlayCtdaQuest {
+    fn id(&self) -> &'static str {
+        "overlay.ctda_quest"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let raw = callback_form_id(
+            invocation.value.ok_or_else(|| {
+                ctda_condition_quest_error(self.id(), "quest overlay requires a FormID")
+            })?,
+            self.id(),
+        )?;
+        if raw != FormId::NULL
+            || !matches!(
+                invocation.phase,
+                HandlerPhase::Display
+                    | HandlerPhase::Summary
+                    | HandlerPhase::SortKey
+                    | HandlerPhase::Validation
+                    | HandlerPhase::ReferenceResolution
+            )
+        {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(quest_form_id) =
+            resolve_ctda_condition_quest(self.id(), &invocation, self.resolver.as_deref())?
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let source = handler_record_context(&invocation.context);
+        let targets = [Signature(*b"QUST")];
+        let resolved = self
+            .resolver
+            .as_deref()
+            .and_then(|resolver| resolver.resolve_form_id(source, quest_form_id, &targets));
+        match invocation.phase {
+            HandlerPhase::Display => Ok(resolved.map_or_else(
+                || HandlerOutput::Value(quest_form_id_value(quest_form_id)),
+                |link| HandlerOutput::Text(link.value().to_owned()),
+            )),
+            HandlerPhase::Summary => Ok(resolved.map_or_else(
+                || HandlerOutput::Value(quest_form_id_value(quest_form_id)),
+                |link| HandlerOutput::Text(link.short_name().to_owned()),
+            )),
+            HandlerPhase::SortKey => Ok(HandlerOutput::Text(format!("{:08X}", quest_form_id.0))),
+            HandlerPhase::Validation => Ok(HandlerOutput::Text(resolved.map_or_else(
+                || "<Warning: Could not resolve Quest>".to_owned(),
+                |_| String::new(),
+            ))),
+            HandlerPhase::ReferenceResolution if resolved.is_some() => {
+                Ok(HandlerOutput::Link(SemanticLink::Record {
+                    form_id: quest_form_id,
+                }))
+            }
+            HandlerPhase::ReferenceResolution => Ok(HandlerOutput::None),
+            _ => Ok(HandlerOutput::None),
+        }
+    }
+}
+
+impl SemanticHandler for FormatCtdaContextQuestStage {
+    fn id(&self) -> &'static str {
+        "format.ctda_context_quest_stage"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(ctda_condition_quest_error(
+                    self.id(),
+                    "context quest-stage edit parsing requires text",
+                ));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::UInt(
+                parse_prefixed_u32(value, self.id())?.into(),
+            )));
+        }
+        let stage = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                ctda_condition_quest_error(
+                    self.id(),
+                    "context quest-stage formatting requires an integer",
+                )
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| ctda_condition_quest_error(self.id(), "context quest stage exceeds i64"))?;
+        let quest_form_id =
+            resolve_ctda_condition_quest(self.id(), &invocation, self.resolver.as_deref())?;
+        let source = handler_record_context(&invocation.context);
+        let targets = [Signature(*b"QUST")];
+        let quest = quest_form_id.and_then(|form_id| {
+            self.resolver
+                .as_deref()
+                .and_then(|resolver| resolver.resolve_form_id(source, form_id, &targets))
+        });
+        Ok(HandlerOutput::Text(format_ctda_context_quest_stage(
+            stage,
+            invocation.phase,
+            quest.as_ref(),
+        )))
+    }
+}
+
 impl SemanticHandler for ResolveVmadObjectAliasLink {
     fn id(&self) -> &'static str {
         "resolve.vmad_object_alias"
@@ -2102,6 +2265,114 @@ fn format_quest_stage_label(stage: &QuestStageInfo) -> String {
     text
 }
 
+fn format_ctda_context_quest_stage(
+    stage: i64,
+    phase: HandlerPhase,
+    quest: Option<&FormLinkInfo>,
+) -> String {
+    if phase == HandlerPhase::SortKey {
+        return format!("{:08X}", stage as u64);
+    }
+    let unresolved = match phase {
+        HandlerPhase::Display => format!("{stage} <Warning: Could not resolve Quest>"),
+        HandlerPhase::Summary | HandlerPhase::EditValue => stage.to_string(),
+        HandlerPhase::Validation => "<Warning: Could not resolve Quest>".to_owned(),
+        _ => String::new(),
+    };
+    let Some(quest) = quest else {
+        return unresolved;
+    };
+    let Some(stages) = quest.quest_stages() else {
+        return unresolved;
+    };
+    if let Some(entry) = stages.iter().find(|entry| entry.index() == stage) {
+        return match phase {
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+                format_quest_stage_label(entry)
+            }
+            HandlerPhase::Validation => String::new(),
+            _ => String::new(),
+        };
+    }
+    match phase {
+        HandlerPhase::Display => format!(
+            "{stage} <Warning: Quest Stage/Objective not found in \"{}\">",
+            quest.value()
+        ),
+        HandlerPhase::Summary | HandlerPhase::EditValue => stage.to_string(),
+        HandlerPhase::Validation => format!(
+            "<Warning: Quest Stage/Objective not found in \"{}\">",
+            quest.value()
+        ),
+        _ => String::new(),
+    }
+}
+
+fn resolve_ctda_condition_quest(
+    handler: &str,
+    invocation: &HandlerInvocation<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+) -> Result<Option<FormId>> {
+    let source = configured_text(handler, invocation.context.configuration, "quest_source")?;
+    if source == "none" {
+        return Ok(None);
+    }
+    if source == "record_form_id" {
+        return Ok(
+            (invocation.context.form_id != FormId::NULL).then_some(invocation.context.form_id)
+        );
+    }
+    let record = require_source_record(handler, invocation)?;
+    if source == "parent" {
+        return Ok(resolver.and_then(|resolver| {
+            resolver.resolve_condition_quest_form_id(
+                handler_record_context(&invocation.context),
+                record,
+            )
+        }));
+    }
+    if source != "subrecord" {
+        return Err(ctda_condition_quest_error(
+            handler,
+            format!("unknown quest source {source:?}"),
+        ));
+    }
+    let signature =
+        configured_signature(handler, invocation.context.configuration, "quest_signature")?;
+    let direct = record
+        .get(signature)?
+        .map(|subrecord| subrecord.as_u32().map(FormId))
+        .transpose()?;
+    if direct.is_some() {
+        return Ok(direct);
+    }
+    if configured_optional_bool(handler, invocation.context.configuration, "parent_fallback")?
+        .unwrap_or(false)
+    {
+        return Ok(resolver.and_then(|resolver| {
+            resolver.resolve_condition_quest_form_id(
+                handler_record_context(&invocation.context),
+                record,
+            )
+        }));
+    }
+    Ok(None)
+}
+
+fn quest_form_id_value(form_id: FormId) -> FieldValue<'static> {
+    FieldValue::FormId {
+        value: form_id,
+        targets: vec![Signature(*b"QUST")],
+    }
+}
+
+fn callback_form_id(value: &FieldValue<'_>, handler: &str) -> Result<FormId> {
+    match value {
+        FieldValue::FormId { value, .. } => Ok(*value),
+        _ => callback_u32(callback_integer(value, handler)?, handler).map(FormId),
+    }
+}
+
 fn parse_prefixed_i32(value: &str) -> Result<i64> {
     let value = value.trim();
     let end = value
@@ -2116,9 +2387,29 @@ fn parse_prefixed_i32(value: &str) -> Result<i64> {
         .map_err(|error| ctda_quest_stage_error(format!("invalid quest stage: {error}")))
 }
 
+fn parse_prefixed_u32(value: &str, handler: &str) -> Result<u32> {
+    let value = value.trim();
+    let end = value
+        .char_indices()
+        .take_while(|(_, value)| value.is_ascii_digit())
+        .map(|(index, value)| index + value.len_utf8())
+        .last()
+        .unwrap_or(0);
+    value[..end].parse::<u32>().map_err(|error| {
+        ctda_condition_quest_error(handler, format!("invalid quest stage: {error}"))
+    })
+}
+
 fn ctda_quest_stage_error(message: impl Into<String>) -> SemanticError {
     SemanticError::Handler {
         handler: "format.ctda_quest_stage".to_owned(),
+        message: message.into(),
+    }
+}
+
+fn ctda_condition_quest_error(handler: &str, message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: handler.to_owned(),
         message: message.into(),
     }
 }
@@ -5718,6 +6009,14 @@ mod tests {
                 _ => None,
             }
         }
+
+        fn resolve_condition_quest_form_id(
+            &self,
+            _source: HandlerRecordContext,
+            _record: &Record,
+        ) -> Option<FormId> {
+            Some(FormId(0x5678))
+        }
     }
 
     struct TestWwiseGuidResolver;
@@ -6697,6 +6996,87 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::Int(10))
+        ));
+        Ok(())
+    }
+
+    /// Resolves implicit CTDA quests for overlays and parameter-one stage values.
+    #[test]
+    fn ctda_condition_quest_handlers_match_xedit(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let configuration = serde_json::json!({
+            "quest_source": "subrecord",
+            "quest_signature": "PNAM",
+            "parent_fallback": true
+        });
+        let overlay = test_metadata_binding(
+            "integer.overlay",
+            "overlay.ctda_quest",
+            configuration.clone(),
+        );
+        let stage = test_metadata_binding(
+            "integer.formatter",
+            "format.ctda_context_quest_stage",
+            configuration,
+        );
+        let scene = test_record(*b"SCEN", &[(*b"PNAM", 0x5678_u32.to_le_bytes().to_vec())])?;
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let record =
+            HandlerRecordContext::new(Signature(*b"SCEN"), FormId::NULL, 0, SchemaGame::Fallout76);
+        let null_quest = FieldValue::FormId {
+            value: FormId::NULL,
+            targets: vec![Signature(*b"QUST")],
+        };
+        let stage_ten = FieldValue::UInt(10);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &overlay,
+                record,
+                Some(&scene),
+                HandlerPhase::Display,
+                Some(&null_quest),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "Example Quest [QUST:00005678]"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &overlay,
+                record,
+                Some(&scene),
+                HandlerPhase::ReferenceResolution,
+                Some(&null_quest),
+                None,
+            )?,
+            HandlerOutput::Link(SemanticLink::Record {
+                form_id: FormId(0x5678)
+            })
+        ));
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &stage,
+                record,
+                Some(&scene),
+                HandlerPhase::Display,
+                Some(&stage_ten),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "010 First objective"
+        ));
+        let edit = FieldValue::String(Cow::Borrowed("020 Later objective"));
+        assert!(matches!(
+            handlers.invoke(
+                &stage,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(20))
         ));
         Ok(())
     }
