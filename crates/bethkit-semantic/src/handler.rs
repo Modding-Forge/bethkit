@@ -364,6 +364,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(MagicEffectSecondAvWeightAfterSet));
+        registry.register(Arc::new(MagicEffectArchetypeAfterSet));
         registry.register(Arc::new(RefreshSiblingUnions));
         registry.register(Arc::new(InvalidateConflicts));
         registry.register(Arc::new(CtdaTypeFormatter));
@@ -997,6 +998,23 @@ fn configured_text<'a>(
             handler: handler.to_owned(),
             message: format!("record metadata callback requires string configuration `{key}`"),
         })
+}
+
+fn configured_optional_text<'a>(
+    handler: &str,
+    configuration: &'a serde_json::Value,
+    key: &str,
+) -> Result<Option<&'a str>> {
+    match configuration.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!("callback configuration `{key}` must be a string"),
+            }),
+    }
 }
 
 fn configured_signature(
@@ -1736,10 +1754,141 @@ impl SemanticHandler for MagicEffectSecondAvWeightAfterSet {
             HandlerMutation::SetIfEqual {
                 path: archetype_path.to_owned(),
                 occurrence: 0,
-                expected: OwnedFieldValue::UInt(0),
-                value: OwnedFieldValue::UInt(0xff),
+                expected: OwnedFieldValue::Int(0),
+                value: OwnedFieldValue::Int(0xff),
             },
         ]))
+    }
+}
+
+struct MagicEffectArchetypeAfterSet;
+
+impl SemanticHandler for MagicEffectArchetypeAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.magic_effect_archetype"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(value) = invocation.value else {
+            return Ok(HandlerOutput::None);
+        };
+        let new_value = i64::try_from(callback_integer(value, self.id())?).map_err(|_| {
+            SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "magic-effect archetype exceeds i64".to_owned(),
+            }
+        })?;
+        let old_value = invocation
+            .old_value
+            .map(|value| callback_integer(value, self.id()))
+            .transpose()?
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "previous magic-effect archetype exceeds i64".to_owned(),
+            })?
+            .unwrap_or(new_value);
+        if old_value == new_value || old_value >= 0xff || new_value >= 0xff {
+            return Ok(HandlerOutput::None);
+        }
+        let configuration = invocation.context.configuration;
+        let assoc_item_path = configured_text(self.id(), configuration, "assoc_item_path")?;
+        let actor_value_path = configured_text(self.id(), configuration, "actor_value_path")?;
+        let actor_value = magic_effect_actor_value(invocation.context.game, new_value);
+        let mut mutations = vec![
+            HandlerMutation::Set {
+                path: assoc_item_path.to_owned(),
+                occurrence: 0,
+                value: OwnedFieldValue::Bytes(vec![0; 4]),
+            },
+            HandlerMutation::Set {
+                path: actor_value_path.to_owned(),
+                occurrence: 0,
+                value: magic_effect_actor_value_owned(
+                    invocation.context.game,
+                    invocation.context.form_version,
+                    actor_value,
+                )?,
+            },
+        ];
+        if let Some(second_actor_value_path) =
+            configured_optional_text(self.id(), configuration, "second_actor_value_path")?
+        {
+            mutations.push(HandlerMutation::Set {
+                path: second_actor_value_path.to_owned(),
+                occurrence: 0,
+                value: magic_effect_actor_value_owned(
+                    invocation.context.game,
+                    invocation.context.form_version,
+                    -1,
+                )?,
+            });
+        }
+        if let Some(second_av_weight_path) =
+            configured_optional_text(self.id(), configuration, "second_av_weight_path")?
+        {
+            mutations.push(HandlerMutation::Set {
+                path: second_av_weight_path.to_owned(),
+                occurrence: 0,
+                value: OwnedFieldValue::Float(0.0),
+            });
+        }
+        Ok(HandlerOutput::Mutations(mutations))
+    }
+}
+
+fn magic_effect_actor_value(game: SchemaGame, archetype: i64) -> i64 {
+    match game {
+        SchemaGame::Fallout3 => match archetype {
+            11 => 48,
+            12 => 49,
+            24 => 47,
+            _ => -1,
+        },
+        SchemaGame::FalloutNv => match archetype {
+            11 => 48,
+            12 => 49,
+            24 => 47,
+            36 => 51,
+            _ => -1,
+        },
+        _ => match archetype {
+            6 | 8 => 0,
+            7 | 24 | 38 | 42 => 1,
+            11 => 54,
+            21 => 53,
+            _ => -1,
+        },
+    }
+}
+
+fn magic_effect_actor_value_owned(
+    game: SchemaGame,
+    form_version: u16,
+    value: i64,
+) -> Result<OwnedFieldValue> {
+    let raw = value as u32;
+    match game {
+        SchemaGame::SkyrimLe
+        | SchemaGame::SkyrimSe
+        | SchemaGame::SkyrimVr
+        | SchemaGame::Fallout3
+        | SchemaGame::FalloutNv => Ok(OwnedFieldValue::Int(value)),
+        SchemaGame::Fallout4 | SchemaGame::Fallout4Vr => Ok(OwnedFieldValue::FormId(FormId(raw))),
+        SchemaGame::Fallout76 if form_version < 77 => Ok(OwnedFieldValue::UInt(u64::from(raw))),
+        SchemaGame::Fallout76 => Ok(OwnedFieldValue::FormId(FormId(raw))),
+        _ => Err(SemanticError::Handler {
+            handler: "edit.magic_effect_archetype".to_owned(),
+            message: format!("unsupported game {}", game.slug()),
+        }),
     }
 }
 
@@ -3666,8 +3815,8 @@ mod tests {
                     [HandlerMutation::SetIfEqual {
                         path,
                         occurrence: 0,
-                        expected: OwnedFieldValue::UInt(0),
-                        value: OwnedFieldValue::UInt(0xff),
+                        expected: OwnedFieldValue::Int(0),
+                        value: OwnedFieldValue::Int(0xff),
                     }] if path == "MGEF/6:Data/payload/16:Archetype"
                 )
         ));
@@ -3680,6 +3829,126 @@ mod tests {
             Some(&FieldValue::Float(0.25)),
         )?;
         assert!(matches!(zero, HandlerOutput::None));
+        Ok(())
+    }
+
+    /// Resets MGEF dependent fields with each game's xEdit actor-value mapping.
+    #[test]
+    fn magic_effect_archetype_resets_dependent_fields() -> Result<()> {
+        let binding = |configuration: serde_json::Value| CallbackBinding {
+            path: "MGEF/data/archetype".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-mgef-archetype".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.magic_effect_archetype".to_owned(),
+                    minimum_version: 1,
+                    configuration,
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let modern_binding = binding(serde_json::json!({
+            "assoc_item_path": "MGEF/data/assoc",
+            "actor_value_path": "MGEF/data/actor",
+            "second_actor_value_path": "MGEF/data/second_actor",
+            "second_av_weight_path": "MGEF/data/second_weight"
+        }));
+        let modern_record =
+            HandlerRecordContext::new(Signature(*b"MGEF"), FormId::NULL, 44, SchemaGame::SkyrimSe);
+        let modern = handlers.invoke(
+            &modern_binding,
+            modern_record,
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::Enumeration {
+                value: 11,
+                name: None,
+            }),
+            Some(&FieldValue::Enumeration {
+                value: 0,
+                name: None,
+            }),
+        )?;
+        let HandlerOutput::Mutations(modern) = modern else {
+            return Err(SemanticError::Handler {
+                handler: "edit.magic_effect_archetype".to_owned(),
+                message: "modern callback did not return mutations".to_owned(),
+            });
+        };
+        assert!(matches!(
+            modern.as_slice(),
+            [
+                HandlerMutation::Set {
+                    value: OwnedFieldValue::Bytes(bytes),
+                    ..
+                },
+                HandlerMutation::Set {
+                    value: OwnedFieldValue::Int(54),
+                    ..
+                },
+                HandlerMutation::Set {
+                    value: OwnedFieldValue::Int(-1),
+                    ..
+                },
+                HandlerMutation::Set {
+                    value: OwnedFieldValue::Float(weight),
+                    ..
+                }
+            ] if bytes == &[0, 0, 0, 0] && *weight == 0.0
+        ));
+
+        let legacy_binding = binding(serde_json::json!({
+            "assoc_item_path": "MGEF/data/assoc",
+            "actor_value_path": "MGEF/data/actor"
+        }));
+        let legacy_record =
+            HandlerRecordContext::new(Signature(*b"MGEF"), FormId::NULL, 15, SchemaGame::FalloutNv);
+        let legacy = handlers.invoke(
+            &legacy_binding,
+            legacy_record,
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::Enumeration {
+                value: 36,
+                name: None,
+            }),
+            Some(&FieldValue::Enumeration {
+                value: 0,
+                name: None,
+            }),
+        )?;
+        assert!(matches!(
+            legacy,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [
+                        HandlerMutation::Set {
+                            value: OwnedFieldValue::Bytes(_),
+                            ..
+                        },
+                        HandlerMutation::Set {
+                            value: OwnedFieldValue::Int(51),
+                            ..
+                        }
+                    ]
+                )
+        ));
+
+        let protected = handlers.invoke(
+            &legacy_binding,
+            legacy_record,
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::Enumeration {
+                value: 1,
+                name: None,
+            }),
+            Some(&FieldValue::Enumeration {
+                value: 255,
+                name: None,
+            }),
+        )?;
+        assert!(matches!(protected, HandlerOutput::None));
         Ok(())
     }
 

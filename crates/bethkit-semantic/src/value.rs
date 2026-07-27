@@ -216,6 +216,8 @@ pub(crate) fn handler_to_owned_value(
         FieldValue::Float(value) => Ok(OwnedFieldValue::Float(value)),
         FieldValue::String(value) => Ok(OwnedFieldValue::String(value.into_owned())),
         FieldValue::FormId { value, .. } => Ok(OwnedFieldValue::FormId(value)),
+        FieldValue::Enumeration { value, .. } => Ok(OwnedFieldValue::Int(value)),
+        FieldValue::Flags { value, .. } => Ok(OwnedFieldValue::UInt(value)),
         FieldValue::Bytes(value) => Ok(OwnedFieldValue::Bytes(value.into_owned())),
         FieldValue::Array(values) => values
             .into_iter()
@@ -253,6 +255,33 @@ fn round_float_to_digits(value: f64, digits: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Preserves editable raw values for decoded enumerations and flags.
+    #[test]
+    fn handler_values_convert_enumerations_and_flags_to_owned_values(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            handler_to_owned_value(
+                FieldValue::Enumeration {
+                    value: 255,
+                    name: Some("Protected".to_owned()),
+                },
+                "TEST/enum",
+            )?,
+            OwnedFieldValue::Int(255)
+        );
+        assert_eq!(
+            handler_to_owned_value(
+                FieldValue::Flags {
+                    value: 0x41,
+                    active: vec!["First".to_owned(), "Seventh".to_owned()],
+                },
+                "TEST/flags",
+            )?,
+            OwnedFieldValue::UInt(0x41)
+        );
+        Ok(())
+    }
 
     /// Matches Delphi's tie-to-even decimal rounding used by `RoundToEx`.
     #[test]
