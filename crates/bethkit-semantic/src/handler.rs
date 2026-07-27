@@ -437,6 +437,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ModelInfoCounts));
         registry.register(Arc::new(ModelInfoArrayCount));
         registry.register(Arc::new(SelectCtdaParameter { table: None }));
+        registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -493,9 +494,12 @@ impl SemanticHandlerRegistry {
     /// Installs the package-specific xEdit condition-function table.
     ///
     /// This replaces the table-less built-in selector while preserving its
-    /// stable handler identifier.
+    /// stable handler identifier and installs the matching function formatter.
     pub fn set_condition_function_table(&mut self, table: Arc<ConditionFunctionTable>) {
-        self.register(Arc::new(SelectCtdaParameter { table: Some(table) }));
+        self.register(Arc::new(SelectCtdaParameter {
+            table: Some(Arc::clone(&table)),
+        }));
+        self.register(Arc::new(CtdaFunctionFormatter { table: Some(table) }));
     }
 
     /// Resolves a handler satisfying a minimum implementation version.
@@ -2363,6 +2367,93 @@ fn configured_integer_error(handler: &str, prefix: &str, message: &str) -> Seman
 fn ctda_parameter_error(message: impl Into<String>) -> SemanticError {
     SemanticError::Handler {
         handler: "select.ctda_parameter".to_owned(),
+        message: message.into(),
+    }
+}
+
+struct CtdaFunctionFormatter {
+    table: Option<Arc<ConditionFunctionTable>>,
+}
+
+impl SemanticHandler for CtdaFunctionFormatter {
+    fn id(&self) -> &'static str {
+        "format.ctda_function"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let table = self
+            .table
+            .as_deref()
+            .ok_or_else(|| ctda_function_error("schema package has no condition-function table"))?;
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(input)) = invocation.value else {
+                return Err(ctda_function_error(
+                    "condition-function edit parsing requires text",
+                ));
+            };
+            let value = table
+                .functions()
+                .iter()
+                .find(|function| function.name().eq_ignore_ascii_case(input))
+                .map_or_else(
+                    || parse_delphi_integer(input, self.id()),
+                    |function| Ok(i64::from(function.index())),
+                )?;
+            return Ok(HandlerOutput::Value(FieldValue::Int(value)));
+        }
+
+        let value = i64::try_from(callback_integer(
+            invocation
+                .value
+                .ok_or_else(|| ctda_function_error("formatting requires an integer value"))?,
+            self.id(),
+        )?)
+        .map_err(|_| ctda_function_error("condition-function value exceeds i64"))?;
+        let function = i32::try_from(value)
+            .ok()
+            .and_then(|value| {
+                table
+                    .functions()
+                    .binary_search_by_key(&value, |function| function.index())
+                    .ok()
+            })
+            .and_then(|index| table.functions().get(index));
+        let text = match invocation.phase {
+            HandlerPhase::Display => function.map_or_else(
+                || format!("<Unknown: {value}>"),
+                |function| function.name().to_owned(),
+            ),
+            HandlerPhase::Summary => function.map_or_else(
+                || {
+                    if invocation.context.game == SchemaGame::FalloutNv {
+                        format!("<Unknown: {value}>")
+                    } else {
+                        value.to_string()
+                    }
+                },
+                |function| function.name().to_owned(),
+            ),
+            HandlerPhase::EditValue => {
+                function.map_or_else(|| value.to_string(), |function| function.name().to_owned())
+            }
+            HandlerPhase::SortKey => format!("{:08X}", value as u64),
+            HandlerPhase::NativeValue => String::new(),
+            HandlerPhase::Validation => {
+                function.map_or_else(|| format!("<Unknown: {value}>"), |_| String::new())
+            }
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+fn ctda_function_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.ctda_function".to_owned(),
         message: message.into(),
     }
 }
@@ -6104,6 +6195,95 @@ mod tests {
         assert_eq!(select(2, 0x02, 5)?, 38);
         assert_eq!(select(2, 0x0A, 5)?, 38);
         assert_eq!(select(999, 0, 0)?, 0);
+        Ok(())
+    }
+
+    /// Formats and parses CTDA function identifiers exactly like the xEdit tables.
+    #[test]
+    fn ctda_function_formatter_uses_exported_names_and_game_policies() -> Result<()> {
+        // given
+        let binding = CallbackBinding {
+            path: "TEST/0:CTDA/payload/3:Function".to_owned(),
+            callback_id: "integer.formatter".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-ctda-function".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "format.ctda_function".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let table = ConditionFunctionTable::new(
+            Some(9),
+            Some(39),
+            vec![bethkit_schema::ConditionFunction::new(
+                1,
+                "GetDistance",
+                "",
+                [36, 1, 1],
+                [true, false, false],
+            )],
+        );
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_condition_function_table(Arc::new(table));
+        let skyrim =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let fallout_nv =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::FalloutNv);
+        let known = FieldValue::UInt(1);
+        let unknown = FieldValue::UInt(999);
+        let text = |record, phase, value: &FieldValue<'static>| -> Result<String> {
+            match handlers.invoke(&binding, record, phase, Some(value), None)? {
+                HandlerOutput::Text(value) => Ok(value),
+                _ => Err(ctda_function_error(
+                    "test formatter returned a non-text value",
+                )),
+            }
+        };
+
+        // when / then
+        assert_eq!(text(skyrim, HandlerPhase::Display, &known)?, "GetDistance");
+        assert_eq!(
+            text(skyrim, HandlerPhase::Display, &unknown)?,
+            "<Unknown: 999>"
+        );
+        assert_eq!(text(skyrim, HandlerPhase::Summary, &unknown)?, "999");
+        assert_eq!(
+            text(fallout_nv, HandlerPhase::Summary, &unknown)?,
+            "<Unknown: 999>"
+        );
+        assert_eq!(text(skyrim, HandlerPhase::SortKey, &unknown)?, "000003E7");
+        assert_eq!(text(skyrim, HandlerPhase::EditValue, &unknown)?, "999");
+        assert_eq!(text(skyrim, HandlerPhase::Validation, &known)?, "");
+        assert_eq!(
+            text(skyrim, HandlerPhase::Validation, &unknown)?,
+            "<Unknown: 999>"
+        );
+
+        let named_edit = FieldValue::String(Cow::Borrowed("getdistance"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                skyrim,
+                HandlerPhase::ParseEditValue,
+                Some(&named_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(1))
+        ));
+        let numeric_edit = FieldValue::String(Cow::Borrowed("$10"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                skyrim,
+                HandlerPhase::ParseEditValue,
+                Some(&numeric_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(16))
+        ));
         Ok(())
     }
 
