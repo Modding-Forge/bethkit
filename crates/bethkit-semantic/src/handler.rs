@@ -774,6 +774,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectOblivionObmeEfitParameter));
         registry.register(Arc::new(SelectOblivionObmeEfixParameter));
         registry.register(Arc::new(SelectGameSettingValue));
+        registry.register(Arc::new(SelectLegacyNoteVoice));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -3962,6 +3963,8 @@ struct SelectOblivionObmeEfixParameter;
 
 struct SelectGameSettingValue;
 
+struct SelectLegacyNoteVoice;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4306,6 +4309,26 @@ impl SemanticHandler for SelectGameSettingValue {
             _ => 1,
         };
         Ok(HandlerOutput::Integer(selected))
+    }
+}
+
+impl SemanticHandler for SelectLegacyNoteVoice {
+    fn id(&self) -> &'static str {
+        "select.legacy_note_voice"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let note_type = source_subrecord_bytes(&invocation, Signature(*b"DATA"), self.id())?
+            .and_then(|bytes| bytes.first())
+            .copied();
+        Ok(HandlerOutput::Integer(i64::from(note_type == Some(3))))
     }
 }
 
@@ -9356,6 +9379,49 @@ mod tests {
                 )?,
                 HandlerOutput::Integer(selected) if selected == expected
             ));
+        }
+        Ok(())
+    }
+
+    /// Selects Fallout 3 and New Vegas NOTE voice references from DATA.
+    #[test]
+    fn legacy_note_voice_selector_matches_xedit_type_mapping() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.legacy_note_voice",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"NOTE"), FormId::NULL, 0, SchemaGame::Fallout3);
+
+        // when / then
+        for (note_type, expected) in [(0_u8, 0_i64), (1, 0), (2, 0), (3, 1), (255, 0)] {
+            let record = test_record(
+                *b"NOTE",
+                &[
+                    (*b"DATA", vec![note_type]),
+                    (*b"TNAM", vec![0; 4]),
+                    (*b"SNAM", vec![0; 4]),
+                ],
+            )?;
+            for source_index in [1_usize, 2] {
+                assert!(matches!(
+                    handlers.invoke_with_subrecord(
+                        &binding,
+                        context,
+                        HandlerSubrecordSource::ReadOnly {
+                            record: &record,
+                            index: source_index,
+                        },
+                        HandlerPhase::UnionSelection,
+                        None,
+                        None,
+                    )?,
+                    HandlerOutput::Integer(selected) if selected == expected
+                ));
+            }
         }
         Ok(())
     }
