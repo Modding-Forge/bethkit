@@ -357,6 +357,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatRgb));
         registry.register(Arc::new(FormatVec3));
         registry.register(Arc::new(FormatAngleDegrees));
+        registry.register(Arc::new(FormatGeographicCoordinate));
         registry.register(Arc::new(FormatTimestampDate));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
@@ -1331,6 +1332,48 @@ impl SemanticHandler for FormatTimestampDate {
             return Ok(HandlerOutput::Text(format_timestamp_date(value)));
         }
         Ok(HandlerOutput::Text(format_hex_bytes(value)))
+    }
+}
+
+struct FormatGeographicCoordinate;
+
+impl SemanticHandler for FormatGeographicCoordinate {
+    fn id(&self) -> &'static str {
+        "format.geographic_coordinate"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let latitude = coordinate_is_latitude(invocation.context.binding)?;
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(coordinate_error("coordinate edit parsing requires text"));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Float(
+                parse_geographic_coordinate(value, latitude)?,
+            )));
+        }
+        let Some(FieldValue::Float(value)) = invocation.value else {
+            return Err(coordinate_error(
+                "coordinate formatter requires a floating-point value",
+            ));
+        };
+        if matches!(
+            invocation.phase,
+            HandlerPhase::Display | HandlerPhase::Summary
+        ) {
+            return Ok(HandlerOutput::Text(format_geographic_coordinate(
+                *value, latitude,
+            )));
+        }
+        Ok(HandlerOutput::Text(format_numeric_component(
+            self.id(),
+            invocation.value.expect("float value checked above"),
+            None,
+        )?))
     }
 }
 
@@ -3140,6 +3183,117 @@ fn timestamp_date_error(message: impl Into<String>) -> SemanticError {
     }
 }
 
+fn coordinate_is_latitude(binding: &CallbackBinding) -> Result<bool> {
+    if binding.path.ends_with(":Latitude") {
+        Ok(true)
+    } else if binding.path.ends_with(":Longitude") {
+        Ok(false)
+    } else {
+        Err(coordinate_error(
+            "coordinate binding path must end with Latitude or Longitude",
+        ))
+    }
+}
+
+fn format_geographic_coordinate(value: f64, latitude: bool) -> String {
+    let full = if latitude { 180.0 } else { 360.0 };
+    let half = full / 2.0;
+    let mut coordinate = value.to_degrees();
+    while coordinate > half {
+        coordinate -= full;
+    }
+    while coordinate < -half {
+        coordinate += full;
+    }
+
+    let mut degrees = coordinate.trunc() as i32;
+    let minutes_fraction = (coordinate - f64::from(degrees)).abs() * 60.0;
+    let mut minutes = minutes_fraction.trunc() as i32;
+    let mut seconds = ((minutes_fraction - f64::from(minutes)) * 60.0).round_ties_even() as i32;
+    if seconds == 60 {
+        seconds = 0;
+        minutes += 1;
+        if minutes == 60 {
+            degrees += 1;
+            minutes = 0;
+        }
+    }
+
+    let direction = match (latitude, coordinate >= 0.0) {
+        (true, true) => 'N',
+        (true, false) => 'S',
+        (false, true) => 'E',
+        (false, false) => 'W',
+    };
+    format!("{}\u{00B0}{minutes}'{seconds}\"{direction}", degrees.abs())
+}
+
+fn parse_geographic_coordinate(value: &str, latitude: bool) -> Result<f64> {
+    if value.chars().count() < 7 {
+        return Err(coordinate_error("coordinate edit value is too short"));
+    }
+    let degree_position = value
+        .find('\u{00B0}')
+        .ok_or_else(|| coordinate_error("coordinate edit value is missing the degree symbol"))?;
+    let minute_position = value
+        .find('\'')
+        .ok_or_else(|| coordinate_error("coordinate edit value is missing the minute symbol"))?;
+    let second_position = value
+        .find('"')
+        .ok_or_else(|| coordinate_error("coordinate edit value is missing the second symbol"))?;
+    if !(degree_position < minute_position && minute_position < second_position) {
+        return Err(coordinate_error(
+            "coordinate edit value symbols are out of order",
+        ));
+    }
+    let direction = value
+        .chars()
+        .next_back()
+        .ok_or_else(|| coordinate_error("coordinate edit value is empty"))?;
+    let (negative_direction, positive_direction) = if latitude { ('S', 'N') } else { ('W', 'E') };
+    if direction != negative_direction && direction != positive_direction {
+        return Err(coordinate_error(
+            "coordinate edit value has an invalid direction",
+        ));
+    }
+
+    let degrees = parse_coordinate_part(&value[..degree_position], "degrees")?;
+    let minutes = parse_coordinate_part(
+        &value[degree_position + '\u{00B0}'.len_utf8()..minute_position],
+        "minutes",
+    )?;
+    let seconds = parse_coordinate_part(&value[minute_position + 1..second_position], "seconds")?;
+    let half = if latitude { 90 } else { 180 };
+    if degrees < 0
+        || degrees > half
+        || (degrees == half && (minutes > 0 || seconds > 0))
+        || !(0..=59).contains(&minutes)
+        || !(0..=59).contains(&seconds)
+    {
+        return Err(coordinate_error(
+            "coordinate edit value exceeds its geographic bounds",
+        ));
+    }
+    let mut decimal = f64::from(degrees) + f64::from(minutes) / 60.0 + f64::from(seconds) / 3600.0;
+    if direction == negative_direction || decimal == 180.0 {
+        decimal = -decimal;
+    }
+    Ok(decimal.to_radians())
+}
+
+fn parse_coordinate_part(value: &str, name: &str) -> Result<i32> {
+    value
+        .parse::<i32>()
+        .map_err(|_| coordinate_error(format!("coordinate edit value contains invalid {name}")))
+}
+
+fn coordinate_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.geographic_coordinate".to_owned(),
+        message: message.into(),
+    }
+}
+
 fn format_numeric_component(
     handler: &str,
     value: &FieldValue<'_>,
@@ -3804,6 +3958,33 @@ mod tests {
         assert_eq!(parse_fixed_hex_bytes("01", 2)?, [1, 0]);
         assert_eq!(parse_fixed_hex_bytes("01 02 03", 2)?, [1, 2]);
         assert!(parse_fixed_hex_bytes("1", 2).is_err());
+        Ok(())
+    }
+
+    /// Matches xEdit's Starfield latitude and longitude DMS conversion.
+    #[test]
+    fn geographic_formatter_matches_xedit_coordinates() -> Result<()> {
+        assert_eq!(
+            format_geographic_coordinate(51.5_f64.to_radians(), true),
+            "51\u{00B0}30'0\"N"
+        );
+        assert_eq!(
+            format_geographic_coordinate((-122.25_f64).to_radians(), false),
+            "122\u{00B0}15'0\"W"
+        );
+        assert_eq!(
+            format_geographic_coordinate(270.0_f64.to_radians(), false),
+            "90\u{00B0}0'0\"W"
+        );
+        assert!(
+            (parse_geographic_coordinate("51\u{00B0}30'0\"N", true)? - 51.5_f64.to_radians()).abs()
+                < f64::EPSILON
+        );
+        assert_eq!(
+            parse_geographic_coordinate("180\u{00B0}0'0\"E", false)?,
+            (-180.0_f64).to_radians()
+        );
+        assert!(parse_geographic_coordinate("91\u{00B0}0'0\"N", true).is_err());
         Ok(())
     }
 
