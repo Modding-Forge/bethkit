@@ -785,6 +785,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectPerkEffectData));
         registry.register(Arc::new(SelectPerkEntryPointData));
         registry.register(Arc::new(SelectPerkEpf3));
+        registry.register(Arc::new(SelectRecordFlag));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -4196,6 +4197,8 @@ struct SelectPerkEntryPointData;
 
 struct SelectPerkEpf3;
 
+struct SelectRecordFlag;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4717,6 +4720,41 @@ impl SemanticHandler for SelectPerkEpf3 {
             .and_then(|bytes| bytes.first())
             .copied();
         Ok(HandlerOutput::Integer(i64::from(parameter_type == Some(8))))
+    }
+}
+
+impl SemanticHandler for SelectRecordFlag {
+    fn id(&self) -> &'static str {
+        "select.record_flag"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let mask = invocation
+            .context
+            .configuration
+            .get("mask")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value != 0)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "record-flag selector requires a nonzero u32 mask".to_owned(),
+            })?;
+        let flags = invocation
+            .source_record
+            .map(|record| record.header.flags)
+            .or_else(|| invocation.source_writable_record.map(|record| record.flags))
+            .unwrap_or_else(RecordFlags::empty);
+        Ok(HandlerOutput::Integer(i64::from(
+            flags.bits() & mask == mask,
+        )))
     }
 }
 
@@ -10236,6 +10274,54 @@ mod tests {
                 HandlerOutput::Integer(selected) if selected == expected
             ));
         }
+        Ok(())
+    }
+
+    /// Selects record-flag variants for both read-only and writable records.
+    #[test]
+    fn record_flag_selector_matches_xedit_mask() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.record_flag",
+            serde_json::json!({ "mask": 64 }),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"INFO"), FormId::NULL, 0, SchemaGame::Fallout4);
+        let mut record = test_record(*b"INFO", &[(*b"ENAM", vec![0; 2])])?;
+        record.header.flags = RecordFlags::from_bits_retain(0x40);
+        let writable = WritableRecord {
+            signature: Signature(*b"INFO"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: Vec::new(),
+        };
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_source_record(
+                &binding,
+                context,
+                Some(&record),
+                HandlerPhase::UnionSelection,
+                None,
+                None,
+            )?,
+            HandlerOutput::Integer(1)
+        ));
+        assert!(matches!(
+            handlers.invoke_with_writable_record(
+                &binding,
+                context,
+                &writable,
+                HandlerPhase::UnionSelection,
+                None,
+                None,
+            )?,
+            HandlerOutput::Integer(0)
+        ));
         Ok(())
     }
 
