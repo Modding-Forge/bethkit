@@ -53,6 +53,7 @@ struct DecodeFrame<'scope, 'record> {
     offset: usize,
     source_subrecord_index: usize,
     sibling_values: &'scope [NamedValue<'record>],
+    array_indices: &'scope [usize],
 }
 
 impl<'context, 'record> RecordView<'context, 'record> {
@@ -247,6 +248,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         offset: 0,
                         source_subrecord_index: index,
                         sibling_values: &[],
+                        array_indices: &[],
                     };
                     let (value, consumed): (FieldValue<'record>, usize) =
                         self.decode_node(payload, data, data, frame, &mut field_values)?;
@@ -589,6 +591,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         offset: frame.offset + cursor,
                         source_subrecord_index: frame.source_subrecord_index,
                         sibling_values: &values,
+                        array_indices: frame.array_indices,
                     };
                     let (value, consumed): (FieldValue<'a>, usize) =
                         self.decode_node(field, payload, remaining, child_frame, field_values)?;
@@ -665,8 +668,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             node,
                             count,
                             payload,
-                            frame.source_subrecord_index,
                             field_values,
+                            frame,
                         )?),
                     ),
                 };
@@ -690,10 +693,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         path: node.path.clone(),
                         message: "array cursor exceeded payload".to_owned(),
                     })?;
+                    let mut child_array_indices = frame.array_indices.to_vec();
+                    child_array_indices.push(values.len());
                     let child_frame = DecodeFrame {
                         offset: frame.offset + cursor,
                         source_subrecord_index: frame.source_subrecord_index,
                         sibling_values: frame.sibling_values,
+                        array_indices: &child_array_indices,
                     };
                     let (value, consumed) =
                         self.decode_node(element, payload, remaining, child_frame, field_values)?;
@@ -725,14 +731,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 Ok((FieldValue::Array(values), cursor))
             }
             SchemaNodeKind::Union { selector, variants } => {
-                let index = self.select_union_index(
-                    node,
-                    selector,
-                    payload,
-                    frame.source_subrecord_index,
-                    field_values,
-                    frame.sibling_values,
-                )?;
+                let index =
+                    self.select_union_index(node, selector, payload, field_values, frame)?;
                 let variant: &SchemaNode =
                     variants.get(index).ok_or_else(|| SemanticError::Decode {
                         path: node.path.clone(),
@@ -827,9 +827,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
         node: &SchemaNode,
         selector: &UnionSelector,
         payload: &[u8],
-        source_subrecord_index: usize,
         field_values: &BTreeMap<String, i64>,
-        sibling_values: &[NamedValue<'_>],
+        frame: DecodeFrame<'_, '_>,
     ) -> Result<usize> {
         let selected = match selector {
             UnionSelector::Expression(expression) => {
@@ -850,12 +849,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 }
             }
             UnionSelector::Callback { callback_id } => {
-                let value_scope = FieldValue::Struct(sibling_values.to_vec()).to_handler_value();
+                let value_scope =
+                    FieldValue::Struct(frame.sibling_values.to_vec()).to_handler_value();
                 self.invoke_integer_callback(
                     node,
                     callback_id,
                     payload,
-                    source_subrecord_index,
+                    frame,
                     HandlerPhase::UnionSelection,
                     Some(&value_scope),
                 )?
@@ -878,8 +878,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
         node: &SchemaNode,
         count: &ArrayCount,
         payload: &[u8],
-        source_subrecord_index: usize,
         field_values: &BTreeMap<String, i64>,
+        frame: DecodeFrame<'_, '_>,
     ) -> Result<usize> {
         let value = match count {
             ArrayCount::Expression { expression } => {
@@ -903,7 +903,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 node,
                 callback_id,
                 payload,
-                source_subrecord_index,
+                frame,
                 HandlerPhase::ArrayCount,
                 None,
             )?,
@@ -931,7 +931,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
         node: &SchemaNode,
         callback_id: &str,
         payload: &[u8],
-        source_subrecord_index: usize,
+        frame: DecodeFrame<'_, '_>,
         phase: HandlerPhase,
         value_scope: Option<&FieldValue<'static>>,
     ) -> Result<i64> {
@@ -959,9 +959,10 @@ impl<'context, 'record> RecordView<'context, 'record> {
             ),
             HandlerInvocationAccess::read_only_subrecord_with_scope(
                 self.record,
-                source_subrecord_index,
+                frame.source_subrecord_index,
                 value_scope,
-            ),
+            )
+            .with_array_indices(frame.array_indices),
             phase,
             Some(&value),
             None,
@@ -1745,6 +1746,31 @@ mod tests {
         }
     }
 
+    struct ArrayIndexCount;
+
+    impl crate::SemanticHandler for ArrayIndexCount {
+        fn id(&self) -> &'static str {
+            "test.array_index_count"
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn invoke(&self, invocation: crate::HandlerInvocation<'_>) -> Result<HandlerOutput> {
+            let index =
+                invocation
+                    .array_indices
+                    .last()
+                    .copied()
+                    .ok_or_else(|| SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: "test array count requires an outer index".to_owned(),
+                    })?;
+            Ok(HandlerOutput::Integer((index + 1) as i64))
+        }
+    }
+
     fn terminated_byte_node() -> SchemaNode {
         SchemaNode {
             id: bethkit_schema::SchemaNodeId(1),
@@ -1830,6 +1856,131 @@ mod tests {
         assert_eq!(
             node_data_size_with_resolver(&node, &[1, 2, 3, 9, 9], false, &mut resolver)?,
             3
+        );
+        Ok(())
+    }
+
+    /// Supplies enclosing array positions to nested dynamic-count callbacks.
+    #[test]
+    fn callback_array_count_receives_outer_array_index(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let inner_path = "TEST/0:Data/payload/element";
+        let inner = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(3),
+            path: inner_path.to_owned(),
+            name: "Group".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Array {
+                element: Box::new(SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(4),
+                    path: format!("{inner_path}/element"),
+                    name: "Value".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Integer {
+                            integer: IntegerType {
+                                width: 1,
+                                signed: false,
+                                byte_order: ByteOrder::LittleEndian,
+                            },
+                        },
+                    },
+                }),
+                count: ArrayCount::Callback {
+                    callback_id: "array.count".to_owned(),
+                },
+            },
+        };
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(1),
+                    path: "TEST/0:Data".to_owned(),
+                    name: "Data".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Subrecord {
+                        signature: SchemaSignature(*b"DATA"),
+                        payload: Box::new(SchemaNode {
+                            id: bethkit_schema::SchemaNodeId(2),
+                            path: "TEST/0:Data/payload".to_owned(),
+                            name: "Groups".to_owned(),
+                            required: true,
+                            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Array {
+                                element: Box::new(inner),
+                                count: ArrayCount::Fixed { count: 3 },
+                            },
+                        }),
+                    },
+                }],
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "test.array_index_count".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root,
+            }],
+            vec![CallbackBinding {
+                path: inner_path.to_owned(),
+                callback_id: "array.count".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "00".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "test.array_index_count".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::Value::Null,
+                    },
+                },
+            }],
+        )?;
+        let mut handlers = SemanticHandlerRegistry::new();
+        handlers.register(Arc::new(ArrayIndexCount));
+        let context = SemanticContext::new_with_handlers(
+            Arc::new(package),
+            crate::DecoderRegistry::builtin(),
+            handlers,
+        )?;
+        let record_bytes = test_record_bytes(b"TEST", b"DATA", &[1, 2, 3, 4, 5, 6]);
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::sse())?;
+
+        let fields = context.view(&record, false)?.fields()?;
+
+        let FieldValue::Array(groups) = &fields[0].value else {
+            return Err("expected outer array".into());
+        };
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| match group {
+                    FieldValue::Array(values) => values.len(),
+                    _ => 0,
+                })
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
         );
         Ok(())
     }

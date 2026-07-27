@@ -300,6 +300,8 @@ pub struct HandlerInvocation<'a> {
     pub source_writable_record: Option<&'a WritableRecord>,
     /// Top-level subrecord being decoded or encoded, when the callback is payload-local.
     pub source_subrecord_index: Option<usize>,
+    /// Zero-based positions of the enclosing schema arrays, from outermost to innermost.
+    pub array_indices: &'a [usize],
 }
 
 /// Exact top-level subrecord source supplied to a payload-local callback.
@@ -688,6 +690,7 @@ pub(crate) struct HandlerInvocationAccess<'a> {
     source: HandlerRecordSource<'a>,
     value_scope: Option<&'a FieldValue<'static>>,
     source_subrecord_index: Option<usize>,
+    array_indices: &'a [usize],
 }
 
 impl<'a> HandlerInvocationAccess<'a> {
@@ -699,6 +702,7 @@ impl<'a> HandlerInvocationAccess<'a> {
             source: HandlerRecordSource::ReadOnly(record),
             value_scope,
             source_subrecord_index: None,
+            array_indices: &[],
         }
     }
 
@@ -711,6 +715,7 @@ impl<'a> HandlerInvocationAccess<'a> {
             source: HandlerRecordSource::ReadOnly(record),
             value_scope,
             source_subrecord_index: Some(index),
+            array_indices: &[],
         }
     }
 
@@ -723,6 +728,7 @@ impl<'a> HandlerInvocationAccess<'a> {
             source: HandlerRecordSource::Writable(record),
             value_scope,
             source_subrecord_index: Some(index),
+            array_indices: &[],
         }
     }
 
@@ -734,7 +740,13 @@ impl<'a> HandlerInvocationAccess<'a> {
             source: HandlerRecordSource::Writable(record),
             value_scope,
             source_subrecord_index: None,
+            array_indices: &[],
         }
+    }
+
+    pub(crate) fn with_array_indices(mut self, array_indices: &'a [usize]) -> Self {
+        self.array_indices = array_indices;
+        self
     }
 }
 
@@ -744,6 +756,7 @@ impl Default for HandlerInvocationAccess<'_> {
             source: HandlerRecordSource::None,
             value_scope: None,
             source_subrecord_index: None,
+            array_indices: &[],
         }
     }
 }
@@ -803,6 +816,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ModelInfoCounts));
         registry.register(Arc::new(ModelInfoArrayCount));
         registry.register(Arc::new(WorldspaceOffsetColumnCount));
+        registry.register(Arc::new(OblivionPathGridConnectionCount));
         registry.register(Arc::new(SelectCtdaParameter { table: None }));
         registry.register(Arc::new(SelectCoedOwner { resolver: None }));
         registry.register(Arc::new(SelectNoteData));
@@ -990,6 +1004,7 @@ impl SemanticHandlerRegistry {
                 source: HandlerRecordSource::None,
                 value_scope,
                 source_subrecord_index: None,
+                array_indices: &[],
             },
             phase,
             value,
@@ -1024,6 +1039,7 @@ impl SemanticHandlerRegistry {
                     .map_or(HandlerRecordSource::None, HandlerRecordSource::ReadOnly),
                 value_scope: None,
                 source_subrecord_index: None,
+                array_indices: &[],
             },
             phase,
             value,
@@ -1061,6 +1077,7 @@ impl SemanticHandlerRegistry {
                 source,
                 value_scope: None,
                 source_subrecord_index: Some(source_subrecord_index),
+                array_indices: &[],
             },
             phase,
             value,
@@ -1090,6 +1107,7 @@ impl SemanticHandlerRegistry {
                 source: HandlerRecordSource::Writable(source_record),
                 value_scope: None,
                 source_subrecord_index: None,
+                array_indices: &[],
             },
             phase,
             value,
@@ -1151,6 +1169,7 @@ impl SemanticHandlerRegistry {
                     HandlerRecordSource::None | HandlerRecordSource::ReadOnly(_) => None,
                 },
                 source_subrecord_index: access.source_subrecord_index,
+                array_indices: access.array_indices,
             })
     }
 }
@@ -4158,6 +4177,55 @@ impl SemanticHandler for WorldspaceOffsetColumnCount {
             return Ok(HandlerOutput::Integer(0));
         };
         let count = max_x.wrapping_sub(min_x).wrapping_add(1) as u32;
+        Ok(HandlerOutput::Integer(i64::from(count)))
+    }
+}
+
+struct OblivionPathGridConnectionCount;
+
+impl SemanticHandler for OblivionPathGridConnectionCount {
+    fn id(&self) -> &'static str {
+        "array.oblivion_path_grid_connections"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ArrayCount {
+            return Ok(HandlerOutput::None);
+        }
+        let point_index =
+            invocation
+                .array_indices
+                .last()
+                .copied()
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "path-grid connection count requires its outer array index".to_owned(),
+                })?;
+        let points = source_subrecord_bytes(&invocation, Signature(*b"PGRP"), self.id())?
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "path-grid record has no preceding PGRP points".to_owned(),
+            })?;
+        let count_offset = point_index
+            .checked_mul(16)
+            .and_then(|offset| offset.checked_add(12))
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "path-grid point offset overflowed".to_owned(),
+            })?;
+        let count = points
+            .get(count_offset)
+            .copied()
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "path-grid point {point_index} has no connection-count byte in PGRP"
+                ),
+            })?;
         Ok(HandlerOutput::Integer(i64::from(count)))
     }
 }
@@ -8109,6 +8177,7 @@ mod tests {
             source_record: None,
             source_writable_record: None,
             source_subrecord_index: None,
+            array_indices: &[],
         })?;
         assert!(matches!(display, HandlerOutput::None));
         Ok(())
@@ -12030,6 +12099,44 @@ mod tests {
         Ok(())
     }
 
+    /// Reads Oblivion PGRR group sizes from each matching PGRP point.
+    #[test]
+    fn oblivion_path_grid_connection_counts_follow_outer_array_index() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "array.count",
+            "array.oblivion_path_grid_connections",
+            serde_json::json!({}),
+        );
+        let mut points = vec![0_u8; 48];
+        points[12] = 2;
+        points[28] = 5;
+        points[44] = 1;
+        let record = test_record(*b"PGRD", &[(*b"PGRP", points), (*b"PGRR", vec![0; 16])])?;
+        let context =
+            HandlerRecordContext::new(Signature(*b"PGRD"), FormId::NULL, 0, SchemaGame::Oblivion);
+        let handlers = SemanticHandlerRegistry::builtin();
+
+        // when / then
+        for (point_index, expected) in [2_i64, 5, 1].into_iter().enumerate() {
+            let indices = [point_index];
+            let output = handlers.invoke_with_records(
+                &binding,
+                context,
+                HandlerInvocationAccess::read_only_subrecord_with_scope(&record, 1, None)
+                    .with_array_indices(&indices),
+                HandlerPhase::ArrayCount,
+                None,
+                None,
+            )?;
+            assert!(matches!(
+                output,
+                HandlerOutput::Integer(actual) if actual == expected
+            ));
+        }
+        Ok(())
+    }
+
     /// Preserves xEdit's exact model-info format validation message.
     #[test]
     fn invalid_model_info_validation_matches_xedit_message() -> Result<()> {
@@ -12065,6 +12172,7 @@ mod tests {
             source_record: None,
             source_writable_record: None,
             source_subrecord_index: None,
+            array_indices: &[],
         })?;
 
         assert!(matches!(
@@ -12122,6 +12230,7 @@ mod tests {
             source_record: None,
             source_writable_record: None,
             source_subrecord_index: None,
+            array_indices: &[],
         })?;
         match output {
             HandlerOutput::Text(value) => Ok(value),
@@ -12169,6 +12278,7 @@ mod tests {
             source_record: None,
             source_writable_record: None,
             source_subrecord_index: None,
+            array_indices: &[],
         })
     }
 
