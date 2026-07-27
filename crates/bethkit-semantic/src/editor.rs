@@ -962,6 +962,47 @@ impl RecordEditor {
                         );
                     }
                 }
+                HandlerMutation::SynchronizePresence {
+                    path,
+                    occurrence,
+                    present,
+                    value,
+                } => {
+                    let existing = self
+                        .assigned_subrecord_index(record, &path, occurrence)
+                        .map(Some)
+                        .or_else(|error| match error {
+                            SemanticError::MissingOccurrence { .. } => Ok(None),
+                            _ => Err(error),
+                        })?;
+                    match (present, existing) {
+                        (true, None) => {
+                            let (signature, encoded) = self.encode_path(&path, &value)?;
+                            let node = self.find_node(&path)?;
+                            let SchemaNodeKind::Subrecord { payload, .. } = &node.kind else {
+                                return Err(SemanticError::Encode {
+                                    path,
+                                    message: "presence path is not a subrecord".to_owned(),
+                                });
+                            };
+                            let index = self.schema_insertion_index(record, node)?;
+                            record.subrecords.insert(
+                                index,
+                                WritableSubRecord {
+                                    signature,
+                                    data: encoded,
+                                },
+                            );
+                            let decoded = self.owned_to_handler_value(payload, &value)?;
+                            decoded_values.insert((path, occurrence), decoded);
+                        }
+                        (false, Some(index)) => {
+                            record.subrecords.remove(index);
+                            remove_decoded_occurrence(decoded_values, &path, occurrence);
+                        }
+                        (true, Some(_)) | (false, None) => {}
+                    }
+                }
             }
         }
         Ok(())
@@ -1204,6 +1245,22 @@ impl RecordEditor {
                         path,
                         value,
                         remove_when_zero,
+                    },
+                    HandlerMutation::SynchronizePresence {
+                        path,
+                        occurrence,
+                        present,
+                        value,
+                    } => HandlerMutation::SynchronizePresence {
+                        occurrence: self.global_occurrence(
+                            &grammar,
+                            repeat_scope,
+                            &path,
+                            occurrence,
+                        )?,
+                        path,
+                        present,
+                        value,
                     },
                     HandlerMutation::Insert { .. } => {
                         return Err(SemanticError::Handler {
@@ -2765,6 +2822,51 @@ mod tests {
                 Signature(*b"VALU")
             ]
         );
+        Ok(())
+    }
+
+    /// Synchronizes optional field presence without duplicates or missing-field errors.
+    #[test]
+    fn editor_synchronizes_optional_presence_idempotently() -> Result<()> {
+        let editor = editor_with_reused_signature()?;
+        let mut record = clone_record(&editor.record);
+        let mut decoded_values = editor.decoded_values.clone();
+        let present = HandlerMutation::SynchronizePresence {
+            path: "TEST/2:Value Count".to_owned(),
+            occurrence: 0,
+            present: true,
+            value: OwnedFieldValue::UInt(0),
+        };
+
+        editor.apply_mutations_with_values(
+            &mut record,
+            &mut decoded_values,
+            vec![present.clone(), present],
+        )?;
+        assert_eq!(
+            record
+                .subrecords
+                .iter()
+                .filter(|subrecord| subrecord.signature == Signature(*b"VCNT"))
+                .count(),
+            1
+        );
+
+        let absent = HandlerMutation::SynchronizePresence {
+            path: "TEST/2:Value Count".to_owned(),
+            occurrence: 0,
+            present: false,
+            value: OwnedFieldValue::UInt(0),
+        };
+        editor.apply_mutations_with_values(
+            &mut record,
+            &mut decoded_values,
+            vec![absent.clone(), absent],
+        )?;
+        assert!(record
+            .subrecords
+            .iter()
+            .all(|subrecord| subrecord.signature != Signature(*b"VCNT")));
         Ok(())
     }
 

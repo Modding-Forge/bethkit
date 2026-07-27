@@ -185,6 +185,17 @@ pub enum HandlerMutation {
         /// Remove an existing optional counter when the length is zero.
         remove_when_zero: bool,
     },
+    /// Make an optional field's presence match a semantic condition.
+    SynchronizePresence {
+        /// Stable path of the optional subrecord.
+        path: String,
+        /// Zero-based field occurrence.
+        occurrence: usize,
+        /// Whether the field must exist after the transaction.
+        present: bool,
+        /// Value used when the field must be inserted.
+        value: OwnedFieldValue,
+    },
 }
 
 /// Typed result returned by a semantic callback handler.
@@ -334,6 +345,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ModelInfoArrayCount));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
+        registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(CtdaTypeFormatter));
         registry.register(Arc::new(IntegerLookupFormatter));
         registry.register(Arc::new(SynchronizeCountAfterSet));
@@ -1583,6 +1595,50 @@ impl SemanticHandler for CtdaTypeAfterSet {
         } else {
             Ok(HandlerOutput::Mutations(mutations))
         }
+    }
+}
+
+struct MessageDisplayTimeAfterSet;
+
+impl SemanticHandler for MessageDisplayTimeAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.message_display_time"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(value) = invocation.value else {
+            return Ok(HandlerOutput::None);
+        };
+        let new_value = callback_integer(value, self.id())?;
+        let old_value = invocation
+            .old_value
+            .map(|value| callback_integer(value, self.id()))
+            .transpose()?
+            .unwrap_or(0);
+        if old_value & 1 == new_value & 1 {
+            return Ok(HandlerOutput::None);
+        }
+        let path = configured_text(
+            self.id(),
+            invocation.context.configuration,
+            "display_time_path",
+        )?
+        .to_owned();
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::SynchronizePresence {
+                path,
+                occurrence: 0,
+                present: new_value & 1 == 0,
+                value: OwnedFieldValue::UInt(0),
+            },
+        ]))
     }
 }
 
@@ -3286,6 +3342,87 @@ mod tests {
                 && run_on == "TEST/0:CTDA/payload/7:Run On"
                 && kind == "TEST/0:CTDA/payload/0:Type"
         ));
+        Ok(())
+    }
+
+    /// Mirrors xEdit's MESG display-time presence when Message Box changes.
+    #[test]
+    fn message_flags_toggle_display_time_on_bit_transition() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "MESG/5:Flags".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-message-display-time".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.message_display_time".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "display_time_path": "MESG/6:Display Time"
+                    }),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let record =
+            HandlerRecordContext::new(Signature(*b"MESG"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let old_message_box = FieldValue::UInt(1);
+        let new_notification = FieldValue::UInt(0);
+
+        let added = handlers.invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&new_notification),
+            Some(&old_message_box),
+        )?;
+        assert!(matches!(
+            added,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::SynchronizePresence {
+                        path,
+                        occurrence: 0,
+                        present: true,
+                        value: OwnedFieldValue::UInt(0),
+                    }] if path == "MESG/6:Display Time"
+                )
+        ));
+
+        let removed = handlers.invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&old_message_box),
+            Some(&new_notification),
+        )?;
+        assert!(matches!(
+            removed,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::SynchronizePresence {
+                        path,
+                        occurrence: 0,
+                        present: false,
+                        value: OwnedFieldValue::UInt(0),
+                    }] if path == "MESG/6:Display Time"
+                )
+        ));
+
+        let unchanged = handlers.invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::UInt(3)),
+            Some(&old_message_box),
+        )?;
+        assert!(matches!(unchanged, HandlerOutput::None));
+
+        let container_replay =
+            handlers.invoke(&binding, record, HandlerPhase::AfterSet, None, None)?;
+        assert!(matches!(container_replay, HandlerOutput::None));
         Ok(())
     }
 
