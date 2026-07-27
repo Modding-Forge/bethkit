@@ -781,6 +781,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectPackageInputValue));
         registry.register(Arc::new(SelectMorrowindGlobalValue));
         registry.register(Arc::new(SelectOblivionMiscActorValue));
+        registry.register(Arc::new(SelectPerkEffectData));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -4128,6 +4129,8 @@ struct SelectMorrowindGlobalValue;
 
 struct SelectOblivionMiscActorValue;
 
+struct SelectPerkEffectData;
+
 impl SemanticHandler for SelectCtdaParameter {
     fn id(&self) -> &'static str {
         "select.ctda_parameter"
@@ -4566,6 +4569,27 @@ impl SemanticHandler for SelectOblivionMiscActorValue {
         Ok(HandlerOutput::Integer(i64::from(
             flags.bits() & 0x0000_00c0 == 0x0000_00c0,
         )))
+    }
+}
+
+impl SemanticHandler for SelectPerkEffectData {
+    fn id(&self) -> &'static str {
+        "select.perk_effect_data"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::UnionSelection {
+            return Ok(HandlerOutput::None);
+        }
+        let effect_type = source_subrecord_bytes(&invocation, Signature(*b"PRKE"), self.id())?
+            .and_then(|bytes| bytes.first())
+            .copied()
+            .unwrap_or_default();
+        Ok(HandlerOutput::Integer(i64::from(effect_type)))
     }
 }
 
@@ -9860,6 +9884,50 @@ mod tests {
                     HandlerSubrecordSource::ReadOnly {
                         record: &record,
                         index: 0,
+                    },
+                    HandlerPhase::UnionSelection,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Integer(selected) if selected == expected
+            ));
+        }
+        Ok(())
+    }
+
+    /// Selects each repeated PERK effect layout from its nearest preceding PRKE type.
+    #[test]
+    fn perk_effect_data_selector_uses_repeat_local_type() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "union.select",
+            "select.perk_effect_data",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"PERK"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let record = test_record(
+            *b"PERK",
+            &[
+                (*b"PRKE", vec![0, 1]),
+                (*b"DATA", vec![0; 8]),
+                (*b"PRKE", vec![2, 3]),
+                (*b"DATA", vec![0; 8]),
+                (*b"PRKE", vec![1, 4]),
+                (*b"DATA", vec![0; 8]),
+            ],
+        )?;
+
+        // when / then
+        for (source_index, expected) in [(1_usize, 0_i64), (3, 2), (5, 1)] {
+            assert!(matches!(
+                handlers.invoke_with_subrecord(
+                    &binding,
+                    context,
+                    HandlerSubrecordSource::ReadOnly {
+                        record: &record,
+                        index: source_index,
                     },
                     HandlerPhase::UnionSelection,
                     None,
