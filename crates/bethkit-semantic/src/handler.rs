@@ -275,6 +275,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
+        registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(InvalidModelInfoValidation));
         registry.register(Arc::new(WwiseGuidFormatter { resolver: None }));
         registry
@@ -771,6 +772,50 @@ impl SemanticHandler for ModelInfoCounts {
     }
 }
 
+struct CtdaRunOnAfterSet;
+
+impl SemanticHandler for CtdaRunOnAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.ctda_run_on"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "CTDA Run On update requires a new integer value".to_owned(),
+        })?;
+        let new_value = callback_integer(value, self.id())?;
+        let old_value = invocation
+            .old_value
+            .map(|value| callback_integer(value, self.id()))
+            .transpose()?;
+        if old_value == Some(new_value) || new_value == 2 {
+            return Ok(HandlerOutput::None);
+        }
+        let parent = invocation
+            .context
+            .binding
+            .path
+            .strip_suffix("/7:Run On")
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "CTDA Run On binding has an unexpected schema path".to_owned(),
+            })?;
+        Ok(HandlerOutput::Mutations(vec![HandlerMutation::Set {
+            path: format!("{parent}/8:Reference"),
+            occurrence: 0,
+            value: OwnedFieldValue::UInt(0),
+        }]))
+    }
+}
+
 struct InvalidModelInfoValidation;
 
 impl SemanticHandler for InvalidModelInfoValidation {
@@ -832,6 +877,18 @@ fn array_length(value: &FieldValue<'_>, name: &str) -> Result<usize> {
         return Err(model_info_error(format!("{name} is not an array")));
     };
     Ok(values.len())
+}
+
+fn callback_integer(value: &FieldValue<'_>, handler: &str) -> Result<i128> {
+    match value {
+        FieldValue::Int(value) => Ok(i128::from(*value)),
+        FieldValue::UInt(value) | FieldValue::Flags { value, .. } => Ok(i128::from(*value)),
+        FieldValue::Enumeration { value, .. } => Ok(i128::from(*value)),
+        _ => Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "callback requires an integer value".to_owned(),
+        }),
+    }
 }
 
 fn set_model_info_count(
@@ -1291,6 +1348,72 @@ mod tests {
             ));
         };
         assert!(matches!(&fields[0].value, FieldValue::Array(values) if values.is_empty()));
+        Ok(())
+    }
+
+    /// Mirrors xEdit's CTDA Run On reset without touching unchanged values.
+    #[test]
+    fn ctda_run_on_clears_reference_only_after_a_relevant_change() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/0:CTDA/payload/7:Run On".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-ctda-run-on".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.ctda_run_on".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let old_reference = FieldValue::Enumeration {
+            value: 2,
+            name: Some("Reference".to_owned()),
+        };
+        let new_subject = FieldValue::Int(0);
+
+        let changed = handlers.invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&new_subject),
+            Some(&old_reference),
+        )?;
+        assert!(matches!(
+            changed,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::Set {
+                        path,
+                        occurrence: 0,
+                        value: OwnedFieldValue::UInt(0),
+                    }] if path == "TEST/0:CTDA/payload/8:Reference"
+                )
+        ));
+
+        let unchanged = handlers.invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&new_subject),
+            Some(&new_subject),
+        )?;
+        assert!(matches!(unchanged, HandlerOutput::None));
+
+        let new_reference = FieldValue::UInt(2);
+        let reference = handlers.invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&new_reference),
+            Some(&new_subject),
+        )?;
+        assert!(matches!(reference, HandlerOutput::None));
         Ok(())
     }
 

@@ -425,6 +425,7 @@ impl RecordEditor {
             ) => self.apply_after_set_tree(payload, value, old_value)?,
             _ => (value.clone(), Vec::new()),
         };
+        self.apply_local_set_mutations(node, &mut updated, &mut mutations)?;
         let handler_value = self.owned_to_handler_value(node, &updated)?;
         if old_value.is_some_and(|old| handler_values_equal(&handler_value, old)) {
             return Ok((updated, mutations));
@@ -464,7 +465,113 @@ impl RecordEditor {
                 }
             }
         }
+        self.apply_local_set_mutations(node, &mut updated, &mut mutations)?;
         Ok((updated, mutations))
+    }
+
+    fn apply_local_set_mutations(
+        &self,
+        node: &SchemaNode,
+        value: &mut OwnedFieldValue,
+        mutations: &mut Vec<HandlerMutation>,
+    ) -> Result<()> {
+        let mut remaining = Vec::with_capacity(mutations.len());
+        for mutation in mutations.drain(..) {
+            match mutation {
+                HandlerMutation::Set {
+                    path,
+                    occurrence,
+                    value: replacement,
+                } => {
+                    if path != node.path
+                        && !path
+                            .strip_prefix(&node.path)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                    {
+                        remaining.push(HandlerMutation::Set {
+                            path,
+                            occurrence,
+                            value: replacement,
+                        });
+                        continue;
+                    }
+                    let mut occurrence = occurrence;
+                    let mut replacement = Some(replacement);
+                    if !self.set_nested_value(
+                        node,
+                        value,
+                        &path,
+                        &mut occurrence,
+                        &mut replacement,
+                    )? {
+                        return Err(SemanticError::MissingOccurrence { path, occurrence });
+                    }
+                }
+                mutation => remaining.push(mutation),
+            }
+        }
+        *mutations = remaining;
+        Ok(())
+    }
+
+    fn set_nested_value(
+        &self,
+        node: &SchemaNode,
+        value: &mut OwnedFieldValue,
+        target_path: &str,
+        occurrence: &mut usize,
+        replacement: &mut Option<OwnedFieldValue>,
+    ) -> Result<bool> {
+        if node.path == target_path {
+            if *occurrence == 0 {
+                *value = replacement.take().ok_or_else(|| SemanticError::Handler {
+                    handler: "def.after_set".to_owned(),
+                    message: "local mutation has no replacement value".to_owned(),
+                })?;
+                return Ok(true);
+            }
+            *occurrence = occurrence.saturating_sub(1);
+            return Ok(false);
+        }
+        match (&node.kind, &mut *value) {
+            (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
+                for (field, value) in fields.iter().zip(values) {
+                    if self.set_nested_value(field, value, target_path, occurrence, replacement)? {
+                        return Ok(true);
+                    }
+                }
+            }
+            (SchemaNodeKind::Array { element, .. }, OwnedFieldValue::Array(values)) => {
+                for value in values {
+                    if self.set_nested_value(
+                        element,
+                        value,
+                        target_path,
+                        occurrence,
+                        replacement,
+                    )? {
+                        return Ok(true);
+                    }
+                }
+            }
+            (SchemaNodeKind::Union { selector, variants }, current) => {
+                let variant = self.select_union_variant(node, selector, variants, current)?;
+                if self.set_nested_value(variant, current, target_path, occurrence, replacement)? {
+                    return Ok(true);
+                }
+            }
+            (
+                SchemaNodeKind::Subrecord { payload, .. }
+                | SchemaNodeKind::Compressed { child: payload, .. },
+                current,
+            ) => {
+                if self.set_nested_value(payload, current, target_path, occurrence, replacement)? {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
     }
 
     fn select_union_variant<'a>(
