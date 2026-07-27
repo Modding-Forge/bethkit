@@ -451,6 +451,11 @@ pub enum ArrayCount {
         /// Expression producing a non-negative count.
         expression: Expression,
     },
+    /// Element count is selected by a semantic callback.
+    Callback {
+        /// Callback role resolved through the package's handler bindings.
+        callback_id: String,
+    },
     /// Elements consume the remaining payload.
     Remainder,
 }

@@ -322,24 +322,34 @@ impl SchemaPackage {
             limits,
         )?;
         for record in &self.records {
-            validate_union_selector_bindings(&record.root, &self.callback_bindings)?;
+            validate_semantic_selector_bindings(&record.root, &self.callback_bindings)?;
         }
         Ok(())
     }
 }
 
-fn validate_union_selector_bindings(node: &SchemaNode, bindings: &[CallbackBinding]) -> Result<()> {
-    if let SchemaNodeKind::Union {
-        selector: crate::UnionSelector::Callback { callback_id },
-        ..
-    } = &node.kind
-    {
+fn validate_semantic_selector_bindings(
+    node: &SchemaNode,
+    bindings: &[CallbackBinding],
+) -> Result<()> {
+    let callback_id = match &node.kind {
+        SchemaNodeKind::Union {
+            selector: crate::UnionSelector::Callback { callback_id },
+            ..
+        }
+        | SchemaNodeKind::Array {
+            count: crate::ArrayCount::Callback { callback_id },
+            ..
+        } => Some(callback_id),
+        _ => None,
+    };
+    if let Some(callback_id) = callback_id {
         let binding = bindings
             .iter()
             .find(|binding| binding.path == node.path && binding.callback_id == *callback_id)
             .ok_or_else(|| {
                 SchemaError::InvalidGraph(format!(
-                    "union callback {callback_id} at {} has no binding",
+                    "schema callback {callback_id} at {} has no binding",
                     node.path
                 ))
             })?;
@@ -348,7 +358,7 @@ fn validate_union_selector_bindings(node: &SchemaNode, bindings: &[CallbackBindi
             CallbackImplementation::BuiltIn { .. } | CallbackImplementation::CustomHandler { .. }
         ) {
             return Err(SchemaError::InvalidGraph(format!(
-                "union callback {callback_id} at {} is not a semantic handler",
+                "schema callback {callback_id} at {} is not a semantic handler",
                 node.path
             )));
         }
@@ -368,7 +378,7 @@ fn validate_union_selector_bindings(node: &SchemaNode, bindings: &[CallbackBindi
         | SchemaNodeKind::Reference { .. } => Vec::new(),
     };
     for child in children {
-        validate_union_selector_bindings(child, bindings)?;
+        validate_semantic_selector_bindings(child, bindings)?;
     }
     Ok(())
 }
@@ -703,6 +713,19 @@ fn validate_node(
             )));
         }
     }
+    if let SchemaNodeKind::Array {
+        count: crate::ArrayCount::Callback { callback_id },
+        ..
+    } = &node.kind
+    {
+        validate_string(callback_id, limits)?;
+        if callback_id.trim().is_empty() {
+            return Err(SchemaError::InvalidGraph(format!(
+                "array count callback identifier must not be empty at {}",
+                node.path
+            )));
+        }
+    }
 
     let children: Vec<&SchemaNode> = match &node.kind {
         SchemaNodeKind::Sequence { children } => children.iter().collect(),
@@ -759,7 +782,22 @@ mod tests {
             },
         };
 
-        assert!(validate_union_selector_bindings(&node, &[]).is_err());
+        assert!(validate_semantic_selector_bindings(&node, &[]).is_err());
+        let array = SchemaNode {
+            id: SchemaNodeId(1),
+            path: "TEST/items".to_owned(),
+            name: "Items".to_owned(),
+            required: true,
+            conflict_priority: crate::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Array {
+                element: Box::new(node),
+                count: crate::ArrayCount::Callback {
+                    callback_id: "array.count".to_owned(),
+                },
+            },
+        };
+        assert!(validate_semantic_selector_bindings(&array, &[]).is_err());
         Ok(())
     }
 

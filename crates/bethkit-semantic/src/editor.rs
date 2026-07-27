@@ -330,6 +330,7 @@ impl RecordEditor {
                     }
                     ArrayCount::Fixed { .. }
                     | ArrayCount::Expression { .. }
+                    | ArrayCount::Callback { .. }
                     | ArrayCount::Remainder => {}
                 }
                 for value in values {

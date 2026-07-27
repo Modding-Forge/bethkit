@@ -495,7 +495,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             path: field.path.clone(),
                             message: "struct cursor exceeded payload".to_owned(),
                         })?;
-                    let consumed: usize = node_data_size(field, remaining, self.localized)?;
+                    let consumed: usize = self.node_data_size(field, payload, remaining)?;
                     let field_data: &'a [u8] =
                         remaining
                             .get(..consumed)
@@ -584,28 +584,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         )
                     }
                     ArrayCount::Remainder => (0, None),
-                    ArrayCount::Expression { expression } => {
-                        let context = EvalContext {
-                            payload,
-                            form_version: self.record.header.form_version,
-                            record_signature: self.record.header.signature.into(),
-                        };
-                        let value: i64 = match expression.evaluate(&context, 1024)? {
-                            EvalValue::Int(value) if value >= 0 => value,
-                            _ => {
-                                return Err(SemanticError::Decode {
-                                    path: node.path.clone(),
-                                    message: "array count expression is not non-negative"
-                                        .to_owned(),
-                                });
-                            }
-                        };
-                        let count: usize =
-                            usize::try_from(value).map_err(|_| SemanticError::Decode {
-                                path: node.path.clone(),
-                                message: "array count exceeds platform size".to_owned(),
-                            })?;
-                        (0, Some(count))
+                    ArrayCount::Expression { .. } | ArrayCount::Callback { .. } => {
+                        (0, Some(self.resolve_array_count(node, count, payload)?))
                     }
                 };
                 if prefix_size > current.len() {
@@ -628,7 +608,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         path: node.path.clone(),
                         message: "array cursor exceeded payload".to_owned(),
                     })?;
-                    let consumed = node_data_size(element, remaining, self.localized)?;
+                    let consumed = self.node_data_size(element, payload, remaining)?;
                     if consumed == 0 {
                         return Err(SemanticError::Decode {
                             path: element.path.clone(),
@@ -759,42 +739,12 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     }
                 }
             }
-            UnionSelector::Callback { callback_id } => {
-                let binding = self
-                    .context
-                    .registry()
-                    .package()
-                    .callback_bindings()
-                    .iter()
-                    .find(|binding| {
-                        binding.path == node.path && binding.callback_id == *callback_id
-                    })
-                    .ok_or_else(|| SemanticError::Handler {
-                        handler: callback_id.clone(),
-                        message: format!("union node {} has no callback binding", node.path),
-                    })?;
-                let value = FieldValue::Bytes(Cow::Owned(payload.to_vec()));
-                match self.context.handlers().invoke(
-                    binding,
-                    HandlerRecordContext::new(
-                        self.record.header.signature,
-                        self.record.header.form_id,
-                        self.record.header.form_version,
-                        self.context.registry().package().manifest().game,
-                    ),
-                    HandlerPhase::UnionSelection,
-                    Some(&value),
-                    None,
-                )? {
-                    HandlerOutput::Integer(value) => value,
-                    _ => {
-                        return Err(SemanticError::Handler {
-                            handler: callback_id.clone(),
-                            message: "union selector returned a non-integer result".to_owned(),
-                        });
-                    }
-                }
-            }
+            UnionSelector::Callback { callback_id } => self.invoke_integer_callback(
+                node,
+                callback_id,
+                payload,
+                HandlerPhase::UnionSelection,
+            )?,
         };
         if selected < 0 {
             return Err(SemanticError::Decode {
@@ -805,6 +755,98 @@ impl<'context, 'record> RecordView<'context, 'record> {
         usize::try_from(selected).map_err(|_| SemanticError::Decode {
             path: node.path.clone(),
             message: "union selector exceeds platform size".to_owned(),
+        })
+    }
+
+    fn resolve_array_count(
+        &self,
+        node: &SchemaNode,
+        count: &ArrayCount,
+        payload: &[u8],
+    ) -> Result<usize> {
+        let value = match count {
+            ArrayCount::Expression { expression } => {
+                let context = EvalContext {
+                    payload,
+                    form_version: self.record.header.form_version,
+                    record_signature: self.record.header.signature.into(),
+                };
+                match expression.evaluate(&context, 1024)? {
+                    EvalValue::Int(value) => value,
+                    _ => {
+                        return Err(SemanticError::Decode {
+                            path: node.path.clone(),
+                            message: "array count expression did not return an integer".to_owned(),
+                        });
+                    }
+                }
+            }
+            ArrayCount::Callback { callback_id } => {
+                self.invoke_integer_callback(node, callback_id, payload, HandlerPhase::ArrayCount)?
+            }
+            _ => {
+                return Err(SemanticError::Decode {
+                    path: node.path.clone(),
+                    message: "array count is not dynamically selected".to_owned(),
+                });
+            }
+        };
+        if value < 0 {
+            return Err(SemanticError::Decode {
+                path: node.path.clone(),
+                message: "array count returned a negative value".to_owned(),
+            });
+        }
+        usize::try_from(value).map_err(|_| SemanticError::Decode {
+            path: node.path.clone(),
+            message: "array count exceeds platform size".to_owned(),
+        })
+    }
+
+    fn invoke_integer_callback(
+        &self,
+        node: &SchemaNode,
+        callback_id: &str,
+        payload: &[u8],
+        phase: HandlerPhase,
+    ) -> Result<i64> {
+        let binding = self
+            .context
+            .registry()
+            .package()
+            .callback_bindings()
+            .iter()
+            .find(|binding| {
+                binding.path == node.path && binding.callback_id.as_str() == callback_id
+            })
+            .ok_or_else(|| SemanticError::Handler {
+                handler: callback_id.to_owned(),
+                message: format!("schema node {} has no callback binding", node.path),
+            })?;
+        let value = FieldValue::Bytes(Cow::Owned(payload.to_vec()));
+        match self.context.handlers().invoke(
+            binding,
+            HandlerRecordContext::new(
+                self.record.header.signature,
+                self.record.header.form_id,
+                self.record.header.form_version,
+                self.context.registry().package().manifest().game,
+            ),
+            phase,
+            Some(&value),
+            None,
+        )? {
+            HandlerOutput::Integer(value) => Ok(value),
+            _ => Err(SemanticError::Handler {
+                handler: callback_id.to_owned(),
+                message: "callback returned a non-integer result".to_owned(),
+            }),
+        }
+    }
+
+    fn node_data_size(&self, node: &SchemaNode, payload: &[u8], data: &[u8]) -> Result<usize> {
+        node_data_size_with_resolver(node, data, self.localized, &mut |node, count| {
+            self.resolve_array_count(node, count, payload)
         })
     }
 
@@ -1264,7 +1306,25 @@ fn read_string_length(width: u8, data: &[u8], path: &str) -> Result<usize> {
     })
 }
 
+#[cfg(test)]
 fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usize> {
+    node_data_size_with_resolver(node, data, localized, &mut |node, _| {
+        Err(SemanticError::Decode {
+            path: node.path.clone(),
+            message: "dynamic array count requires a semantic context".to_owned(),
+        })
+    })
+}
+
+fn node_data_size_with_resolver<F>(
+    node: &SchemaNode,
+    data: &[u8],
+    localized: bool,
+    resolve_count: &mut F,
+) -> Result<usize>
+where
+    F: FnMut(&SchemaNode, &ArrayCount) -> Result<usize>,
+{
     match &node.kind {
         SchemaNodeKind::Primitive {
             primitive: PrimitiveType::String { string },
@@ -1312,7 +1372,8 @@ fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usi
                     path: field.path.clone(),
                     message: "struct size cursor exceeded payload".to_owned(),
                 })?;
-                let consumed = node_data_size(field, remaining, localized)?;
+                let consumed =
+                    node_data_size_with_resolver(field, remaining, localized, resolve_count)?;
                 cursor = cursor
                     .checked_add(consumed)
                     .ok_or_else(|| SemanticError::Decode {
@@ -1367,7 +1428,9 @@ fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usi
                     )
                 }
                 ArrayCount::Remainder => (0, None),
-                ArrayCount::Expression { .. } => return Ok(data.len()),
+                ArrayCount::Expression { .. } | ArrayCount::Callback { .. } => {
+                    (0, Some(resolve_count(node, count)?))
+                }
             };
             let mut decoded = 0_usize;
             while count.is_none_or(|count| decoded < count) {
@@ -1378,7 +1441,8 @@ fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usi
                     path: node.path.clone(),
                     message: "array size cursor exceeded payload".to_owned(),
                 })?;
-                let consumed = node_data_size(element, remaining, localized)?;
+                let consumed =
+                    node_data_size_with_resolver(element, remaining, localized, resolve_count)?;
                 if consumed == 0 {
                     return Err(SemanticError::Decode {
                         path: element.path.clone(),
@@ -1405,7 +1469,7 @@ fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usi
             Ok(cursor)
         }
         SchemaNodeKind::Terminated { terminator, child } => {
-            let child_size = node_data_size(child, data, localized)?;
+            let child_size = node_data_size_with_resolver(child, data, localized, resolve_count)?;
             let actual = data.get(child_size).ok_or_else(|| SemanticError::Decode {
                 path: node.path.clone(),
                 message: "terminated value is missing its terminator".to_owned(),
@@ -1457,6 +1521,7 @@ fn fixed_node_size(node: &SchemaNode) -> Option<usize> {
                 | ArrayCount::PackedPrefixed { .. }
                 | ArrayCount::SquaredPrefixed { .. }
                 | ArrayCount::Expression { .. }
+                | ArrayCount::Callback { .. }
                 | ArrayCount::Remainder => None,
             }
         }
@@ -1546,6 +1611,53 @@ mod tests {
 
         assert_eq!(node_data_size(&node, &[7, 0xff, 9], false)?, 2);
         assert!(node_data_size(&node, &[7, 0, 9], false).is_err());
+        Ok(())
+    }
+
+    /// Uses a semantic array count without consuming bytes from the following field.
+    #[test]
+    fn callback_array_size_uses_resolved_element_count(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let node = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(3),
+            path: "TEST/items".to_owned(),
+            name: "Items".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Array {
+                element: Box::new(SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(4),
+                    path: "TEST/items/element".to_owned(),
+                    name: "Element".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Integer {
+                            integer: IntegerType {
+                                width: 1,
+                                signed: false,
+                                byte_order: ByteOrder::LittleEndian,
+                            },
+                        },
+                    },
+                }),
+                count: ArrayCount::Callback {
+                    callback_id: "array.count".to_owned(),
+                },
+            },
+        };
+        let mut resolver = |resolved: &SchemaNode, count: &ArrayCount| {
+            assert_eq!(resolved.path, "TEST/items");
+            assert!(matches!(count, ArrayCount::Callback { .. }));
+            Ok(3)
+        };
+
+        assert_eq!(
+            node_data_size_with_resolver(&node, &[1, 2, 3, 9, 9], false, &mut resolver)?,
+            3
+        );
         Ok(())
     }
 

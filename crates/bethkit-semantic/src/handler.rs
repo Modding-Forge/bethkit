@@ -41,6 +41,8 @@ pub enum HandlerPhase {
     ParseEditValue,
     /// Dynamic selection of a schema union variant.
     UnionSelection,
+    /// Dynamic selection of a schema array's element count.
+    ArrayCount,
     /// Validation equivalent to xEdit's `ctCheck`.
     Validation,
     /// Transactional callback after a value is changed.
