@@ -355,6 +355,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(IntegerRecordIndexKey));
         registry.register(Arc::new(StarfieldAvmdIndexKey));
         registry.register(Arc::new(FormatRgb));
+        registry.register(Arc::new(FormatVec3));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
@@ -1055,6 +1056,25 @@ fn configured_byte(handler: &str, configuration: &serde_json::Value, key: &str) 
         })
 }
 
+fn configured_optional_digits(
+    handler: &str,
+    configuration: &serde_json::Value,
+    key: &str,
+) -> Result<Option<usize>> {
+    match configuration.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|digits| usize::try_from(digits).ok())
+            .filter(|digits| *digits <= 19)
+            .map(Some)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!("callback configuration `{key}` must be between 0 and 19"),
+            }),
+    }
+}
+
 fn morrowind_grid_cell(handler: &str, record: &Record) -> Result<Option<RecordGridCell>> {
     let (signature, x_offset, y_offset) = if record.header.signature == Signature(*b"CELL") {
         (Signature::DATA, 4, 8)
@@ -1175,11 +1195,49 @@ impl SemanticHandler for FormatRgb {
                 handler: self.id().to_owned(),
                 message: "RGB formatter requires a boolean include_alpha setting".to_owned(),
             })?;
+        let digits =
+            configured_optional_digits(self.id(), invocation.context.configuration, "digits")?;
         let value = invocation.value.ok_or_else(|| SemanticError::Handler {
             handler: self.id().to_owned(),
             message: "RGB formatter requires a value".to_owned(),
         })?;
-        Ok(HandlerOutput::Text(format_rgb(value, include_alpha)?))
+        Ok(HandlerOutput::Text(format_rgb(
+            value,
+            include_alpha,
+            digits,
+        )?))
+    }
+}
+
+struct FormatVec3;
+
+impl SemanticHandler for FormatVec3 {
+    fn id(&self) -> &'static str {
+        "format.vec3"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if !matches!(
+            invocation.phase,
+            HandlerPhase::Display
+                | HandlerPhase::Summary
+                | HandlerPhase::SortKey
+                | HandlerPhase::EditValue
+                | HandlerPhase::NativeValue
+        ) {
+            return Ok(HandlerOutput::None);
+        }
+        let digits =
+            configured_optional_digits(self.id(), invocation.context.configuration, "digits")?;
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "Vec3 formatter requires a value".to_owned(),
+        })?;
+        Ok(HandlerOutput::Text(format_vec3(value, digits)?))
     }
 }
 
@@ -2830,7 +2888,11 @@ const fn model_info_conflict_priority(game: SchemaGame, form_version: u16) -> Co
     }
 }
 
-fn format_rgb(value: &FieldValue<'_>, include_alpha: bool) -> Result<String> {
+fn format_rgb(
+    value: &FieldValue<'_>,
+    include_alpha: bool,
+    digits: Option<usize>,
+) -> Result<String> {
     let FieldValue::Struct(components) = value else {
         return Err(SemanticError::Handler {
             handler: "format.rgb".to_owned(),
@@ -2849,7 +2911,7 @@ fn format_rgb(value: &FieldValue<'_>, include_alpha: bool) -> Result<String> {
     }
     let formatted: Vec<String> = components[..required_components]
         .iter()
-        .map(|component| format_color_component(&component.value))
+        .map(|component| format_numeric_component("format.rgb", &component.value, digits))
         .collect::<Result<_>>()?;
     Ok(format!(
         "{}({})",
@@ -2858,14 +2920,67 @@ fn format_rgb(value: &FieldValue<'_>, include_alpha: bool) -> Result<String> {
     ))
 }
 
-fn format_color_component(value: &FieldValue<'_>) -> Result<String> {
+fn format_vec3(value: &FieldValue<'_>, digits: Option<usize>) -> Result<String> {
+    let FieldValue::Struct(components) = value else {
+        return Err(SemanticError::Handler {
+            handler: "format.vec3".to_owned(),
+            message: "Vec3 formatter requires a struct value".to_owned(),
+        });
+    };
+    if components.len() < 3 {
+        return Err(SemanticError::Handler {
+            handler: "format.vec3".to_owned(),
+            message: format!(
+                "Vec3 formatter requires three components, got {}",
+                components.len()
+            ),
+        });
+    }
+    let formatted = components[..3]
+        .iter()
+        .map(|component| format_numeric_component("format.vec3", &component.value, digits))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(format!("({})", formatted.join(", ")))
+}
+
+fn format_numeric_component(
+    handler: &str,
+    value: &FieldValue<'_>,
+    digits: Option<usize>,
+) -> Result<String> {
     match value {
         FieldValue::Int(value) => Ok(value.to_string()),
         FieldValue::UInt(value) => Ok(value.to_string()),
-        FieldValue::Float(value) if value.is_finite() => Ok(value.to_string()),
+        FieldValue::Float(value) if value.is_nan() => Ok("NaN".to_owned()),
+        FieldValue::Float(value) if value.is_infinite() && value.is_sign_positive() => {
+            Ok("+Inf".to_owned())
+        }
+        FieldValue::Float(value) if value.is_infinite() => Ok("-Inf".to_owned()),
+        FieldValue::Float(value) => {
+            let Some(digits) = digits else {
+                return Ok(if *value == 0.0 {
+                    "0".to_owned()
+                } else {
+                    value.to_string()
+                });
+            };
+            let mut formatted = format!("{value:.digits$}");
+            if formatted.contains('.') {
+                while formatted.ends_with('0') {
+                    formatted.pop();
+                }
+                if formatted.ends_with('.') {
+                    formatted.pop();
+                }
+            }
+            if formatted == "-0" {
+                formatted = "0".to_owned();
+            }
+            Ok(formatted)
+        }
         _ => Err(SemanticError::Handler {
-            handler: "format.rgb".to_owned(),
-            message: "RGB components must be finite numeric values".to_owned(),
+            handler: handler.to_owned(),
+            message: "formatter components must be numeric values".to_owned(),
         }),
     }
 }
@@ -3426,8 +3541,28 @@ mod tests {
             component("Alpha", FieldValue::Float(78.0)),
         ]);
 
-        assert_eq!(format_rgb(&rgb, false)?, "RGB(12, 34, 56)");
-        assert_eq!(format_rgb(&rgba, true)?, "RGBA(12, 34, 56, 78)");
+        assert_eq!(format_rgb(&rgb, false, None)?, "RGB(12, 34, 56)");
+        assert_eq!(format_rgb(&rgba, true, Some(0))?, "RGBA(12, 34, 56, 78)");
+        Ok(())
+    }
+
+    /// Matches xEdit's fixed precision and special-value summaries for Vec3 fields.
+    #[test]
+    fn vec3_formatter_matches_xedit_component_summaries() -> Result<()> {
+        let component = |name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: format!("TEST/{name}"),
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 4 },
+            value,
+        };
+        let vector = FieldValue::Struct(vec![
+            component("X", FieldValue::Float(1.234_567_8)),
+            component("Y", FieldValue::Float(-0.0)),
+            component("Z", FieldValue::Float(f64::INFINITY)),
+        ]);
+
+        assert_eq!(format_vec3(&vector, Some(6))?, "(1.234568, 0, +Inf)");
         Ok(())
     }
 
