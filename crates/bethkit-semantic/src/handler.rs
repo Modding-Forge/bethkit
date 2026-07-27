@@ -356,6 +356,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(StarfieldAvmdIndexKey));
         registry.register(Arc::new(FormatRgb));
         registry.register(Arc::new(FormatVec3));
+        registry.register(Arc::new(FormatAngleDegrees));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
@@ -1244,6 +1245,49 @@ impl SemanticHandler for FormatVec3 {
             message: "Vec3 formatter requires a value".to_owned(),
         })?;
         Ok(HandlerOutput::Text(format_vec3(value, digits)?))
+    }
+}
+
+struct FormatAngleDegrees;
+
+impl SemanticHandler for FormatAngleDegrees {
+    fn id(&self) -> &'static str {
+        "format.angle_degrees"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "angle edit parsing requires text".to_owned(),
+                });
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Float(
+                parse_angle_degrees(value)?,
+            )));
+        }
+        let Some(FieldValue::Float(value)) = invocation.value else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "angle formatter requires a floating-point value".to_owned(),
+            });
+        };
+        if matches!(
+            invocation.phase,
+            HandlerPhase::Display | HandlerPhase::Summary
+        ) {
+            return Ok(HandlerOutput::Text(format_angle_degrees(*value)));
+        }
+        Ok(HandlerOutput::Text(format_numeric_component(
+            self.id(),
+            invocation.value.expect("float value checked above"),
+            None,
+        )?))
     }
 }
 
@@ -2958,6 +3002,42 @@ fn format_vec3(value: &FieldValue<'_>, digits: Option<usize>) -> Result<String> 
     Ok(format!("({})", formatted.join(", ")))
 }
 
+fn format_angle_degrees(value: f64) -> String {
+    let mut degrees = value.to_degrees();
+    while degrees > 360.0 {
+        degrees -= 360.0;
+    }
+    while degrees < -360.0 {
+        degrees += 360.0;
+    }
+    let formatted = if degrees == 0.0 {
+        "0".to_owned()
+    } else {
+        degrees.to_string()
+    };
+    format!("{formatted}\u{00B0}")
+}
+
+fn parse_angle_degrees(value: &str) -> Result<f64> {
+    let Some(degrees) = value.strip_suffix('\u{00B0}') else {
+        return Err(SemanticError::Handler {
+            handler: "format.angle_degrees".to_owned(),
+            message: "angle edit value must end with a degree symbol".to_owned(),
+        });
+    };
+    let degrees = degrees.parse::<f64>().map_err(|_| SemanticError::Handler {
+        handler: "format.angle_degrees".to_owned(),
+        message: "angle edit value must contain a number".to_owned(),
+    })?;
+    if !(-360.0..=360.0).contains(&degrees) {
+        return Err(SemanticError::Handler {
+            handler: "format.angle_degrees".to_owned(),
+            message: "angle edit value must be between -360 and 360 degrees".to_owned(),
+        });
+    }
+    Ok(degrees.to_radians())
+}
+
 fn format_numeric_component(
     handler: &str,
     value: &FieldValue<'_>,
@@ -3585,6 +3665,27 @@ mod tests {
         ]);
 
         assert_eq!(format_vec3(&vector, Some(6))?, "(1.234568, 0, +Inf)");
+        Ok(())
+    }
+
+    /// Matches xEdit's Starfield angle display, wrapping, and editable-value conversion.
+    #[test]
+    fn angle_formatter_matches_xedit_degrees() -> Result<()> {
+        assert_eq!(format_angle_degrees(std::f64::consts::PI), "180\u{00B0}");
+        assert_eq!(
+            format_angle_degrees(std::f64::consts::TAU * 2.5),
+            "180\u{00B0}"
+        );
+        assert_eq!(
+            format_angle_degrees(-std::f64::consts::TAU * 2.5),
+            "-180\u{00B0}"
+        );
+        assert!(
+            (parse_angle_degrees("-90\u{00B0}")? + std::f64::consts::FRAC_PI_2).abs()
+                < f64::EPSILON
+        );
+        assert!(parse_angle_degrees("361\u{00B0}").is_err());
+        assert!(parse_angle_degrees("90").is_err());
         Ok(())
     }
 
