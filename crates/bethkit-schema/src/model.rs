@@ -362,6 +362,8 @@ pub enum PrimitiveType {
         /// Integer representation.
         integer: IntegerType,
     },
+    /// Unsigned xEdit integer using a two-bit encoded byte width.
+    PackedUnsigned,
     /// IEEE floating-point value.
     Float {
         /// Float width in bytes.
@@ -423,6 +425,16 @@ pub enum ArrayCount {
     /// Element count is stored immediately before the array elements.
     Prefixed {
         /// Integer layout used by the count prefix.
+        integer: IntegerType,
+    },
+    /// Element count uses xEdit's packed 6/14/30-bit unsigned encoding.
+    PackedPrefixed {
+        /// Square the decoded value for a square matrix.
+        square: bool,
+    },
+    /// Element count is the square of a fixed-width prefix.
+    SquaredPrefixed {
+        /// Unsigned integer layout used by the matrix dimension.
         integer: IntegerType,
     },
     /// Count is read from an expression.

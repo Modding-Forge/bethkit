@@ -623,7 +623,8 @@ fn validate_node(
         }
     }
     if let SchemaNodeKind::Array {
-        count: crate::ArrayCount::Prefixed { integer },
+        count:
+            crate::ArrayCount::Prefixed { integer } | crate::ArrayCount::SquaredPrefixed { integer },
         ..
     } = &node.kind
     {

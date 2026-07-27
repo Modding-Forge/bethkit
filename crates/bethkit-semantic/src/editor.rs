@@ -304,6 +304,20 @@ impl RecordEditor {
                             .map_err(|_| encode_error(&node.path, "array count exceeds u64"))?;
                         output.extend(encode_integer(*integer, count, &node.path)?);
                     }
+                    ArrayCount::PackedPrefixed { square } => {
+                        let count = array_prefix_count(values.len(), *square, &node.path)?;
+                        output.extend(encode_packed_unsigned(count, &node.path)?);
+                    }
+                    ArrayCount::SquaredPrefixed { integer } => {
+                        if integer.signed {
+                            return Err(encode_error(
+                                &node.path,
+                                "array count prefix must be unsigned",
+                            ));
+                        }
+                        let count = array_prefix_count(values.len(), true, &node.path)?;
+                        output.extend(encode_integer(*integer, count, &node.path)?);
+                    }
                     ArrayCount::Fixed { .. }
                     | ArrayCount::Expression { .. }
                     | ArrayCount::Remainder => {}
@@ -960,6 +974,9 @@ fn encode_primitive(
         (PrimitiveType::Integer { integer }, OwnedFieldValue::UInt(value)) => {
             encode_integer(*integer, *value, path)
         }
+        (PrimitiveType::PackedUnsigned, OwnedFieldValue::UInt(value)) => {
+            encode_packed_unsigned(*value, path)
+        }
         (
             PrimitiveType::Float {
                 width: 4,
@@ -1122,6 +1139,48 @@ fn encode_integer(integer: IntegerType, value: u64, path: &str) -> Result<Vec<u8
     }
 }
 
+fn encode_packed_unsigned(value: u64, path: &str) -> Result<Vec<u8>> {
+    let (width, selector) = if value <= 0x3f {
+        (1, 0_u64)
+    } else if value <= 0x3fff {
+        (2, 1_u64)
+    } else if value <= 0x3fff_ffff {
+        (4, 2_u64)
+    } else {
+        return Err(encode_error(path, "packed integer exceeds 30 bits"));
+    };
+    let raw = value
+        .checked_shl(2)
+        .and_then(|value| value.checked_add(selector))
+        .ok_or_else(|| encode_error(path, "packed integer overflowed"))?;
+    Ok(raw.to_le_bytes()[..width].to_vec())
+}
+
+fn array_prefix_count(length: usize, square: bool, path: &str) -> Result<u64> {
+    let length =
+        u64::try_from(length).map_err(|_| encode_error(path, "array count exceeds u64"))?;
+    if !square {
+        return Ok(length);
+    }
+    let mut low = 0_u64;
+    let mut high = length.min(u64::from(u32::MAX)).saturating_add(1);
+    while low + 1 < high {
+        let middle = low + (high - low) / 2;
+        if middle <= length / middle.max(1) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    if low.checked_mul(low) != Some(length) {
+        return Err(encode_error(
+            path,
+            "matrix array length is not a perfect square",
+        ));
+    }
+    Ok(low)
+}
+
 fn encode_error(path: &str, message: impl Into<String>) -> SemanticError {
     SemanticError::Encode {
         path: path.to_owned(),
@@ -1152,6 +1211,21 @@ mod tests {
                 allowed_values: Vec::new(),
             },
         }
+    }
+
+    /// Emits canonical xEdit packed integer widths and rejects overflow.
+    #[test]
+    fn packed_unsigned_encoding_uses_minimum_width() -> Result<()> {
+        assert_eq!(encode_packed_unsigned(63, "TEST")?, vec![0xfc]);
+        assert_eq!(encode_packed_unsigned(64, "TEST")?, vec![0x01, 0x01]);
+        assert_eq!(
+            encode_packed_unsigned(16_384, "TEST")?,
+            vec![0x02, 0x00, 0x01, 0x00]
+        );
+        assert!(encode_packed_unsigned(0x4000_0000, "TEST").is_err());
+        assert_eq!(array_prefix_count(16, true, "TEST")?, 4);
+        assert!(array_prefix_count(15, true, "TEST").is_err());
+        Ok(())
     }
 
     fn editor_with_reused_signature() -> Result<RecordEditor> {

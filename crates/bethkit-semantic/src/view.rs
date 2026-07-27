@@ -548,6 +548,16 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             })?;
                         (integer.width as usize, Some(count))
                     }
+                    ArrayCount::PackedPrefixed { square } => {
+                        let (count, width) = decode_packed_unsigned(current, &node.path)?;
+                        let count = array_count_value(count, *square, &node.path)?;
+                        (width, Some(count))
+                    }
+                    ArrayCount::SquaredPrefixed { integer } => {
+                        let count = decode_unsigned_integer(*integer, current, &node.path)?;
+                        let count = array_count_value(count, true, &node.path)?;
+                        (integer.width as usize, Some(count))
+                    }
                     ArrayCount::Remainder => (0, None),
                     ArrayCount::Expression { expression } => {
                         let context = EvalContext {
@@ -775,6 +785,13 @@ fn decode_primitive<'a>(
 ) -> Result<FieldValue<'a>> {
     match primitive {
         PrimitiveType::Integer { integer } => decode_integer(*integer, data, path),
+        PrimitiveType::PackedUnsigned => {
+            let (value, width) = decode_packed_unsigned(data, path)?;
+            if width != data.len() {
+                return Err(decode_length_error(path, width, data.len()));
+            }
+            Ok(FieldValue::UInt(value))
+        }
         PrimitiveType::Float {
             width, byte_order, ..
         } => decode_float(*width, *byte_order, data, path),
@@ -862,6 +879,49 @@ fn decode_unsigned_integer(integer: IntegerType, data: &[u8], path: &str) -> Res
         .get(..width)
         .ok_or_else(|| decode_length_error(path, width, data.len()))?;
     integer_as_u64(integer, prefix, path)
+}
+
+fn decode_packed_unsigned(data: &[u8], path: &str) -> Result<(u64, usize)> {
+    let first = *data
+        .first()
+        .ok_or_else(|| decode_length_error(path, 1, 0))?;
+    let width = match first & 0x03 {
+        0 | 3 => 1,
+        1 => 2,
+        2 => 4,
+        _ => unreachable!("two-bit packed width selector"),
+    };
+    let bytes = data
+        .get(..width)
+        .ok_or_else(|| decode_length_error(path, width, data.len()))?;
+    let raw = match width {
+        1 => u64::from(bytes[0]),
+        2 => u64::from(u16::from_le_bytes(
+            bytes.try_into().expect("packed u16 length was checked"),
+        )),
+        4 => u64::from(u32::from_le_bytes(
+            bytes.try_into().expect("packed u32 length was checked"),
+        )),
+        _ => unreachable!("packed integer width was validated"),
+    };
+    Ok((raw >> 2, width))
+}
+
+fn array_count_value(value: u64, square: bool, path: &str) -> Result<usize> {
+    let value = if square {
+        value
+            .checked_mul(value)
+            .ok_or_else(|| SemanticError::Decode {
+                path: path.to_owned(),
+                message: "matrix element count overflowed".to_owned(),
+            })?
+    } else {
+        value
+    };
+    usize::try_from(value).map_err(|_| SemanticError::Decode {
+        path: path.to_owned(),
+        message: "array count exceeds platform size".to_owned(),
+    })
 }
 
 fn integer_as_u64(integer: IntegerType, data: &[u8], path: &str) -> Result<u64> {
@@ -1189,6 +1249,17 @@ fn node_data_size(node: &SchemaNode, data: &[u8], localized: bool) -> Result<usi
                             })?;
                     (integer.width as usize, Some(count))
                 }
+                ArrayCount::PackedPrefixed { square } => {
+                    let (count, width) = decode_packed_unsigned(data, &node.path)?;
+                    (width, Some(array_count_value(count, *square, &node.path)?))
+                }
+                ArrayCount::SquaredPrefixed { integer } => {
+                    let count = decode_unsigned_integer(*integer, data, &node.path)?;
+                    (
+                        integer.width as usize,
+                        Some(array_count_value(count, true, &node.path)?),
+                    )
+                }
                 ArrayCount::Remainder => (0, None),
                 ArrayCount::Expression { .. } => return Ok(data.len()),
             };
@@ -1235,6 +1306,7 @@ fn fixed_node_size(node: &SchemaNode) -> Option<usize> {
     match &node.kind {
         SchemaNodeKind::Primitive { primitive } => match primitive {
             PrimitiveType::Integer { integer } => Some(integer.width as usize),
+            PrimitiveType::PackedUnsigned => None,
             PrimitiveType::Float { width, .. } => Some(*width as usize),
             PrimitiveType::String { string } if !is_localized_string(string) => {
                 string.fixed_length.and_then(|value| {
@@ -1257,6 +1329,8 @@ fn fixed_node_size(node: &SchemaNode) -> Option<usize> {
             match count {
                 ArrayCount::Fixed { count } => size.checked_mul(*count as usize),
                 ArrayCount::Prefixed { .. }
+                | ArrayCount::PackedPrefixed { .. }
+                | ArrayCount::SquaredPrefixed { .. }
                 | ArrayCount::Expression { .. }
                 | ArrayCount::Remainder => None,
             }
@@ -1275,6 +1349,56 @@ fn decode_length_error(path: &str, expected: usize, actual: usize) -> SemanticEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Matches xEdit's packed 6/14/30-bit unsigned counter decoding.
+    #[test]
+    fn packed_unsigned_decodes_all_widths() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(decode_packed_unsigned(&[0xfc], "TEST")?, (63, 1));
+        assert_eq!(decode_packed_unsigned(&[0x01, 0x01], "TEST")?, (64, 2));
+        assert_eq!(
+            decode_packed_unsigned(&[0x02, 0x00, 0x01, 0x00], "TEST")?,
+            (16_384, 4)
+        );
+        assert!(decode_packed_unsigned(&[0x01], "TEST").is_err());
+        Ok(())
+    }
+
+    /// Squares packed matrix dimensions before walking their elements.
+    #[test]
+    fn packed_matrix_prefix_counts_squared_elements(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let node = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(1),
+            path: "TEST/matrix".to_owned(),
+            name: "Matrix".to_owned(),
+            required: false,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Array {
+                element: Box::new(SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(2),
+                    path: "TEST/matrix/element".to_owned(),
+                    name: "Element".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Integer {
+                            integer: IntegerType {
+                                width: 1,
+                                signed: false,
+                                byte_order: ByteOrder::LittleEndian,
+                            },
+                        },
+                    },
+                }),
+                count: ArrayCount::PackedPrefixed { square: true },
+            },
+        };
+
+        assert_eq!(node_data_size(&node, &[8, 1, 2, 3, 4, 99], false)?, 5);
+        Ok(())
+    }
 
     /// Counts a prefixed array without consuming bytes from the following struct field.
     #[test]
