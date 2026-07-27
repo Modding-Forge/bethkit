@@ -363,6 +363,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
+        registry.register(Arc::new(HeadPartsAfterSet));
         registry.register(Arc::new(MagicEffectSecondAvWeightAfterSet));
         registry.register(Arc::new(MagicEffectArchetypeAfterSet));
         registry.register(Arc::new(RefreshSiblingUnions));
@@ -1023,17 +1024,21 @@ fn configured_signature(
     key: &str,
 ) -> Result<Signature> {
     let value = configured_text(handler, configuration, key)?;
+    parse_configured_signature(handler, key, value)
+}
+
+fn parse_configured_signature(handler: &str, key: &str, value: &str) -> Result<Signature> {
     let bytes: [u8; 4] = value
         .as_bytes()
         .try_into()
         .map_err(|_| SemanticError::Handler {
             handler: handler.to_owned(),
-            message: format!("record metadata configuration `{key}` must be four ASCII bytes"),
+            message: format!("callback configuration `{key}` must be four ASCII bytes"),
         })?;
     if !bytes.iter().all(u8::is_ascii) {
         return Err(SemanticError::Handler {
             handler: handler.to_owned(),
-            message: format!("record metadata configuration `{key}` must be four ASCII bytes"),
+            message: format!("callback configuration `{key}` must be four ASCII bytes"),
         });
     }
     Ok(Signature(bytes))
@@ -1716,6 +1721,155 @@ fn has_ordered_list_suffix(value: &str) -> bool {
     value
         .get(value.len().saturating_sub("OrderedList".len())..)
         .is_some_and(|suffix| suffix.eq_ignore_ascii_case("OrderedList"))
+}
+
+struct HeadPartsAfterSet;
+
+impl SemanticHandler for HeadPartsAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.head_parts"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "head-parts callback requires a writable repeat scope".to_owned(),
+            })?;
+        let configuration = invocation.context.configuration;
+        let index_signature = configured_signature(self.id(), configuration, "index_signature")?;
+        let ear_value = u32::from(configured_byte(self.id(), configuration, "ear_value")?);
+        let Some(index) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == index_signature)
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let index_bytes: [u8; 4] = index
+            .data
+            .get(..4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "head-parts index payload is shorter than four bytes".to_owned(),
+            })?;
+        if u32::from_le_bytes(index_bytes) != ear_value {
+            return Ok(HandlerOutput::None);
+        }
+
+        let model_fields = configured_subrecord_paths(self.id(), configuration, "model_fields")?;
+        let icon_signatures =
+            configured_signature_list(self.id(), configuration, "icon_signatures")?;
+        let model_present = model_fields.iter().any(|(_, signature)| {
+            record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == *signature)
+        });
+        let icon_present = icon_signatures.iter().any(|signature| {
+            record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == *signature)
+        });
+        if !model_present || !icon_present {
+            return Ok(HandlerOutput::None);
+        }
+
+        let mutations = model_fields
+            .into_iter()
+            .rev()
+            .filter(|(_, signature)| {
+                record
+                    .subrecords
+                    .iter()
+                    .any(|subrecord| subrecord.signature == *signature)
+            })
+            .map(|(path, _)| HandlerMutation::Remove {
+                path,
+                occurrence: 0,
+            })
+            .collect();
+        Ok(HandlerOutput::Mutations(mutations))
+    }
+}
+
+fn configured_subrecord_paths(
+    handler: &str,
+    configuration: &serde_json::Value,
+    key: &str,
+) -> Result<Vec<(String, Signature)>> {
+    let values = configuration
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("callback configuration `{key}` must be an array"),
+        })?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let path = value
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: handler.to_owned(),
+                    message: format!("callback configuration `{key}[{index}].path` is missing"),
+                })?;
+            let signature = value
+                .get("signature")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: handler.to_owned(),
+                    message: format!(
+                        "callback configuration `{key}[{index}].signature` is missing"
+                    ),
+                })?;
+            Ok((
+                path.to_owned(),
+                parse_configured_signature(
+                    handler,
+                    &format!("{key}[{index}].signature"),
+                    signature,
+                )?,
+            ))
+        })
+        .collect()
+}
+
+fn configured_signature_list(
+    handler: &str,
+    configuration: &serde_json::Value,
+    key: &str,
+) -> Result<Vec<Signature>> {
+    let values = configuration
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("callback configuration `{key}` must be an array"),
+        })?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let signature = value.as_str().ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!("callback configuration `{key}[{index}]` must be a string"),
+            })?;
+            parse_configured_signature(handler, &format!("{key}[{index}]"), signature)
+        })
+        .collect()
 }
 
 struct MagicEffectSecondAvWeightAfterSet;
@@ -3775,6 +3929,94 @@ mod tests {
         let container_replay =
             handlers.invoke(&binding, record, HandlerPhase::AfterSet, None, None)?;
         assert!(matches!(container_replay, HandlerOutput::None));
+        Ok(())
+    }
+
+    /// Removes an existing FO3 head-part model only for an ears part that has an icon.
+    #[test]
+    fn head_parts_remove_ears_model_with_icon(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let binding = CallbackBinding {
+            path: "RACE/14:Head Data/1:Parts/repeat/0:Part".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-head-parts".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.head_parts".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "index_signature": "INDX",
+                        "ear_value": 1,
+                        "model_fields": [
+                            {
+                                "path": "RACE/14:Head Data/1:Parts/repeat/0:Part/1:Model/0:File",
+                                "signature": "MODL"
+                            },
+                            {
+                                "path": "RACE/14:Head Data/1:Parts/repeat/0:Part/1:Model/1:Bounds",
+                                "signature": "MODB"
+                            },
+                            {
+                                "path": "RACE/14:Head Data/1:Parts/repeat/0:Part/1:Model/2:Textures",
+                                "signature": "MODT"
+                            }
+                        ],
+                        "icon_signatures": ["ICON", "MICO"]
+                    }),
+                },
+            },
+        };
+        let record = WritableRecord {
+            signature: Signature(*b"RACE"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"INDX"),
+                    data: 1_u32.to_le_bytes().to_vec(),
+                },
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"MODL"),
+                    data: b"ears.nif\0".to_vec(),
+                },
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"MODT"),
+                    data: Vec::new(),
+                },
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"ICON"),
+                    data: b"ears.dds\0".to_vec(),
+                },
+            ],
+        };
+        let output = SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"RACE"), FormId::NULL, 0, SchemaGame::Fallout3),
+            &record,
+            HandlerPhase::AfterSet,
+            None,
+            None,
+        )?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [
+                        HandlerMutation::Remove {
+                            path: textures,
+                            occurrence: 0,
+                        },
+                        HandlerMutation::Remove {
+                            path: model,
+                            occurrence: 0,
+                        }
+                    ] if textures.ends_with("/2:Textures") && model.ends_with("/0:File")
+                )
+        ));
         Ok(())
     }
 
