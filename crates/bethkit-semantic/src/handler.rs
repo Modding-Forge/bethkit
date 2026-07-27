@@ -286,6 +286,47 @@ pub trait ResourceHashResolver: Send + Sync {
     fn resolve_folder_hash(&self, hash: u64) -> Option<String>;
 }
 
+/// xEdit-compatible presentation metadata for a resolved FormID link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormLinkInfo {
+    value: String,
+    short_name: String,
+}
+
+impl FormLinkInfo {
+    /// Creates presentation metadata for one resolved main record.
+    pub fn new(value: impl Into<String>, short_name: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            short_name: short_name.into(),
+        }
+    }
+
+    /// Returns the normal xEdit value text for the linked record.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Returns the compact xEdit main-record name.
+    pub fn short_name(&self) -> &str {
+        &self.short_name
+    }
+}
+
+/// Resolves file-local FormIDs to xEdit-compatible record presentation metadata.
+///
+/// Implementations are normally scoped to one plugin and its load order so the
+/// file-local FormID can be interpreted against the correct master list.
+pub trait FormLinkResolver: Send + Sync {
+    /// Resolves one FormID and its schema-declared target signatures.
+    fn resolve_form_id(
+        &self,
+        source: HandlerRecordContext,
+        form_id: FormId,
+        targets: &[Signature],
+    ) -> Option<FormLinkInfo>;
+}
+
 /// Metadata associated with one Wwise object GUID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WwiseGuidInfo {
@@ -360,6 +401,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatGeographicCoordinate));
         registry.register(Arc::new(FormatTimestampDate));
         registry.register(Arc::new(FormatScriptSummary));
+        registry.register(Arc::new(FormatItemSummary { resolver: None }));
+        registry.register(Arc::new(FormatFactionRelation { resolver: None }));
         registry.register(Arc::new(RemovableWhenZero));
         registry.register(Arc::new(ResourceHashFormatter { resolver: None }));
         registry.register(Arc::new(ModelInfoCounts));
@@ -392,6 +435,16 @@ impl SemanticHandlerRegistry {
     /// This replaces the built-in formatter while preserving its stable handler ID.
     pub fn set_resource_hash_resolver(&mut self, resolver: Arc<dyn ResourceHashResolver>) {
         self.register(Arc::new(ResourceHashFormatter {
+            resolver: Some(resolver),
+        }));
+    }
+
+    /// Installs the load-order resolver used by FormID-dependent summaries.
+    pub fn set_form_link_resolver(&mut self, resolver: Arc<dyn FormLinkResolver>) {
+        self.register(Arc::new(FormatItemSummary {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatFactionRelation {
             resolver: Some(resolver),
         }));
     }
@@ -1384,6 +1437,72 @@ impl SemanticHandler for FormatScriptSummary {
             message: "script summary requires a value".to_owned(),
         })?;
         Ok(HandlerOutput::Text(format_script_summary(value)?))
+    }
+}
+
+struct FormatItemSummary {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for FormatItemSummary {
+    fn id(&self) -> &'static str {
+        "format.item_summary"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::Summary {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "item summary requires a value".to_owned(),
+        })?;
+        let Some(text) = format_item_summary(
+            value,
+            self.resolver.as_deref(),
+            handler_record_context(&invocation.context),
+        )?
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct FormatFactionRelation {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for FormatFactionRelation {
+    fn id(&self) -> &'static str {
+        "format.faction_relation"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::Summary {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "faction relation summary requires a value".to_owned(),
+        })?;
+        let Some(text) = format_faction_relation(
+            value,
+            self.resolver.as_deref(),
+            handler_record_context(&invocation.context),
+        )?
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Text(text))
     }
 }
 
@@ -3362,6 +3481,123 @@ fn find_script_source<'a>(value: &'a FieldValue<'a>) -> Option<&'a str> {
     }
 }
 
+fn handler_record_context(context: &HandlerContext<'_>) -> HandlerRecordContext {
+    HandlerRecordContext::new(
+        context.record_signature,
+        context.form_id,
+        context.form_version,
+        context.game,
+    )
+}
+
+fn format_item_summary(
+    value: &FieldValue<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+    source: HandlerRecordContext,
+) -> Result<Option<String>> {
+    let mut fields = struct_fields(value, "format.item_summary")?;
+    if let Some(crate::NamedValue {
+        value: FieldValue::Struct(nested),
+        ..
+    }) = fields.first()
+    {
+        fields = nested;
+    }
+    let [item, count, ..] = fields else {
+        return Err(summary_error(
+            "format.item_summary",
+            "item summary requires item and count fields",
+        ));
+    };
+    let FieldValue::FormId { value, targets } = &item.value else {
+        return Err(summary_error(
+            "format.item_summary",
+            "item summary requires a FormID as its first field",
+        ));
+    };
+    let count = callback_integer(&count.value, "format.item_summary")?;
+    let Some(link) =
+        resolver.and_then(|resolver| resolver.resolve_form_id(source, *value, targets))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(format!("{count}x {}", link.short_name())))
+}
+
+fn format_faction_relation(
+    value: &FieldValue<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+    source: HandlerRecordContext,
+) -> Result<Option<String>> {
+    let fields = struct_fields(value, "format.faction_relation")?;
+    let [faction, modifier, remaining @ ..] = fields else {
+        return Err(summary_error(
+            "format.faction_relation",
+            "faction relation requires faction and modifier fields",
+        ));
+    };
+    let FieldValue::FormId { value, targets } = &faction.value else {
+        return Err(summary_error(
+            "format.faction_relation",
+            "faction relation requires a FormID as its first field",
+        ));
+    };
+    let Some(link) =
+        resolver.and_then(|resolver| resolver.resolve_form_id(source, *value, targets))
+    else {
+        return Ok(None);
+    };
+    if source.game == SchemaGame::Oblivion {
+        let modifier = callback_integer(&modifier.value, "format.faction_relation")?;
+        let prefix = if modifier >= 0 { "+" } else { "" };
+        return Ok(Some(format!("{prefix}{modifier} {}", link.value())));
+    }
+    let reaction = remaining.first().ok_or_else(|| {
+        summary_error(
+            "format.faction_relation",
+            "modern faction relation requires a combat reaction field",
+        )
+    })?;
+    Ok(Some(format!(
+        "{} {}",
+        summary_scalar(&reaction.value, "format.faction_relation")?,
+        link.value()
+    )))
+}
+
+fn struct_fields<'a>(
+    value: &'a FieldValue<'a>,
+    handler: &str,
+) -> Result<&'a [crate::NamedValue<'a>]> {
+    match value {
+        FieldValue::Struct(fields) => Ok(fields),
+        _ => Err(summary_error(handler, "summary requires a struct value")),
+    }
+}
+
+fn summary_scalar(value: &FieldValue<'_>, handler: &str) -> Result<String> {
+    match value {
+        FieldValue::Int(value) => Ok(value.to_string()),
+        FieldValue::UInt(value) => Ok(value.to_string()),
+        FieldValue::Enumeration {
+            name: Some(name), ..
+        } => Ok(name.clone()),
+        FieldValue::Enumeration { value, name: None } => Ok(value.to_string()),
+        FieldValue::String(value) => Ok(value.to_string()),
+        _ => Err(summary_error(
+            handler,
+            "summary field is not a scalar display value",
+        )),
+    }
+}
+
+fn summary_error(handler: &str, message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: handler.to_owned(),
+        message: message.into(),
+    }
+}
+
 fn format_numeric_component(
     handler: &str,
     value: &FieldValue<'_>,
@@ -3452,6 +3688,21 @@ mod tests {
 
         fn resolve_folder_hash(&self, hash: u64) -> Option<String> {
             (hash == 0x5678).then(|| "textures/example".to_owned())
+        }
+    }
+
+    struct TestFormLinkResolver;
+
+    impl FormLinkResolver for TestFormLinkResolver {
+        fn resolve_form_id(
+            &self,
+            _source: HandlerRecordContext,
+            form_id: FormId,
+            _targets: &[Signature],
+        ) -> Option<FormLinkInfo> {
+            (form_id == FormId(0x1234)).then(|| {
+                FormLinkInfo::new("[00001234] Example Faction", "Example Item [MISC:00001234]")
+            })
         }
     }
 
@@ -4121,6 +4372,89 @@ mod tests {
         );
         assert_eq!(format_script_summary(&compiled_only)?, "<Source missing>");
         assert_eq!(format_script_summary(&complete)?, "<2 lines>");
+        Ok(())
+    }
+
+    /// Matches xEdit's count and short-name item summary.
+    #[test]
+    fn item_summary_uses_resolved_short_name() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: format!("TEST/{name}"),
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let value = FieldValue::Struct(vec![field(
+            "CNTO",
+            FieldValue::Struct(vec![
+                field(
+                    "Item",
+                    FieldValue::FormId {
+                        value: FormId(0x1234),
+                        targets: vec![Signature(*b"MISC")],
+                    },
+                ),
+                field("Count", FieldValue::Int(3)),
+            ]),
+        )]);
+        let source =
+            HandlerRecordContext::new(Signature(*b"CONT"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+
+        assert_eq!(
+            format_item_summary(&value, Some(&TestFormLinkResolver), source)?,
+            Some("3x Example Item [MISC:00001234]".to_owned())
+        );
+        Ok(())
+    }
+
+    /// Matches xEdit's Oblivion and modern faction-relation summaries.
+    #[test]
+    fn faction_relation_summary_uses_resolved_value(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: format!("TEST/{name}"),
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let faction = field(
+            "Faction",
+            FieldValue::FormId {
+                value: FormId(0x1234),
+                targets: vec![Signature(*b"FACT")],
+            },
+        );
+        let value = FieldValue::Struct(vec![
+            faction.clone(),
+            field("Modifier", FieldValue::Int(2)),
+            field(
+                "Group Combat Reaction",
+                FieldValue::Enumeration {
+                    value: 2,
+                    name: Some("Enemy".to_owned()),
+                },
+            ),
+        ]);
+        let modern =
+            HandlerRecordContext::new(Signature(*b"FACT"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let oblivion =
+            HandlerRecordContext::new(Signature(*b"FACT"), FormId::NULL, 0, SchemaGame::Oblivion);
+
+        assert_eq!(
+            format_faction_relation(&value, Some(&TestFormLinkResolver), modern)?,
+            Some("Enemy [00001234] Example Faction".to_owned())
+        );
+        assert_eq!(
+            format_faction_relation(
+                &FieldValue::Struct(vec![faction, field("Modifier", FieldValue::Int(2))]),
+                Some(&TestFormLinkResolver),
+                oblivion,
+            )?,
+            Some("+2 [00001234] Example Faction".to_owned())
+        );
         Ok(())
     }
 
