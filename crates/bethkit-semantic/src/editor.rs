@@ -922,7 +922,6 @@ impl RecordEditor {
 
     fn apply_record_after_set(&self, record: &mut WritableRecord) -> Result<()> {
         let record_path = record.signature.to_string();
-        let mut mutations = Vec::new();
         for binding in self
             .registry
             .package()
@@ -950,7 +949,7 @@ impl RecordEditor {
             )? {
                 HandlerOutput::None => {}
                 HandlerOutput::Mutations(handler_mutations) => {
-                    mutations.extend(handler_mutations);
+                    self.apply_mutations(record, handler_mutations)?;
                 }
                 _ => {
                     return Err(SemanticError::Handler {
@@ -961,7 +960,7 @@ impl RecordEditor {
                 }
             }
         }
-        self.apply_mutations(record, mutations)
+        Ok(())
     }
 
     fn apply_record_metadata_mutations(&mut self, mutations: Vec<HandlerMutation>) -> Result<()> {
