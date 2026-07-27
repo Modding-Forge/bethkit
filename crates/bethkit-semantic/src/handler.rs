@@ -1731,6 +1731,15 @@ impl SemanticHandler for SynchronizeCountAfterSet {
             handler: self.id().to_owned(),
             message: "array length exceeds u64".to_owned(),
         })?;
+        if invocation
+            .context
+            .configuration
+            .get("counter_missing")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            return Ok(HandlerOutput::None);
+        }
         let path =
             configuration_string(invocation.context.configuration, "counter_path", self.id())?
                 .to_owned();
@@ -3290,6 +3299,42 @@ mod tests {
                     }] if path == "TEST/0:Value Count"
                 )
         ));
+        Ok(())
+    }
+
+    /// Matches xEdit's audited no-op when a shared counter callback is
+    /// attached in a game whose schema does not define that counter.
+    #[test]
+    fn synchronize_count_handler_ignores_audited_missing_counter(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let binding = CallbackBinding {
+            path: "TEST/0:Values".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-missing-counter".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.sync_count".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "counter_missing": true
+                    }),
+                },
+            },
+        };
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Starfield);
+        let values = FieldValue::Array(vec![FieldValue::UInt(1)]);
+
+        let output = SemanticHandlerRegistry::builtin().invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&values),
+            None,
+        )?;
+
+        assert!(matches!(output, HandlerOutput::None));
         Ok(())
     }
 
