@@ -1178,6 +1178,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SkyrimCellAfterLoad));
         registry.register(Arc::new(FalloutCellAfterLoad));
         registry.register(Arc::new(LegacyEffectShaderAfterLoad));
+        registry.register(Arc::new(LegacyFactionAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -8723,6 +8724,79 @@ impl SemanticHandler for LegacyEffectShaderAfterLoad {
                 path: data_path.to_owned(),
                 occurrence: 0,
                 data: replacement,
+            },
+        ]))
+    }
+}
+
+struct LegacyFactionAfterLoad;
+
+impl SemanticHandler for LegacyFactionAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.legacy_faction_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"FACT")
+            || invocation.context.binding.path != "FACT"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout3 | SchemaGame::FalloutNv
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "faction migration requires a guarded FACT root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "faction migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "faction migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let unused_path = invocation
+            .context
+            .configuration
+            .get("unused_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "faction migration requires unused_path".to_owned(),
+            })?;
+        if unused_path != "FACT/4:Unused" {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "faction migration requires the materialized CNAM path".to_owned(),
+            });
+        }
+        if !record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"CNAM"))
+        {
+            return Ok(HandlerOutput::None);
+        }
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::RemoveFirstBySignature {
+                path: "FACT".to_owned(),
+                signature: Signature(*b"CNAM"),
             },
         ]))
     }
@@ -17128,6 +17202,89 @@ mod tests {
         ));
         assert!(matches!(
             invoke(SchemaGame::Fallout3, &record(vec![0_u8; 128]))?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Removes only the first legacy FACT CNAM from valid non-deleted records.
+    #[test]
+    fn legacy_faction_after_load_matches_xedit_unused_cleanup() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "FACT".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-legacy-fact-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.legacy_faction_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "unused_path": "FACT/4:Unused",
+                    }),
+                },
+            },
+        };
+        let record = |flags, subrecords: Vec<([u8; 4], Vec<u8>)>| WritableRecord {
+            signature: Signature(*b"FACT"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: subrecords
+                .into_iter()
+                .map(|(signature, data)| bethkit_core::WritableSubRecord {
+                    signature: Signature(signature),
+                    data,
+                })
+                .collect(),
+        };
+        let invoke = |game, record: &WritableRecord| {
+            SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(Signature(*b"FACT"), FormId(0x1111), 0, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+
+        assert!(matches!(
+            invoke(
+                SchemaGame::Fallout3,
+                &record(
+                    RecordFlags::empty(),
+                    vec![
+                        (*b"EDID", b"Faction\0".to_vec()),
+                        (*b"CNAM", 1.0_f32.to_le_bytes().to_vec()),
+                        (*b"CNAM", 2.0_f32.to_le_bytes().to_vec()),
+                    ],
+                ),
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::RemoveFirstBySignature {
+                    path: "FACT".to_owned(),
+                    signature: Signature(*b"CNAM"),
+                }]
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::FalloutNv,
+                &record(
+                    RecordFlags::empty(),
+                    vec![(*b"EDID", b"Faction\0".to_vec())],
+                ),
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::FalloutNv,
+                &record(
+                    RecordFlags::DELETED,
+                    vec![(*b"CNAM", 1.0_f32.to_le_bytes().to_vec())],
+                ),
+            )?,
             HandlerOutput::None
         ));
         Ok(())

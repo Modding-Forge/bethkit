@@ -5980,6 +5980,106 @@ mod tests {
         Ok(())
     }
 
+    /// Removes only the first legacy FACT CNAM before ordered decoding.
+    #[test]
+    fn editor_applies_legacy_faction_after_load_migration() -> Result<()> {
+        let unused_path = "FACT/4:Unused";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::FalloutNv;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.legacy_faction_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"FACT"),
+                name: "Faction".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "FACT".to_owned(),
+                    name: "Faction".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: unused_path.to_owned(),
+                            name: "Unused".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"CNAM"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: format!("{unused_path}/payload"),
+                                    name: "Unused".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Float {
+                                            width: 4,
+                                            byte_order: ByteOrder::LittleEndian,
+                                            scale: 1.0,
+                                            digits: 6,
+                                        },
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "FACT".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "d1".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.legacy_faction_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "unused_path": unused_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"FACT"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 15,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"CNAM"),
+                    data: 1.0_f32.to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"CNAM"),
+                    data: 2.0_f32.to_le_bytes().to_vec(),
+                },
+            ],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 1);
+        assert_eq!(writable.subrecords[0].signature, Signature(*b"CNAM"));
+        assert_eq!(writable.subrecords[0].data, 2.0_f32.to_le_bytes());
+        assert_eq!(source.subrecords()?.len(), 2);
+        Ok(())
+    }
+
     /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
     fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {
