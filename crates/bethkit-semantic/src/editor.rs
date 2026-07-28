@@ -6819,6 +6819,106 @@ mod tests {
         Ok(())
     }
 
+    /// Applies both legacy WEAP multiplier defaults before initial decoding.
+    #[test]
+    fn editor_applies_legacy_weapon_after_load_migration() -> Result<()> {
+        let data_path = "WEAP/51:DNAM";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::FalloutNv;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.legacy_weapon_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"WEAP"),
+                name: "Weapon".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "WEAP".to_owned(),
+                    name: "Weapon".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: data_path.to_owned(),
+                            name: "DNAM".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"DNAM"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: format!("{data_path}/payload"),
+                                    name: "DNAM".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Bytes { length: None },
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "WEAP".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "dc".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.legacy_weapon_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "data_path": data_path,
+                            "animation_multiplier_path": format!(
+                                "{data_path}/payload/1:Animation Multiplier"
+                            ),
+                            "attack_multiplier_path": format!(
+                                "{data_path}/payload/21:Animation Attack Multiplier"
+                            ),
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut original = (0_u8..204).collect::<Vec<_>>();
+        original[4..8].copy_from_slice(&0.0_f32.to_le_bytes());
+        original[60..64].copy_from_slice(&(-0.0_f32).to_le_bytes());
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"WEAP"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"DNAM"),
+                data: original.clone(),
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(&writable.subrecords[0].data[..4], &original[..4]);
+        assert_eq!(&writable.subrecords[0].data[4..8], &1.0_f32.to_le_bytes());
+        assert_eq!(&writable.subrecords[0].data[8..60], &original[8..60]);
+        assert_eq!(&writable.subrecords[0].data[60..64], &1.0_f32.to_le_bytes());
+        assert_eq!(&writable.subrecords[0].data[64..], &original[64..]);
+        assert_eq!(source.subrecords()?[0].as_bytes(), original);
+        Ok(())
+    }
+
     /// Rewrites only the legacy MGEF actor-value bytes before decoding.
     #[test]
     fn editor_applies_legacy_magic_effect_after_load_migration() -> Result<()> {

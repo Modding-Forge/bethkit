@@ -1192,6 +1192,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacyNpcAfterLoad));
         registry.register(Arc::new(LegacyInfoAfterLoad));
         registry.register(Arc::new(LegacySoundAfterLoad));
+        registry.register(Arc::new(LegacyWeaponAfterLoad));
         registry.register(Arc::new(LegacyMagicEffectAfterLoad));
         registry.register(Arc::new(SkyrimReferenceAfterLoad));
         registry.register(Arc::new(FalloutSceneBehaviorAfterLoad));
@@ -9524,6 +9525,118 @@ fn copy_legacy_sound_value(
     }
     target[offset..offset + size].copy_from_slice(&source.data);
     Ok(())
+}
+
+struct LegacyWeaponAfterLoad;
+
+impl SemanticHandler for LegacyWeaponAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.legacy_weapon_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"WEAP")
+            || invocation.context.binding.path != "WEAP"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout3 | SchemaGame::FalloutNv
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy weapon migration requires a guarded WEAP root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy weapon migration requires a record-level binding".to_owned(),
+            });
+        }
+        let expected_data_path = match invocation.context.game {
+            SchemaGame::Fallout3 => "WEAP/31:DNAM",
+            SchemaGame::FalloutNv => "WEAP/51:DNAM",
+            _ => unreachable!("legacy weapon game guard was checked above"),
+        };
+        for (key, expected) in [
+            ("data_path", expected_data_path),
+            (
+                "animation_multiplier_path",
+                &format!("{expected_data_path}/payload/1:Animation Multiplier"),
+            ),
+            (
+                "attack_multiplier_path",
+                &format!("{expected_data_path}/payload/21:Animation Attack Multiplier"),
+            ),
+        ] {
+            let actual = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("legacy weapon migration requires {key}"),
+                })?;
+            if actual != expected {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "legacy weapon migration requires materialized {key} {expected}"
+                    ),
+                });
+            }
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy weapon migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(data) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"DNAM"))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let mut normalized = data.data.clone();
+        let mut changed = false;
+        for offset in [4, 60] {
+            let Some(bytes) = data.data.get(offset..offset + 4) else {
+                continue;
+            };
+            let value = f32::from_le_bytes(
+                bytes
+                    .try_into()
+                    .expect("four-byte weapon multiplier must convert"),
+            );
+            if value == 0.0 {
+                normalized[offset..offset + 4].copy_from_slice(&1.0_f32.to_le_bytes());
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(HandlerOutput::None);
+        }
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::ReplacePayload {
+                path: expected_data_path.to_owned(),
+                occurrence: 0,
+                data: normalized,
+            },
+        ]))
+    }
 }
 
 struct LegacyMagicEffectAfterLoad;
@@ -18985,6 +19098,127 @@ mod tests {
             ),
             Err(SemanticError::Handler { message, .. })
                 if message.contains("10-byte ANAM")
+        ));
+        Ok(())
+    }
+
+    /// Normalizes only zero legacy WEAP multipliers at their materialized offsets.
+    #[test]
+    fn legacy_weapon_after_load_matches_xedit_defaults() -> Result<()> {
+        let binding = |game| {
+            let data_path = if game == SchemaGame::Fallout3 {
+                "WEAP/31:DNAM"
+            } else {
+                "WEAP/51:DNAM"
+            };
+            CallbackBinding {
+                path: "WEAP".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "test-legacy-weapon-after-load".to_owned(),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: bethkit_schema::BuiltInOperation {
+                        id: "migrate.legacy_weapon_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "data_path": data_path,
+                            "animation_multiplier_path": format!(
+                                "{data_path}/payload/1:Animation Multiplier"
+                            ),
+                            "attack_multiplier_path": format!(
+                                "{data_path}/payload/21:Animation Attack Multiplier"
+                            ),
+                        }),
+                    },
+                },
+            }
+        };
+        let record = |flags, data| WritableRecord {
+            signature: Signature(*b"WEAP"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"DNAM"),
+                data,
+            }],
+        };
+        let invoke = |game, record: &WritableRecord| {
+            SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+                &binding(game),
+                HandlerRecordContext::new(Signature(*b"WEAP"), FormId(0x1111), 0, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+        let mut original = (0_u8..140).collect::<Vec<_>>();
+        original[4..8].copy_from_slice(&0.0_f32.to_le_bytes());
+        original[60..64].copy_from_slice(&(-0.0_f32).to_le_bytes());
+        let migrated = invoke(
+            SchemaGame::Fallout3,
+            &record(RecordFlags::empty(), original.clone()),
+        )?;
+        let HandlerOutput::Mutations(mutations) = migrated else {
+            return Err(SemanticError::Handler {
+                handler: "test".to_owned(),
+                message: "legacy weapon migration did not return a replacement".to_owned(),
+            });
+        };
+        let [HandlerMutation::ReplacePayload {
+            path,
+            occurrence,
+            data,
+        }] = mutations.as_slice()
+        else {
+            return Err(SemanticError::Handler {
+                handler: "test".to_owned(),
+                message: "legacy weapon migration returned unexpected mutations".to_owned(),
+            });
+        };
+        assert_eq!(path, "WEAP/31:DNAM");
+        assert_eq!(*occurrence, 0);
+        assert_eq!(&data[..4], &original[..4]);
+        assert_eq!(&data[4..8], &1.0_f32.to_le_bytes());
+        assert_eq!(&data[8..60], &original[8..60]);
+        assert_eq!(&data[60..64], &1.0_f32.to_le_bytes());
+        assert_eq!(&data[64..], &original[64..]);
+
+        let mut ordinary = original;
+        ordinary[4..8].copy_from_slice(&2.5_f32.to_le_bytes());
+        ordinary[60..64].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(matches!(
+            invoke(
+                SchemaGame::FalloutNv,
+                &record(RecordFlags::empty(), ordinary),
+            )?,
+            HandlerOutput::None
+        ));
+
+        let mut short = (0_u8..8).collect::<Vec<_>>();
+        short[4..8].copy_from_slice(&0.0_f32.to_le_bytes());
+        let short_output = invoke(
+            SchemaGame::FalloutNv,
+            &record(RecordFlags::empty(), short.clone()),
+        )?;
+        assert!(matches!(
+            short_output,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::ReplacePayload { path, data, .. }]
+                        if path == "WEAP/51:DNAM"
+                            && data[..4] == short[..4]
+                            && data[4..8] == 1.0_f32.to_le_bytes()
+                )
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::Fallout3,
+                &record(RecordFlags::DELETED, vec![0; 140]),
+            )?,
+            HandlerOutput::None
         ));
         Ok(())
     }
