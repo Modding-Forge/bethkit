@@ -196,6 +196,13 @@ pub enum HandlerMutation {
         /// Complete replacement payload.
         data: Vec<u8>,
     },
+    /// Insert a subrecord with handler-produced bytes before initial decoding.
+    InsertPayload {
+        /// Stable subrecord schema path.
+        path: String,
+        /// Complete inserted payload.
+        data: Vec<u8>,
+    },
     /// Reset a field occurrence to the schema-native default selected in the current edit context.
     ResetToDefault {
         /// Stable schema path.
@@ -1179,6 +1186,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FalloutCellAfterLoad));
         registry.register(Arc::new(LegacyEffectShaderAfterLoad));
         registry.register(Arc::new(LegacyFactionAfterLoad));
+        registry.register(Arc::new(LegacyWaterAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -8799,6 +8807,113 @@ impl SemanticHandler for LegacyFactionAfterLoad {
                 signature: Signature(*b"CNAM"),
             },
         ]))
+    }
+}
+
+struct LegacyWaterAfterLoad;
+
+impl SemanticHandler for LegacyWaterAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.legacy_water_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"WATR")
+            || invocation.context.binding.path != "WATR"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout3 | SchemaGame::FalloutNv
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "water migration requires a guarded WATR root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "water migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "water migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let required_path = |key: &str, expected: &str| -> Result<&str> {
+            let path = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("water migration requires {key}"),
+                })?;
+            if path != expected {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("water migration {key} does not match the materialized path"),
+                });
+            }
+            Ok(path)
+        };
+        let damage_path = required_path("damage_path", "WATR/8:Damage")?;
+        let new_visual_path = required_path("new_visual_path", "WATR/9:Visual Data/0:Visual Data")?;
+        let old_visual_path = required_path("old_visual_path", "WATR/9:Visual Data/1:Visual Data")?;
+        if record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"DNAM"))
+        {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(old_visual) = record.subrecords.iter().find(|subrecord| {
+            subrecord.signature == Signature(*b"DATA") && subrecord.data.len() == 186
+        }) else {
+            return Ok(HandlerOutput::None);
+        };
+        let damage = old_visual.data[184..186].to_vec();
+        let mut new_visual = vec![0_u8; 196];
+        new_visual[..184].copy_from_slice(&old_visual.data[..184]);
+        new_visual[184..188].copy_from_slice(&1.0_f32.to_le_bytes());
+        new_visual[188..192].copy_from_slice(&0.5_f32.to_le_bytes());
+        new_visual[192..196].copy_from_slice(&0.25_f32.to_le_bytes());
+        let mut mutations = vec![HandlerMutation::Remove {
+            path: old_visual_path.to_owned(),
+            occurrence: 0,
+        }];
+        if record.subrecords.iter().any(|subrecord| {
+            subrecord.signature == Signature(*b"DATA") && subrecord.data.len() == 2
+        }) {
+            mutations.push(HandlerMutation::ReplacePayload {
+                path: damage_path.to_owned(),
+                occurrence: 0,
+                data: damage,
+            });
+        } else {
+            mutations.push(HandlerMutation::InsertPayload {
+                path: damage_path.to_owned(),
+                data: damage,
+            });
+        }
+        mutations.push(HandlerMutation::InsertPayload {
+            path: new_visual_path.to_owned(),
+            data: new_visual,
+        });
+        Ok(HandlerOutput::Mutations(mutations))
     }
 }
 
@@ -17284,6 +17399,104 @@ mod tests {
                     RecordFlags::DELETED,
                     vec![(*b"CNAM", 1.0_f32.to_le_bytes().to_vec())],
                 ),
+            )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Converts legacy WATR visual DATA into DNAM while preserving copied bytes.
+    #[test]
+    fn legacy_water_after_load_matches_xedit_visual_migration() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "WATR".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-legacy-watr-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.legacy_water_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "damage_path": "WATR/8:Damage",
+                        "new_visual_path": "WATR/9:Visual Data/0:Visual Data",
+                        "old_visual_path": "WATR/9:Visual Data/1:Visual Data",
+                    }),
+                },
+            },
+        };
+        let record = |subrecords: Vec<([u8; 4], Vec<u8>)>| WritableRecord {
+            signature: Signature(*b"WATR"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: subrecords
+                .into_iter()
+                .map(|(signature, data)| bethkit_core::WritableSubRecord {
+                    signature: Signature(signature),
+                    data,
+                })
+                .collect(),
+        };
+        let invoke = |game, record: &WritableRecord| {
+            SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(Signature(*b"WATR"), FormId(0x1111), 0, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+        let mut old_visual: Vec<u8> = (0_u16..186).map(|value| value as u8).collect();
+        old_visual[184..186].copy_from_slice(&0x1234_u16.to_le_bytes());
+
+        let output = invoke(
+            SchemaGame::Fallout3,
+            &record(vec![
+                (*b"DATA", 0xffff_u16.to_le_bytes().to_vec()),
+                (*b"DATA", old_visual.clone()),
+            ]),
+        )?;
+
+        let mut new_visual = vec![0_u8; 196];
+        new_visual[..184].copy_from_slice(&old_visual[..184]);
+        new_visual[184..188].copy_from_slice(&1.0_f32.to_le_bytes());
+        new_visual[188..192].copy_from_slice(&0.5_f32.to_le_bytes());
+        new_visual[192..196].copy_from_slice(&0.25_f32.to_le_bytes());
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::Remove {
+                        path: "WATR/9:Visual Data/1:Visual Data".to_owned(),
+                        occurrence: 0,
+                    },
+                    HandlerMutation::ReplacePayload {
+                        path: "WATR/8:Damage".to_owned(),
+                        occurrence: 0,
+                        data: 0x1234_u16.to_le_bytes().to_vec(),
+                    },
+                    HandlerMutation::InsertPayload {
+                        path: "WATR/9:Visual Data/0:Visual Data".to_owned(),
+                        data: new_visual,
+                    },
+                ]
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::FalloutNv,
+                &record(vec![
+                    (*b"DATA", old_visual.clone()),
+                    (*b"DNAM", vec![0_u8; 196]),
+                ]),
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::FalloutNv,
+                &record(vec![(*b"DATA", vec![0_u8; 185])]),
             )?,
             HandlerOutput::None
         ));

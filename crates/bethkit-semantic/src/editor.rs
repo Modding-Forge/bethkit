@@ -1914,6 +1914,31 @@ impl RecordEditor {
                     record.subrecords[index].data = data;
                     decoded_values.remove(&(path, occurrence));
                 }
+                HandlerMutation::InsertPayload { path, data } => {
+                    if !decoded_values.is_empty() {
+                        return Err(SemanticError::Handler {
+                            handler: "def.after_load".to_owned(),
+                            message: format!(
+                                "raw payload insertion for {path} must run before initial decoding"
+                            ),
+                        });
+                    }
+                    let node = self.find_node(&path)?;
+                    let SchemaNodeKind::Subrecord { signature, .. } = &node.kind else {
+                        return Err(SemanticError::Encode {
+                            path,
+                            message: "payload insertion path is not a subrecord".to_owned(),
+                        });
+                    };
+                    let index = self.schema_insertion_index(record, node)?;
+                    record.subrecords.insert(
+                        index,
+                        WritableSubRecord {
+                            signature: Signature::from(*signature),
+                            data,
+                        },
+                    );
+                }
                 HandlerMutation::ResetToDefault { path, .. } => {
                     return Err(SemanticError::Handler {
                         handler: "edit.reset_sibling_default".to_owned(),
@@ -2218,6 +2243,10 @@ impl RecordEditor {
                     }],
                 )
             }
+            HandlerMutation::InsertPayload { .. } => Err(SemanticError::Handler {
+                handler: "def.after_set".to_owned(),
+                message: "scoped callbacks cannot insert raw subrecord payloads".to_owned(),
+            }),
             HandlerMutation::ResetToDefault { path, .. } => Err(SemanticError::Handler {
                 handler: "edit.reset_sibling_default".to_owned(),
                 message: format!(
@@ -2792,6 +2821,13 @@ impl RecordEditor {
                         path,
                         data,
                     },
+                    HandlerMutation::InsertPayload { .. } => {
+                        return Err(SemanticError::Handler {
+                            handler: "def.after_set".to_owned(),
+                            message: "scoped callbacks cannot insert raw subrecord payloads"
+                                .to_owned(),
+                        });
+                    }
                     HandlerMutation::ResetToDefault { path, .. } => {
                         return Err(SemanticError::Handler {
                             handler: "edit.reset_sibling_default".to_owned(),
@@ -3041,6 +3077,7 @@ fn mutation_path(mutation: &HandlerMutation) -> &str {
         HandlerMutation::Set { path, .. }
         | HandlerMutation::SetIfEqual { path, .. }
         | HandlerMutation::ReplacePayload { path, .. }
+        | HandlerMutation::InsertPayload { path, .. }
         | HandlerMutation::ResetToDefault { path, .. }
         | HandlerMutation::Insert { path, .. }
         | HandlerMutation::Remove { path, .. }
@@ -6077,6 +6114,134 @@ mod tests {
         assert_eq!(writable.subrecords[0].signature, Signature(*b"CNAM"));
         assert_eq!(writable.subrecords[0].data, 2.0_f32.to_le_bytes());
         assert_eq!(source.subrecords()?.len(), 2);
+        Ok(())
+    }
+
+    /// Converts legacy WATR visual DATA to raw DNAM without rewriting copied fields.
+    #[test]
+    fn editor_applies_legacy_water_after_load_migration() -> Result<()> {
+        let damage_path = "WATR/8:Damage";
+        let new_visual_path = "WATR/9:Visual Data/0:Visual Data";
+        let old_visual_path = "WATR/9:Visual Data/1:Visual Data";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout3;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.legacy_water_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let raw_subrecord = |id, path: &str, signature, length| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 1),
+                    path: format!("{path}/payload"),
+                    name: path.to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes {
+                            length: Some(length),
+                        },
+                    },
+                }),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"WATR"),
+                name: "Water".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "WATR".to_owned(),
+                    name: "Water".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            raw_subrecord(1, damage_path, *b"DATA", 2),
+                            raw_subrecord(3, new_visual_path, *b"DNAM", 196),
+                            raw_subrecord(5, old_visual_path, *b"DATA", 186),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "WATR".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "d2".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.legacy_water_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "damage_path": damage_path,
+                            "new_visual_path": new_visual_path,
+                            "old_visual_path": old_visual_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut old_visual: Vec<u8> = (0_u16..186).map(|value| value as u8).collect();
+        old_visual[40..44].copy_from_slice(&f32::from_bits(0x7fc1_2345).to_le_bytes());
+        old_visual[184..186].copy_from_slice(&0x1234_u16.to_le_bytes());
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"WATR"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 15,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"DATA"),
+                    data: 0xffff_u16.to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"DATA"),
+                    data: old_visual.clone(),
+                },
+            ],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 2);
+        assert_eq!(writable.subrecords[0].signature, Signature(*b"DATA"));
+        assert_eq!(
+            writable.subrecords[0].data,
+            0x1234_u16.to_le_bytes().to_vec()
+        );
+        assert_eq!(writable.subrecords[1].signature, Signature(*b"DNAM"));
+        assert_eq!(&writable.subrecords[1].data[..184], &old_visual[..184]);
+        assert_eq!(
+            &writable.subrecords[1].data[40..44],
+            &f32::from_bits(0x7fc1_2345).to_le_bytes()
+        );
+        assert_eq!(
+            &writable.subrecords[1].data[184..],
+            [
+                1.0_f32.to_le_bytes(),
+                0.5_f32.to_le_bytes(),
+                0.25_f32.to_le_bytes(),
+            ]
+            .concat()
+        );
+        assert_eq!(source.subrecords()?.len(), 2);
+        assert_eq!(source.subrecords()?[1].as_bytes(), old_visual);
         Ok(())
     }
 
