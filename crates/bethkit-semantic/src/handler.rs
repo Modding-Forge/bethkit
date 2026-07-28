@@ -111,6 +111,8 @@ pub struct HandlerRecordContext {
     pub form_version: u16,
     /// Game mode selected by the schema package.
     pub game: SchemaGame,
+    /// Whether the source plugin uses localized string tables.
+    pub plugin_localized: bool,
 }
 
 /// Grid coordinates returned by an xEdit record-metadata callback.
@@ -144,7 +146,14 @@ impl HandlerRecordContext {
             form_id,
             form_version,
             game,
+            plugin_localized: false,
         }
+    }
+
+    /// Marks whether the source plugin uses localized string tables.
+    pub const fn with_plugin_localized(mut self, plugin_localized: bool) -> Self {
+        self.plugin_localized = plugin_localized;
+        self
     }
 }
 
@@ -160,6 +169,8 @@ pub struct HandlerContext<'a> {
     pub form_version: u16,
     /// Game mode selected by the schema package.
     pub game: SchemaGame,
+    /// Whether the source plugin uses localized string tables.
+    pub plugin_localized: bool,
     /// Deterministic operation configuration from the schema package.
     pub configuration: &'a serde_json::Value,
 }
@@ -1236,6 +1247,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
+        registry.register(Arc::new(GameSettingEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
         registry.register(Arc::new(MagicEffectSecondAvWeightAfterSet));
         registry.register(Arc::new(MagicEffectArchetypeAfterSet));
@@ -1638,6 +1650,7 @@ impl SemanticHandlerRegistry {
                     form_id: record.form_id,
                     form_version: record.form_version,
                     game: record.game,
+                    plugin_localized: record.plugin_localized,
                     configuration,
                 },
                 phase,
@@ -11908,6 +11921,87 @@ fn has_ordered_list_suffix(value: &str) -> bool {
         .is_some_and(|suffix| suffix.eq_ignore_ascii_case("OrderedList"))
 }
 
+struct GameSettingEditorIdAfterSet;
+
+impl SemanticHandler for GameSettingEditorIdAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.game_setting_editor_id"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"GMST")
+            || invocation.context.binding.path != "GMST/0:Editor ID"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout3
+                    | SchemaGame::FalloutNv
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+                    | SchemaGame::Starfield
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "game-setting editor-ID updates require a guarded GMST binding".to_owned(),
+            });
+        }
+        let expected_path = if invocation.context.game == SchemaGame::Starfield {
+            "GMST/2:Value"
+        } else {
+            "GMST/1:Value"
+        };
+        let data_path = configured_text(self.id(), invocation.context.configuration, "data_path")?;
+        if data_path != expected_path {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "game-setting editor-ID updates require materialized data_path {expected_path}"
+                ),
+            });
+        }
+        let Some(FieldValue::String(new_value)) = invocation.value else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "game-setting editor-ID updates require a string value".to_owned(),
+            });
+        };
+        let Some(FieldValue::String(old_value)) = invocation.old_value else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "game-setting editor-ID updates require the previous string value"
+                    .to_owned(),
+            });
+        };
+        if old_value == new_value || old_value.chars().next() == new_value.chars().next() {
+            return Ok(HandlerOutput::None);
+        }
+        let default = match new_value.as_bytes().first() {
+            Some(b's') if invocation.context.plugin_localized => OwnedFieldValue::UInt(0),
+            Some(b's') => OwnedFieldValue::String(String::new()),
+            Some(b'f') => OwnedFieldValue::Float(0.0),
+            Some(b'b') => OwnedFieldValue::Int(0),
+            Some(b'u') => OwnedFieldValue::UInt(0),
+            _ => OwnedFieldValue::Int(0),
+        };
+        Ok(HandlerOutput::Mutations(vec![HandlerMutation::Set {
+            path: data_path.to_owned(),
+            occurrence: 0,
+            value: default,
+        }]))
+    }
+}
+
 struct HeadPartsAfterSet;
 
 impl SemanticHandler for HeadPartsAfterSet {
@@ -13815,6 +13909,7 @@ fn handler_record_context(context: &HandlerContext<'_>) -> HandlerRecordContext 
         context.form_version,
         context.game,
     )
+    .with_plugin_localized(context.plugin_localized)
 }
 
 fn format_item_summary(
@@ -14908,6 +15003,7 @@ mod tests {
                 form_id: FormId::NULL,
                 form_version: 0,
                 game: SchemaGame::SkyrimSe,
+                plugin_localized: false,
                 configuration: match &binding.implementation {
                     CallbackImplementation::BuiltIn { operation } => &operation.configuration,
                     _ => unreachable!("test binding is built-in"),
@@ -22709,6 +22805,71 @@ mod tests {
         Ok(())
     }
 
+    /// Resets GMST DATA only when the editor-ID type prefix changes.
+    #[test]
+    fn game_setting_editor_id_resets_value_on_type_change() -> Result<()> {
+        let binding = |data_path: &str| CallbackBinding {
+            path: "GMST/0:Editor ID".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-game-setting-editor-id".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.game_setting_editor_id".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({ "data_path": data_path }),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let old = FieldValue::String(std::borrow::Cow::Borrowed("fExample"));
+        let changed = FieldValue::String(std::borrow::Cow::Borrowed("iExample"));
+        for (game, data_path) in [
+            (SchemaGame::SkyrimLe, "GMST/1:Value"),
+            (SchemaGame::SkyrimSe, "GMST/1:Value"),
+            (SchemaGame::SkyrimVr, "GMST/1:Value"),
+            (SchemaGame::Fallout3, "GMST/1:Value"),
+            (SchemaGame::FalloutNv, "GMST/1:Value"),
+            (SchemaGame::Fallout4, "GMST/1:Value"),
+            (SchemaGame::Fallout4Vr, "GMST/1:Value"),
+            (SchemaGame::Fallout76, "GMST/1:Value"),
+            (SchemaGame::Starfield, "GMST/2:Value"),
+        ] {
+            let output = handlers.invoke(
+                &binding(data_path),
+                HandlerRecordContext::new(Signature(*b"GMST"), FormId::NULL, 0, game),
+                HandlerPhase::AfterSet,
+                Some(&changed),
+                Some(&old),
+            )?;
+            assert!(matches!(
+                output,
+                HandlerOutput::Mutations(mutations)
+                    if mutations == [HandlerMutation::Set {
+                        path: data_path.to_owned(),
+                        occurrence: 0,
+                        value: OwnedFieldValue::Int(0),
+                    }]
+            ));
+        }
+        assert!(matches!(
+            handlers.invoke(
+                &binding("GMST/1:Value"),
+                HandlerRecordContext::new(
+                    Signature(*b"GMST"),
+                    FormId::NULL,
+                    0,
+                    SchemaGame::Fallout4,
+                ),
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::String(std::borrow::Cow::Borrowed("fChanged"))),
+                Some(&old),
+            )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
     /// Removes an existing FO3 head-part model only for an ears part that has an icon.
     #[test]
     fn head_parts_remove_ears_model_with_icon(
@@ -23821,6 +23982,7 @@ mod tests {
                 form_id: FormId::NULL,
                 form_version: 0,
                 game: SchemaGame::Starfield,
+                plugin_localized: false,
                 configuration: match &binding.implementation {
                     CallbackImplementation::BuiltIn { operation } => &operation.configuration,
                     _ => unreachable!("test binding is built-in"),
@@ -23861,6 +24023,7 @@ mod tests {
                 form_id: FormId::NULL,
                 form_version: 0,
                 game: SchemaGame::Starfield,
+                plugin_localized: false,
                 configuration: match &binding.implementation {
                     CallbackImplementation::BuiltIn { operation } => &operation.configuration,
                     _ => unreachable!("test binding is built-in"),
@@ -23906,6 +24069,7 @@ mod tests {
                 form_id: FormId::NULL,
                 form_version: 0,
                 game: SchemaGame::SkyrimSe,
+                plugin_localized: false,
                 configuration: match &binding.implementation {
                     CallbackImplementation::BuiltIn { operation } => &operation.configuration,
                     _ => unreachable!("test binding is built-in"),
@@ -23964,6 +24128,7 @@ mod tests {
                 form_id: FormId::NULL,
                 form_version: 0,
                 game: SchemaGame::SkyrimSe,
+                plugin_localized: false,
                 configuration: match &binding.implementation {
                     CallbackImplementation::BuiltIn { operation } => &operation.configuration,
                     _ => unreachable!("test binding is built-in"),
@@ -24012,6 +24177,7 @@ mod tests {
                 form_id: FormId::NULL,
                 form_version: 0,
                 game: SchemaGame::Starfield,
+                plugin_localized: false,
                 configuration: match &binding.implementation {
                     CallbackImplementation::BuiltIn { operation } => &operation.configuration,
                     _ => unreachable!("test binding is built-in"),
