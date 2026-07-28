@@ -1168,6 +1168,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SkyrimWeaponAfterLoad));
         registry.register(Arc::new(LightAfterLoad));
         registry.register(Arc::new(RemoveOffsetDataAfterLoad { enabled: true }));
+        registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
@@ -8453,6 +8454,139 @@ impl SemanticHandler for RemoveOffsetDataAfterLoad {
                 signature: Signature(*b"OFST"),
             },
         ]))
+    }
+}
+
+struct RegionPointOrderAfterLoad;
+
+impl SemanticHandler for RegionPointOrderAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.region_point_order"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        let game = invocation.context.game;
+        if invocation.context.record_signature != Signature(*b"REGN")
+            || !invocation.context.binding.path.starts_with("REGN/")
+            || !matches!(
+                game,
+                SchemaGame::Oblivion
+                    | SchemaGame::Fallout3
+                    | SchemaGame::FalloutNv
+                    | SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+                    | SchemaGame::Starfield
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "region point ordering is only valid for modern REGN records".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "region point ordering requires a writable record".to_owned(),
+            })?;
+        let index = invocation
+            .source_subrecord_index
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "region point ordering requires a source subrecord".to_owned(),
+            })?;
+        let points = record
+            .subrecords
+            .get(index)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("source subrecord index {index} is out of bounds"),
+            })?;
+        if points.signature != Signature(*b"RPLD") || points.data.len() % 8 != 0 {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "region point ordering requires 8-byte RPLD points, got {} bytes of {}",
+                    points.data.len(),
+                    points.signature
+                ),
+            });
+        }
+        if points.data.len() <= 8 {
+            return Ok(HandlerOutput::None);
+        }
+        let first = region_point(&points.data[..8]);
+        let last = region_point(&points.data[points.data.len() - 8..]);
+        let display_round = game != SchemaGame::Oblivion;
+        let first_x = region_comparison_value(first.0, display_round);
+        let last_x = region_comparison_value(last.0, display_round);
+        let reverse = match system_math_single_compare(first_x, last_x) {
+            std::cmp::Ordering::Equal => {
+                let first_y = region_comparison_value(first.1, display_round);
+                let last_y = region_comparison_value(last.1, display_round);
+                system_math_single_compare(first_y, last_y) == std::cmp::Ordering::Greater
+            }
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+        };
+        if !reverse {
+            return Ok(HandlerOutput::None);
+        }
+        let normalized = points
+            .data
+            .chunks_exact(8)
+            .rev()
+            .flat_map(|point| point.iter().copied())
+            .collect();
+        Ok(HandlerOutput::SubrecordPayload(normalized))
+    }
+}
+
+fn region_point(data: &[u8]) -> (f32, f32) {
+    let x = f32::from_le_bytes(
+        data[..4]
+            .try_into()
+            .expect("four-byte region X coordinate must convert"),
+    );
+    let y = f32::from_le_bytes(
+        data[4..8]
+            .try_into()
+            .expect("four-byte region Y coordinate must convert"),
+    );
+    (x, y)
+}
+
+fn region_comparison_value(value: f32, display_round: bool) -> f32 {
+    if display_round {
+        crate::value::float_from_raw(f64::from(value), 1.0, 6) as f32
+    } else {
+        value
+    }
+}
+
+fn system_math_single_compare(left: f32, right: f32) -> std::cmp::Ordering {
+    const SINGLE_RESOLUTION: f64 = 0.0001;
+    let left = f64::from(left);
+    let right = f64::from(right);
+    let tolerance = (left.abs().min(right.abs()) * SINGLE_RESOLUTION).max(SINGLE_RESOLUTION);
+    if (left - right).abs() <= tolerance {
+        std::cmp::Ordering::Equal
+    } else if left < right {
+        std::cmp::Ordering::Less
+    } else {
+        // Delphi's FUCOMPP path returns GreaterThanValue for unordered operands.
+        std::cmp::Ordering::Greater
     }
 }
 
@@ -16255,6 +16389,83 @@ mod tests {
             )?,
             HandlerOutput::None
         ));
+        Ok(())
+    }
+
+    /// Reverses REGN points with xEdit's Single comparison and game-specific reads.
+    #[test]
+    fn region_point_after_load_matches_xedit_ordering() -> Result<()> {
+        fn point(x: f32, y: f32) -> Vec<u8> {
+            [x.to_le_bytes(), y.to_le_bytes()].concat()
+        }
+
+        fn invoke(game: SchemaGame, data: Vec<u8>) -> Result<HandlerOutput> {
+            let binding = CallbackBinding {
+                path: "REGN/3:Region Areas/repeat/0:Region Area/1:Region Point List Data"
+                    .to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "test-region-points-after-load".to_owned(),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: bethkit_schema::BuiltInOperation {
+                        id: "migrate.region_point_order".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            };
+            let record = WritableRecord {
+                signature: Signature(*b"REGN"),
+                flags: RecordFlags::empty(),
+                form_id: FormId(0x1111),
+                form_version: 0,
+                subrecords: vec![bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"RPLD"),
+                    data,
+                }],
+            };
+            SemanticHandlerRegistry::builtin().invoke_with_records(
+                &binding,
+                HandlerRecordContext::new(Signature(*b"REGN"), FormId(0x1111), 0, game),
+                HandlerInvocationAccess::writable_subrecord_with_scope(&record, 0, None),
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        }
+
+        let first = point(3.0, 9.0);
+        let middle = point(2.0, f32::from_bits(0x7fc0_1234));
+        let last = point(1.0, 2.0);
+        let output = invoke(
+            SchemaGame::SkyrimSe,
+            [first.as_slice(), middle.as_slice(), last.as_slice()].concat(),
+        )?;
+        assert!(matches!(
+            output,
+            HandlerOutput::SubrecordPayload(data)
+                if data == [last.as_slice(), middle.as_slice(), first.as_slice()].concat()
+        ));
+
+        let rounded_first = point(0.000_100_4, 0.0);
+        let rounded_last = point(0.0, 1.0);
+        let boundary = [rounded_first.as_slice(), rounded_last.as_slice()].concat();
+        assert!(matches!(
+            invoke(SchemaGame::Oblivion, boundary.clone())?,
+            HandlerOutput::SubrecordPayload(_)
+        ));
+        assert!(matches!(
+            invoke(SchemaGame::SkyrimSe, boundary)?,
+            HandlerOutput::None
+        ));
+        assert_eq!(
+            system_math_single_compare(f32::NAN, 0.0),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            system_math_single_compare(1.0, 1.000_05),
+            std::cmp::Ordering::Equal
+        );
         Ok(())
     }
 

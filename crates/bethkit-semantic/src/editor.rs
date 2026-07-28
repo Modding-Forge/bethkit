@@ -5645,6 +5645,133 @@ mod tests {
         Ok(())
     }
 
+    /// Reverses only the selected REGN point-list occurrences before decoding.
+    #[test]
+    fn editor_normalizes_repeated_region_point_lists() -> Result<()> {
+        fn point(x: f32, y: f32) -> Vec<u8> {
+            [x.to_le_bytes(), y.to_le_bytes()].concat()
+        }
+
+        let area_path = "REGN/0:Region Areas/repeat/0:Region Area";
+        let edge_path = format!("{area_path}/0:Edge Fall-off");
+        let points_path = format!("{area_path}/1:Region Point List Data");
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout4;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.region_point_order".to_owned(),
+            minimum_version: 1,
+        }];
+        let subrecord = |id, path: &str, signature| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 10),
+                    path: format!("{path}/payload"),
+                    name: "Raw data".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: None },
+                    },
+                }),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"REGN"),
+                name: "Region".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "REGN".to_owned(),
+                    name: "Region Areas".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Repeat {
+                        minimum: 0,
+                        maximum: None,
+                        child: Box::new(SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: area_path.to_owned(),
+                            name: "Region Area".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Sequence {
+                                children: vec![
+                                    subrecord(2, &edge_path, *b"RPLI"),
+                                    subrecord(3, &points_path, *b"RPLD"),
+                                ],
+                            },
+                        }),
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: points_path.clone(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "ee".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.region_point_order".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            }],
+        )?;
+        let ordered = [point(1.0, 4.0), point(2.0, 3.0)].concat();
+        let descending = [point(9.0, 1.0), point(5.0, 2.0), point(2.0, 3.0)].concat();
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"REGN"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"RPLI"),
+                    data: 8_u32.to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"RPLD"),
+                    data: ordered.clone(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"RPLI"),
+                    data: 16_u32.to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"RPLD"),
+                    data: descending.clone(),
+                },
+            ],
+        });
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(source.subrecords()?[3].as_bytes(), descending);
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords[1].data, ordered);
+        assert_eq!(
+            writable.subrecords[3].data,
+            [point(2.0, 3.0), point(5.0, 2.0), point(9.0, 1.0)].concat()
+        );
+        Ok(())
+    }
+
     /// Dispatches a container-level load callback through its explicit SCHR anchor.
     #[test]
     fn editor_applies_embedded_script_after_load_migration() -> Result<()> {
