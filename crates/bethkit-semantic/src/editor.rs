@@ -5606,6 +5606,149 @@ mod tests {
         Ok(())
     }
 
+    /// Applies Skyrim CELL flag expansion and water-height normalization before decoding.
+    #[test]
+    fn editor_applies_skyrim_cell_after_load_migration() -> Result<()> {
+        let data_path = "CELL/2:Flags";
+        let water_height_path = "CELL/9:Water Height";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::SkyrimSe;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.skyrim_cell_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let primitive_subrecord = |id, path: &str, name: &str, signature, primitive| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 1),
+                    path: format!("{path}/payload"),
+                    name: name.to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive { primitive },
+                }),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"CELL"),
+                name: "Cell".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "CELL".to_owned(),
+                    name: "Cell".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            primitive_subrecord(
+                                1,
+                                data_path,
+                                "Flags",
+                                *b"DATA",
+                                PrimitiveType::Integer {
+                                    integer: IntegerType {
+                                        width: 2,
+                                        signed: false,
+                                        byte_order: ByteOrder::LittleEndian,
+                                    },
+                                },
+                            ),
+                            primitive_subrecord(
+                                3,
+                                water_height_path,
+                                "Water Height",
+                                *b"XCLW",
+                                PrimitiveType::Float {
+                                    width: 4,
+                                    byte_order: ByteOrder::LittleEndian,
+                                    scale: 1.0,
+                                    digits: 6,
+                                },
+                            ),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "CELL".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "ce".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.skyrim_cell_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "data_path": data_path,
+                            "water_height_path": water_height_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"CELL"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 44,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: vec![0x02],
+            }],
+        });
+
+        // when
+        let editor = context.edit(&source, false)?;
+
+        // then
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 2);
+        assert_eq!(writable.subrecords[0].data, vec![0x02, 0]);
+        assert_eq!(writable.subrecords[1].signature, Signature(*b"XCLW"));
+        assert_eq!(writable.subrecords[1].data, f32::MAX.to_le_bytes());
+        assert_eq!(source.subrecords()?[0].as_bytes(), &[0x02]);
+
+        let min_source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"CELL"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x2222),
+            form_version: 44,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"DATA"),
+                    data: vec![0, 0],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"XCLW"),
+                    data: f32::from_bits(0xff7f_ffff).to_le_bytes().to_vec(),
+                },
+            ],
+        });
+        let min_editor = context.edit(&min_source, false)?;
+        let min_writable = min_editor.into_writable_record();
+        assert_eq!(min_writable.subrecords[1].data, 0.0_f32.to_le_bytes());
+        assert_eq!(
+            min_source.subrecords()?[1].as_bytes(),
+            &f32::from_bits(0xff7f_ffff).to_le_bytes()
+        );
+        Ok(())
+    }
+
     /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
     fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {

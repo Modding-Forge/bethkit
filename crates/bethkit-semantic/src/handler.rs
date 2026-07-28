@@ -1175,6 +1175,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(DefaultObjectArrayAfterLoad));
         registry.register(Arc::new(SkyrimWeaponAfterLoad));
         registry.register(Arc::new(LightAfterLoad));
+        registry.register(Arc::new(SkyrimCellAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -8410,6 +8411,113 @@ impl SemanticHandler for LightAfterLoad {
                     value: OwnedFieldValue::Float(1.0),
                 });
             }
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
+    }
+}
+
+struct SkyrimCellAfterLoad;
+
+impl SemanticHandler for SkyrimCellAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.skyrim_cell_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"CELL")
+            || invocation.context.binding.path != "CELL"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::SkyrimLe | SchemaGame::SkyrimSe | SchemaGame::SkyrimVr
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Skyrim cell migration requires a guarded CELL root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Skyrim cell migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Skyrim cell migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let data_path = invocation
+            .context
+            .configuration
+            .get("data_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Skyrim cell migration requires data_path".to_owned(),
+            })?;
+        let water_height_path = invocation
+            .context
+            .configuration
+            .get("water_height_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Skyrim cell migration requires water_height_path".to_owned(),
+            })?;
+        if !data_path.starts_with("CELL/") || !water_height_path.starts_with("CELL/") {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Skyrim cell migration paths must be inside CELL".to_owned(),
+            });
+        }
+        let data = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"DATA"));
+        let water_height = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"XCLW"));
+        let mut mutations = Vec::new();
+        if let Some(data) = data {
+            if data.data.len() == 1 {
+                mutations.push(HandlerMutation::ReplacePayload {
+                    path: data_path.to_owned(),
+                    occurrence: 0,
+                    data: vec![data.data[0], 0],
+                });
+            }
+            if water_height.is_none() && data.data.first().is_some_and(|flags| flags & 0x02 != 0) {
+                mutations.push(HandlerMutation::Insert {
+                    path: water_height_path.to_owned(),
+                    value: OwnedFieldValue::Float(f64::from(f32::MAX)),
+                });
+            }
+        }
+        if water_height.is_some_and(|subrecord| {
+            subrecord.data.as_slice() == f32::from_bits(0xff7f_ffff).to_le_bytes()
+        }) {
+            mutations.push(HandlerMutation::ReplacePayload {
+                path: water_height_path.to_owned(),
+                occurrence: 0,
+                data: 0.0_f32.to_le_bytes().to_vec(),
+            });
         }
         if mutations.is_empty() {
             Ok(HandlerOutput::None)
@@ -16556,6 +16664,105 @@ mod tests {
                     }]
         ));
         assert_eq!(&data[64..], &(64_u8..72).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    /// Expands legacy CELL flags and normalizes Skyrim water-height sentinel values.
+    #[test]
+    fn skyrim_cell_after_load_matches_xedit_water_migration() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "CELL".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-skyrim-cell-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.skyrim_cell_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "data_path": "CELL/2:Flags",
+                        "water_height_path": "CELL/9:Water Height",
+                    }),
+                },
+            },
+        };
+        let record = |flags, subrecords: Vec<([u8; 4], Vec<u8>)>| WritableRecord {
+            signature: Signature(*b"CELL"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: subrecords
+                .into_iter()
+                .map(|(signature, data)| bethkit_core::WritableSubRecord {
+                    signature: Signature(signature),
+                    data,
+                })
+                .collect(),
+        };
+        let invoke = |record: &WritableRecord| {
+            SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(
+                    Signature(*b"CELL"),
+                    FormId(0x1111),
+                    0,
+                    SchemaGame::SkyrimSe,
+                ),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+
+        // when / then
+        assert!(matches!(
+            invoke(&record(RecordFlags::empty(), vec![(*b"DATA", vec![0x02])]))?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::ReplacePayload {
+                        path: "CELL/2:Flags".to_owned(),
+                        occurrence: 0,
+                        data: vec![0x02, 0],
+                    },
+                    HandlerMutation::Insert {
+                        path: "CELL/9:Water Height".to_owned(),
+                        value: OwnedFieldValue::Float(f64::from(f32::MAX)),
+                    },
+                ]
+        ));
+        assert!(matches!(
+            invoke(&record(
+                RecordFlags::empty(),
+                vec![
+                    (*b"DATA", vec![0, 0]),
+                    (
+                        *b"XCLW",
+                        f32::from_bits(0xff7f_ffff).to_le_bytes().to_vec()
+                    ),
+                ]
+            ))?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::ReplacePayload {
+                    path: "CELL/9:Water Height".to_owned(),
+                    occurrence: 0,
+                    data: 0.0_f32.to_le_bytes().to_vec(),
+                }]
+        ));
+        assert!(matches!(
+            invoke(&record(
+                RecordFlags::empty(),
+                vec![
+                    (*b"DATA", vec![0, 0]),
+                    (*b"XCLW", 42.0_f32.to_le_bytes().to_vec()),
+                ]
+            ))?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(&record(RecordFlags::DELETED, vec![(*b"DATA", vec![0x02])]))?,
+            HandlerOutput::None
+        ));
         Ok(())
     }
 
