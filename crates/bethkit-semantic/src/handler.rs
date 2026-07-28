@@ -1258,6 +1258,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(IntegerLookupFormatter));
         registry.register(Arc::new(EventFunctionMemberFormatter));
         registry.register(Arc::new(SynchronizeCountAfterSet));
+        registry.register(Arc::new(SynchronizeContainerCountsAfterSet));
         registry.register(Arc::new(SynchronizeRecordCountsAfterSet));
         registry.register(Arc::new(InvalidModelInfoValidation));
         registry.register(Arc::new(WwiseGuidFormatter { resolver: None }));
@@ -12772,6 +12773,77 @@ impl SemanticHandler for SynchronizeCountAfterSet {
     }
 }
 
+struct SynchronizeContainerCountsAfterSet;
+
+impl SemanticHandler for SynchronizeContainerCountsAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.sync_container_counts"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation.value.ok_or_else(|| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: "container counter synchronization requires a structural value".to_owned(),
+        })?;
+        let counters = invocation
+            .context
+            .configuration
+            .get("counters")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "container counter synchronization requires a counters array".to_owned(),
+            })?;
+        let mut mutations = Vec::with_capacity(counters.len());
+        for counter in counters {
+            let counter_path = configured_text(self.id(), counter, "counter_path")?;
+            let value_path = configured_text(self.id(), counter, "value_path")?;
+            if counter_path == value_path {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "container counter and value paths must differ".to_owned(),
+                });
+            }
+            let counter_value =
+                scoped_named_value(value, counter_path).ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("container counter path {counter_path:?} is absent"),
+                })?;
+            let array_value =
+                scoped_named_value(value, value_path).ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("container value path {value_path:?} is absent"),
+                })?;
+            let FieldValue::Array(values) = &array_value.value else {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("container value path {value_path:?} is not an array"),
+                });
+            };
+            let count = u64::try_from(values.len()).map_err(|_| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("container value path {value_path:?} exceeds u64"),
+            })?;
+            if callback_integer(&counter_value.value, self.id())? == i128::from(count) {
+                continue;
+            }
+            mutations.push(HandlerMutation::Set {
+                path: counter_path.to_owned(),
+                occurrence: 0,
+                value: OwnedFieldValue::UInt(count),
+            });
+        }
+        Ok(HandlerOutput::Mutations(mutations))
+    }
+}
+
 struct SynchronizeRecordCountsAfterSet;
 
 impl SemanticHandler for SynchronizeRecordCountsAfterSet {
@@ -23676,6 +23748,142 @@ mod tests {
 
         assert!(matches!(output, HandlerOutput::None));
         Ok(())
+    }
+
+    /// Synchronizes every mismatched array count in one structural container.
+    #[test]
+    fn synchronize_container_counts_updates_only_mismatched_fields() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "OMOD/4:Data".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-container-counts".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.sync_container_counts".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "counters": [
+                            {
+                                "counter_path": "OMOD/4:Data/payload/0:Include Count",
+                                "value_path": "OMOD/4:Data/payload/2:Includes"
+                            },
+                            {
+                                "counter_path": "OMOD/4:Data/payload/1:Property Count",
+                                "value_path": "OMOD/4:Data/payload/3:Properties"
+                            }
+                        ]
+                    }),
+                },
+            },
+        };
+        let named = |id, path: &str, value| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(id),
+            path: path.to_owned(),
+            effective_path: None,
+            name: path.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let value = FieldValue::Struct(vec![
+            named(
+                1,
+                "OMOD/4:Data/payload/0:Include Count",
+                FieldValue::UInt(2),
+            ),
+            named(
+                2,
+                "OMOD/4:Data/payload/1:Property Count",
+                FieldValue::UInt(0),
+            ),
+            named(
+                3,
+                "OMOD/4:Data/payload/2:Includes",
+                FieldValue::Array(vec![FieldValue::UInt(1), FieldValue::UInt(2)]),
+            ),
+            named(
+                4,
+                "OMOD/4:Data/payload/3:Properties",
+                FieldValue::Array(vec![FieldValue::UInt(3)]),
+            ),
+        ]);
+
+        let output = SemanticHandlerRegistry::builtin().invoke(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"OMOD"), FormId::NULL, 0, SchemaGame::Fallout4),
+            HandlerPhase::AfterSet,
+            Some(&value),
+            None,
+        )?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::Set {
+                    path: "OMOD/4:Data/payload/1:Property Count".to_owned(),
+                    occurrence: 0,
+                    value: OwnedFieldValue::UInt(1),
+                }]
+        ));
+        Ok(())
+    }
+
+    /// Rejects a container-counter rule whose configured value is not an array.
+    #[test]
+    fn synchronize_container_counts_rejects_non_array_values() {
+        let binding = CallbackBinding {
+            path: "OMOD/4:Data".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-container-count-error".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.sync_container_counts".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "counters": [{
+                            "counter_path": "OMOD/4:Data/payload/0:Count",
+                            "value_path": "OMOD/4:Data/payload/1:Values"
+                        }]
+                    }),
+                },
+            },
+        };
+        let value = FieldValue::Struct(vec![
+            crate::NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(1),
+                path: "OMOD/4:Data/payload/0:Count".to_owned(),
+                effective_path: None,
+                name: "Count".to_owned(),
+                span: crate::ByteSpan { start: 0, end: 4 },
+                value: FieldValue::UInt(0),
+            },
+            crate::NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(2),
+                path: "OMOD/4:Data/payload/1:Values".to_owned(),
+                effective_path: None,
+                name: "Values".to_owned(),
+                span: crate::ByteSpan { start: 4, end: 8 },
+                value: FieldValue::UInt(1),
+            },
+        ]);
+
+        let error = SemanticHandlerRegistry::builtin()
+            .invoke(
+                &binding,
+                HandlerRecordContext::new(
+                    Signature(*b"OMOD"),
+                    FormId::NULL,
+                    0,
+                    SchemaGame::Fallout4,
+                ),
+                HandlerPhase::AfterSet,
+                Some(&value),
+                None,
+            )
+            .expect_err("non-array container values must fail");
+
+        assert!(error.to_string().contains("is not an array"));
     }
 
     /// Counts record values while preserving xEdit's missing-container cleanup behavior.

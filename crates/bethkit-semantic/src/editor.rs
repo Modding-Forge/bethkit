@@ -10249,6 +10249,208 @@ mod tests {
         Ok(())
     }
 
+    /// Synchronizes nested OMOD counts through array and container callbacks.
+    #[test]
+    fn object_modification_count_callbacks_compose_transactionally(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let data_path = "OMOD/0:Data";
+        let payload_path = "OMOD/0:Data/payload";
+        let include_count_path = "OMOD/0:Data/payload/0:Include Count";
+        let property_count_path = "OMOD/0:Data/payload/1:Property Count";
+        let includes_path = "OMOD/0:Data/payload/2:Includes";
+        let properties_path = "OMOD/0:Data/payload/3:Properties";
+        let integer = IntegerType {
+            width: 4,
+            signed: false,
+            byte_order: ByteOrder::LittleEndian,
+        };
+        let primitive = |id, path: &str, name: &str, primitive| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive { primitive },
+        };
+        let array = |id, path: &str, count_path: &str| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Array {
+                element: Box::new(primitive(
+                    id + 10,
+                    &format!("{path}/element"),
+                    "Value",
+                    PrimitiveType::Integer {
+                        integer: IntegerType {
+                            width: 1,
+                            signed: false,
+                            byte_order: ByteOrder::LittleEndian,
+                        },
+                    },
+                )),
+                count: ArrayCount::Expression {
+                    expression: Expression::ReadField {
+                        path: count_path.to_owned(),
+                    },
+                },
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout4;
+        manifest.callbacks_total = 2;
+        manifest.callbacks_classified = 2;
+        manifest.required_handlers = vec![
+            HandlerRequirement {
+                id: "edit.sync_count".to_owned(),
+                minimum_version: 1,
+            },
+            HandlerRequirement {
+                id: "edit.sync_container_counts".to_owned(),
+                minimum_version: 1,
+            },
+        ];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"OMOD"),
+                name: "Object Modification".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "OMOD".to_owned(),
+                    name: "Object Modification".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: data_path.to_owned(),
+                            name: "Data".to_owned(),
+                            required: true,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"DATA"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: payload_path.to_owned(),
+                                    name: "Data".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Struct {
+                                        fields: vec![
+                                            primitive(
+                                                3,
+                                                include_count_path,
+                                                "Include Count",
+                                                PrimitiveType::Integer { integer },
+                                            ),
+                                            primitive(
+                                                4,
+                                                property_count_path,
+                                                "Property Count",
+                                                PrimitiveType::Integer { integer },
+                                            ),
+                                            array(5, includes_path, include_count_path),
+                                            array(6, properties_path, property_count_path),
+                                        ],
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![
+                CallbackBinding {
+                    path: includes_path.to_owned(),
+                    callback_id: "def.after_set".to_owned(),
+                    callback_slot: None,
+                    implementation_fingerprint: "77".repeat(32),
+                    implementation: CallbackImplementation::BuiltIn {
+                        operation: BuiltInOperation {
+                            id: "edit.sync_count".to_owned(),
+                            minimum_version: 1,
+                            configuration: serde_json::json!({
+                                "counter_path": include_count_path,
+                                "counter_required": true,
+                                "counter_nested": true
+                            }),
+                        },
+                    },
+                },
+                CallbackBinding {
+                    path: data_path.to_owned(),
+                    callback_id: "def.after_set".to_owned(),
+                    callback_slot: None,
+                    implementation_fingerprint: "88".repeat(32),
+                    implementation: CallbackImplementation::BuiltIn {
+                        operation: BuiltInOperation {
+                            id: "edit.sync_container_counts".to_owned(),
+                            minimum_version: 1,
+                            configuration: serde_json::json!({
+                                "counters": [
+                                    {
+                                        "counter_path": include_count_path,
+                                        "value_path": includes_path
+                                    },
+                                    {
+                                        "counter_path": property_count_path,
+                                        "value_path": properties_path
+                                    }
+                                ]
+                            }),
+                        },
+                    },
+                },
+            ],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let source_data = vec![1, 0, 0, 0, 1, 0, 0, 0, 0xaa, 0xbb];
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"OMOD"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1234),
+            form_version: 44,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: source_data.clone(),
+            }],
+        });
+        let mut editor = context.edit(&source, false)?;
+
+        // when
+        editor.set(
+            data_path,
+            0,
+            &OwnedFieldValue::Struct(vec![
+                OwnedFieldValue::UInt(9),
+                OwnedFieldValue::UInt(9),
+                OwnedFieldValue::Array(vec![OwnedFieldValue::UInt(1), OwnedFieldValue::UInt(2)]),
+                OwnedFieldValue::Array(vec![
+                    OwnedFieldValue::UInt(3),
+                    OwnedFieldValue::UInt(4),
+                    OwnedFieldValue::UInt(5),
+                ]),
+            ]),
+        )?;
+
+        // then
+        assert_eq!(
+            editor.record.subrecords[0].data,
+            vec![2, 0, 0, 0, 3, 0, 0, 0, 1, 2, 3, 4, 5]
+        );
+        assert_eq!(source.subrecords()?[0].as_bytes(), source_data);
+        Ok(())
+    }
+
     #[test]
     fn windows_1252_strings_reject_unrepresentable_characters() {
         let error = encode_primitive(
