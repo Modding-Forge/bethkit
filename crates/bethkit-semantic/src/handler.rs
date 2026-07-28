@@ -7969,19 +7969,27 @@ impl SemanticHandler for VerifyInertBodyTemplateAfterLoad {
         if invocation.phase != HandlerPhase::AfterLoad {
             return Ok(HandlerOutput::None);
         }
-        if !matches!(
-            invocation.context.game,
-            SchemaGame::SkyrimLe
-                | SchemaGame::SkyrimSe
-                | SchemaGame::SkyrimVr
-                | SchemaGame::Fallout4
-                | SchemaGame::Fallout4Vr
-                | SchemaGame::Fallout76
-        ) || invocation.context.record_signature != Signature(*b"ARMA")
-        {
+        let signature = invocation.context.record_signature;
+        let valid_record = (signature == Signature(*b"ARMA")
+            && matches!(
+                invocation.context.game,
+                SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+            ))
+            || (signature == Signature(*b"RACE")
+                && matches!(
+                    invocation.context.game,
+                    SchemaGame::SkyrimLe | SchemaGame::SkyrimSe | SchemaGame::SkyrimVr
+                ));
+        if !valid_record || invocation.context.binding.path != signature.to_string() {
             return Err(SemanticError::Handler {
                 handler: self.id().to_owned(),
-                message: "disabled body-template migration is only valid for modern ARMA records"
+                message: "disabled body-template migration requires a guarded ARMA or Skyrim RACE \
+                          root binding"
                     .to_owned(),
             });
         }
@@ -16132,9 +16140,9 @@ mod tests {
         Ok(())
     }
 
-    /// Verifies the unconditional early exit in modern ARMA body-template migrations.
+    /// Verifies the unconditional early exit in guarded ARMA and Skyrim RACE migrations.
     #[test]
-    fn body_template_after_load_verifier_rejects_non_arma_records() -> Result<()> {
+    fn body_template_after_load_verifier_rejects_unguarded_records() -> Result<()> {
         let binding = CallbackBinding {
             path: "ARMA".to_owned(),
             callback_id: "def.after_load".to_owned(),
@@ -16166,6 +16174,35 @@ mod tests {
         )?;
         assert!(matches!(output, HandlerOutput::None));
 
+        let mut race_binding = binding.clone();
+        race_binding.path = "RACE".to_owned();
+        let race = record(Signature(*b"RACE"));
+        let output = SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+            &race_binding,
+            HandlerRecordContext::new(Signature(*b"RACE"), FormId(0x1111), 0, SchemaGame::SkyrimSe),
+            &race,
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        assert!(matches!(output, HandlerOutput::None));
+        let error = SemanticHandlerRegistry::builtin()
+            .invoke_with_writable_record(
+                &race_binding,
+                HandlerRecordContext::new(
+                    Signature(*b"RACE"),
+                    FormId(0x1111),
+                    0,
+                    SchemaGame::Fallout4,
+                ),
+                &race,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+            .expect_err("a Fallout 4 RACE record must fail the Skyrim verifier");
+        assert!(error.to_string().contains("guarded ARMA or Skyrim RACE"));
+
         let drifted = record(Signature(*b"ARMO"));
         let error = SemanticHandlerRegistry::builtin()
             .invoke_with_writable_record(
@@ -16182,7 +16219,7 @@ mod tests {
                 None,
             )
             .expect_err("an ARMO record must fail the ARMA verifier");
-        assert!(error.to_string().contains("only valid for modern ARMA"));
+        assert!(error.to_string().contains("guarded ARMA or Skyrim RACE"));
         Ok(())
     }
 
