@@ -3342,6 +3342,28 @@ mod tests {
         }
     }
 
+    struct TestMagicEffectResolver;
+
+    impl crate::FormLinkResolver for TestMagicEffectResolver {
+        fn resolve_form_id(
+            &self,
+            _source: HandlerRecordContext,
+            form_id: bethkit_core::FormId,
+            targets: &[Signature],
+        ) -> Option<crate::FormLinkInfo> {
+            (form_id == bethkit_core::FormId(0x6789) && targets == [Signature(*b"MGEF")]).then(
+                || {
+                    crate::FormLinkInfo::new(
+                        "Example Effect [MGEF:00006789]",
+                        "Example Effect [MGEF:00006789]",
+                    )
+                    .with_signature(Signature(*b"MGEF"))
+                    .with_magic_effect_actor_value(48)
+                },
+            )
+        }
+    }
+
     fn windows_1252_string(zero_terminated: bool) -> PrimitiveType {
         PrimitiveType::String {
             string: StringType {
@@ -4588,6 +4610,144 @@ mod tests {
         assert_eq!(&writable.subrecords[0].data[1..20], &legacy_payload[1..]);
         assert_eq!(&writable.subrecords[0].data[20..24], &1_u32.to_le_bytes());
         assert_eq!(&writable.subrecords[0].data[24..28], &[0; 4]);
+        Ok(())
+    }
+
+    /// Supplies repeat-local EFID and resolver context to an EFIT load migration.
+    #[test]
+    fn editor_applies_legacy_efit_after_load_migration() -> Result<()> {
+        let efid_path = "TEST/0:Effect/0:EFID";
+        let efit_path = "TEST/0:Effect/1:EFIT";
+        let root = SchemaNode {
+            id: SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: SchemaNodeId(1),
+                    path: "TEST/0:Effect".to_owned(),
+                    name: "Effect".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            SchemaNode {
+                                id: SchemaNodeId(2),
+                                path: efid_path.to_owned(),
+                                name: "Base Effect".to_owned(),
+                                required: true,
+                                conflict_priority: ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Subrecord {
+                                    signature: SchemaSignature(*b"EFID"),
+                                    payload: Box::new(SchemaNode {
+                                        id: SchemaNodeId(3),
+                                        path: format!("{efid_path}/payload"),
+                                        name: "Base Effect".to_owned(),
+                                        required: true,
+                                        conflict_priority: ConflictPriority::Normal,
+                                        condition: None,
+                                        kind: SchemaNodeKind::Primitive {
+                                            primitive: PrimitiveType::FormId {
+                                                targets: vec![SchemaSignature(*b"MGEF")],
+                                            },
+                                        },
+                                    }),
+                                },
+                            },
+                            SchemaNode {
+                                id: SchemaNodeId(4),
+                                path: efit_path.to_owned(),
+                                name: "Effect Data".to_owned(),
+                                required: true,
+                                conflict_priority: ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Subrecord {
+                                    signature: SchemaSignature(*b"EFIT"),
+                                    payload: Box::new(SchemaNode {
+                                        id: SchemaNodeId(5),
+                                        path: format!("{efit_path}/payload"),
+                                        name: "Effect Data".to_owned(),
+                                        required: true,
+                                        conflict_priority: ConflictPriority::Normal,
+                                        condition: None,
+                                        kind: SchemaNodeKind::Primitive {
+                                            primitive: PrimitiveType::Bytes { length: Some(20) },
+                                        },
+                                    }),
+                                },
+                            },
+                        ],
+                    },
+                }],
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::FalloutNv;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.legacy_efit_actor_value".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root,
+            }],
+            vec![CallbackBinding {
+                path: efit_path.to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "66".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.legacy_efit_actor_value".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            }],
+        )?;
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestMagicEffectResolver));
+        let context = SemanticContext::new_with_handlers(
+            Arc::new(package),
+            crate::DecoderRegistry::builtin(),
+            handlers,
+        )?;
+        let mut efit = (0_u8..20).collect::<Vec<_>>();
+        efit[16..20].copy_from_slice(&(-1_i32).to_le_bytes());
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"TEST"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"EFID"),
+                    data: 0x6789_u32.to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"EFIT"),
+                    data: efit.clone(),
+                },
+            ],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(source.subrecords()?[1].as_bytes(), efit);
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(&writable.subrecords[1].data[..16], &efit[..16]);
+        assert_eq!(&writable.subrecords[1].data[16..20], &48_i32.to_le_bytes());
         Ok(())
     }
 
