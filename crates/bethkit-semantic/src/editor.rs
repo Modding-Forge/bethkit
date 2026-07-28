@@ -3612,6 +3612,15 @@ mod tests {
             form_id: bethkit_core::FormId,
             targets: &[Signature],
         ) -> Option<crate::FormLinkInfo> {
+            if form_id == bethkit_core::FormId(0x1234) && targets.is_empty() {
+                return Some(
+                    crate::FormLinkInfo::new(
+                        "Example Item [MISC:00001234]",
+                        "Example Item [MISC:00001234]",
+                    )
+                    .with_signature(Signature(*b"MISC")),
+                );
+            }
             (form_id == bethkit_core::FormId(0x6789) && targets == [Signature(*b"MGEF")]).then(
                 || {
                     crate::FormLinkInfo::new(
@@ -7223,6 +7232,156 @@ mod tests {
         assert_eq!(&writable.subrecords[2].data[11..], &second[11..]);
         assert_eq!(source.subrecords()?[0].as_bytes(), first);
         assert_eq!(source.subrecords()?[2].as_bytes(), second);
+        Ok(())
+    }
+
+    /// Removes legacy Fallout reference ammo only after resolving a non-weapon base.
+    #[test]
+    fn editor_applies_fallout_reference_after_load_migration() -> Result<()> {
+        let unused_path = "REFR/1:Unused";
+        let base_path = "REFR/2:Base";
+        let ammo_path = "REFR/25:Ammo";
+        let ammo_type_path = "REFR/25:Ammo/0:Type";
+        let ammo_count_path = "REFR/25:Ammo/1:Count";
+        let subrecord = |id, path: &str, signature, required| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 100),
+                    path: format!("{path}/payload"),
+                    name: "Raw data".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: None },
+                    },
+                }),
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout3;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.fallout_reference_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"REFR"),
+                name: "Placed Object".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "REFR".to_owned(),
+                    name: "Placed Object".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(1, unused_path, *b"RCLR", false),
+                            subrecord(2, base_path, *b"NAME", true),
+                            SchemaNode {
+                                id: SchemaNodeId(3),
+                                path: ammo_path.to_owned(),
+                                name: "Ammo".to_owned(),
+                                required: false,
+                                conflict_priority: ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Sequence {
+                                    children: vec![
+                                        subrecord(4, ammo_type_path, *b"XAMT", true),
+                                        subrecord(5, ammo_count_path, *b"XAMC", false),
+                                    ],
+                                },
+                            },
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "REFR".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "df".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.fallout_reference_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "mode": "legacy",
+                            "unused_path": unused_path,
+                            "base_path": base_path,
+                            "ammo_path": ammo_path,
+                            "ammo_type_path": ammo_type_path,
+                            "ammo_count_path": ammo_count_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestMagicEffectResolver));
+        let context = SemanticContext::new_with_handlers(
+            Arc::new(package),
+            crate::DecoderRegistry::builtin(),
+            handlers,
+        )?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"REFR"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 15,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"RCLR"),
+                    data: vec![0xaa],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"NAME"),
+                    data: 0x1234_u32.to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"XAMT"),
+                    data: 0x2222_u32.to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"XAMC"),
+                    data: 7_i32.to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"ZZZZ"),
+                    data: vec![0xbb],
+                },
+            ],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(
+            writable
+                .subrecords
+                .iter()
+                .map(|subrecord| subrecord.signature)
+                .collect::<Vec<_>>(),
+            [Signature(*b"NAME"), Signature(*b"ZZZZ")]
+        );
+        assert_eq!(
+            writable.subrecords[0].data,
+            0x1234_u32.to_le_bytes().to_vec()
+        );
+        assert_eq!(writable.subrecords[1].data, vec![0xbb]);
+        assert_eq!(source.subrecords()?.len(), 5);
         Ok(())
     }
 

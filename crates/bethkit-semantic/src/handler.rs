@@ -1197,6 +1197,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FalloutLeveledListAfterLoad));
         registry.register(Arc::new(LegacyMagicEffectAfterLoad));
         registry.register(Arc::new(SkyrimReferenceAfterLoad));
+        registry.register(Arc::new(FalloutReferenceAfterLoad { resolver: None }));
         registry.register(Arc::new(FalloutSceneBehaviorAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
@@ -1314,6 +1315,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(OblivionEfitAfterLoad {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FalloutReferenceAfterLoad {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(SelectCoedOwner {
@@ -10222,6 +10226,236 @@ impl SemanticHandler for SkyrimReferenceAfterLoad {
     }
 }
 
+struct FalloutReferenceAfterLoad {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for FalloutReferenceAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.fallout_reference_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"REFR")
+            || invocation.context.binding.path != "REFR"
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout reference migration requires a guarded REFR root binding"
+                    .to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout reference migration requires a record-level binding".to_owned(),
+            });
+        }
+        let expected_paths = match invocation.context.game {
+            SchemaGame::Fallout3 => Some((
+                "legacy",
+                [
+                    ("unused_path", "REFR/1:Unused"),
+                    ("base_path", "REFR/2:Base"),
+                    ("ammo_path", "REFR/25:Ammo"),
+                    ("ammo_type_path", "REFR/25:Ammo/0:Type"),
+                    ("ammo_count_path", "REFR/25:Ammo/1:Count"),
+                ],
+            )),
+            SchemaGame::FalloutNv => Some((
+                "legacy",
+                [
+                    ("unused_path", "REFR/1:Unused"),
+                    ("base_path", "REFR/2:Base"),
+                    ("ammo_path", "REFR/26:Ammo"),
+                    ("ammo_type_path", "REFR/26:Ammo/0:Type"),
+                    ("ammo_count_path", "REFR/26:Ammo/1:Count"),
+                ],
+            )),
+            _ => None,
+        };
+        if let Some((mode, paths)) = expected_paths {
+            verify_fallout_reference_configuration(&invocation, mode, &paths)?;
+            return self.invoke_legacy(invocation, paths[2].1);
+        }
+        let lock_path = match invocation.context.game {
+            SchemaGame::Fallout4 | SchemaGame::Fallout4Vr => "REFR/39:Lock Data",
+            SchemaGame::Fallout76 => "REFR/44:Lock Data",
+            _ => {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "Fallout reference migration requires a guarded game".to_owned(),
+                });
+            }
+        };
+        let level_path = format!("{lock_path}/payload/0:Level");
+        let paths = [
+            ("lock_path", lock_path),
+            ("lock_level_path", level_path.as_str()),
+        ];
+        verify_fallout_reference_configuration(&invocation, "lock", &paths)?;
+        self.invoke_lock(invocation, lock_path)
+    }
+}
+
+impl FalloutReferenceAfterLoad {
+    fn invoke_legacy(
+        &self,
+        invocation: HandlerInvocation<'_>,
+        ammo_path: &str,
+    ) -> Result<HandlerOutput> {
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout reference migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let mut mutations = Vec::new();
+        if record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"RCLR"))
+        {
+            mutations.push(HandlerMutation::RemoveFirstBySignature {
+                path: "REFR".to_owned(),
+                signature: Signature(*b"RCLR"),
+            });
+        }
+        let has_ammo = record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"XAMT"));
+        if has_ammo {
+            let base_form_id = record
+                .subrecords
+                .iter()
+                .find(|subrecord| subrecord.signature == Signature(*b"NAME"))
+                .and_then(|subrecord| subrecord.data.get(..4))
+                .map(|bytes| FormId(u32::from_le_bytes(bytes.try_into().expect("four bytes"))));
+            let base_signature = base_form_id
+                .and_then(|form_id| {
+                    self.resolver.as_ref().and_then(|resolver| {
+                        resolver.resolve_form_id(
+                            handler_record_context(&invocation.context),
+                            form_id,
+                            &[],
+                        )
+                    })
+                })
+                .and_then(|link| link.signature());
+            if base_signature.is_some_and(|signature| signature != Signature(*b"WEAP")) {
+                mutations.push(HandlerMutation::RemoveFirstBySignature {
+                    path: ammo_path.to_owned(),
+                    signature: Signature(*b"XAMT"),
+                });
+                if record
+                    .subrecords
+                    .iter()
+                    .any(|subrecord| subrecord.signature == Signature(*b"XAMC"))
+                {
+                    mutations.push(HandlerMutation::RemoveFirstBySignature {
+                        path: ammo_path.to_owned(),
+                        signature: Signature(*b"XAMC"),
+                    });
+                }
+            }
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
+    }
+
+    fn invoke_lock(
+        &self,
+        invocation: HandlerInvocation<'_>,
+        lock_path: &str,
+    ) -> Result<HandlerOutput> {
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout reference migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(lock) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"XLOC"))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        if lock.data.first() != Some(&0) {
+            return Ok(HandlerOutput::None);
+        }
+        let mut data = lock.data.clone();
+        data[0] = 1;
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::ReplacePayload {
+                path: lock_path.to_owned(),
+                occurrence: 0,
+                data,
+            },
+        ]))
+    }
+}
+
+fn verify_fallout_reference_configuration(
+    invocation: &HandlerInvocation<'_>,
+    expected_mode: &str,
+    expected_paths: &[(&str, &str)],
+) -> Result<()> {
+    let handler = "migrate.fallout_reference_after_load";
+    let mode = invocation
+        .context
+        .configuration
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "Fallout reference migration requires mode".to_owned(),
+        })?;
+    if mode != expected_mode {
+        return Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("Fallout reference migration requires {expected_mode} mode"),
+        });
+    }
+    for (key, expected) in expected_paths {
+        let actual = invocation
+            .context
+            .configuration
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!("Fallout reference migration requires {key}"),
+            })?;
+        if actual != *expected {
+            return Err(SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!(
+                    "Fallout reference migration requires materialized {key} {expected}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 struct FalloutSceneBehaviorAfterLoad;
 
 impl SemanticHandler for FalloutSceneBehaviorAfterLoad {
@@ -13188,6 +13422,13 @@ mod tests {
                     )
                     .with_signature(Signature(*b"MGEF"))
                     .with_magic_effect_actor_value(48),
+                ),
+                FormId(0x7777) => Some(
+                    FormLinkInfo::new(
+                        "Example Weapon [WEAP:00007777]",
+                        "Example Weapon [WEAP:00007777]",
+                    )
+                    .with_signature(Signature(*b"WEAP")),
                 ),
                 FormId(0x3456) => Some(
                     FormLinkInfo::new(
@@ -20161,6 +20402,185 @@ mod tests {
             )?,
             HandlerOutput::None
         ));
+        Ok(())
+    }
+
+    /// Matches legacy ammo cleanup and modern lock normalization for Fallout references.
+    #[test]
+    fn fallout_reference_after_load_matches_xedit_cleanup() -> Result<()> {
+        let legacy_binding = |game| {
+            let ammo_index = if game == SchemaGame::Fallout3 { 25 } else { 26 };
+            CallbackBinding {
+                path: "REFR".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "test-legacy-fallout-reference".to_owned(),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: bethkit_schema::BuiltInOperation {
+                        id: "migrate.fallout_reference_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "mode": "legacy",
+                            "unused_path": "REFR/1:Unused",
+                            "base_path": "REFR/2:Base",
+                            "ammo_path": format!("REFR/{ammo_index}:Ammo"),
+                            "ammo_type_path": format!("REFR/{ammo_index}:Ammo/0:Type"),
+                            "ammo_count_path": format!("REFR/{ammo_index}:Ammo/1:Count"),
+                        }),
+                    },
+                },
+            }
+        };
+        let lock_binding = |game| {
+            let lock_index = if game == SchemaGame::Fallout76 {
+                44
+            } else {
+                39
+            };
+            CallbackBinding {
+                path: "REFR".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "test-modern-fallout-reference".to_owned(),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: bethkit_schema::BuiltInOperation {
+                        id: "migrate.fallout_reference_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "mode": "lock",
+                            "lock_path": format!("REFR/{lock_index}:Lock Data"),
+                            "lock_level_path":
+                                format!("REFR/{lock_index}:Lock Data/payload/0:Level"),
+                        }),
+                    },
+                },
+            }
+        };
+        let subrecord = |signature, data| bethkit_core::WritableSubRecord {
+            signature: Signature(signature),
+            data,
+        };
+        let record = |flags, subrecords| WritableRecord {
+            signature: Signature(*b"REFR"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 44,
+            subrecords,
+        };
+        let mut registry = SemanticHandlerRegistry::builtin();
+        registry.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let invoke = |game, binding: &CallbackBinding, record: &WritableRecord| {
+            registry.invoke_with_writable_record(
+                binding,
+                HandlerRecordContext::new(Signature(*b"REFR"), FormId(0x1111), 44, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+
+        for game in [SchemaGame::Fallout3, SchemaGame::FalloutNv] {
+            let binding = legacy_binding(game);
+            let ammo_path = if game == SchemaGame::Fallout3 {
+                "REFR/25:Ammo"
+            } else {
+                "REFR/26:Ammo"
+            };
+            let cleaned = invoke(
+                game,
+                &binding,
+                &record(
+                    RecordFlags::empty(),
+                    vec![
+                        subrecord(*b"RCLR", vec![1]),
+                        subrecord(*b"RCLR", vec![2]),
+                        subrecord(*b"NAME", 0x1234_u32.to_le_bytes().to_vec()),
+                        subrecord(*b"XAMT", 0x2222_u32.to_le_bytes().to_vec()),
+                        subrecord(*b"XAMC", 7_i32.to_le_bytes().to_vec()),
+                    ],
+                ),
+            )?;
+            assert!(matches!(
+                cleaned,
+                HandlerOutput::Mutations(mutations)
+                    if mutations == [
+                        HandlerMutation::RemoveFirstBySignature {
+                            path: "REFR".to_owned(),
+                            signature: Signature(*b"RCLR"),
+                        },
+                        HandlerMutation::RemoveFirstBySignature {
+                            path: ammo_path.to_owned(),
+                            signature: Signature(*b"XAMT"),
+                        },
+                        HandlerMutation::RemoveFirstBySignature {
+                            path: ammo_path.to_owned(),
+                            signature: Signature(*b"XAMC"),
+                        },
+                    ]
+            ));
+
+            let weapon = invoke(
+                game,
+                &binding,
+                &record(
+                    RecordFlags::empty(),
+                    vec![
+                        subrecord(*b"NAME", 0x7777_u32.to_le_bytes().to_vec()),
+                        subrecord(*b"XAMT", vec![0; 4]),
+                        subrecord(*b"XAMC", vec![0; 4]),
+                    ],
+                ),
+            )?;
+            assert!(matches!(weapon, HandlerOutput::None));
+        }
+
+        for game in [
+            SchemaGame::Fallout4,
+            SchemaGame::Fallout4Vr,
+            SchemaGame::Fallout76,
+        ] {
+            let binding = lock_binding(game);
+            let lock_path = if game == SchemaGame::Fallout76 {
+                "REFR/44:Lock Data"
+            } else {
+                "REFR/39:Lock Data"
+            };
+            let original = (0_u8..20).collect::<Vec<_>>();
+            let normalized = invoke(
+                game,
+                &binding,
+                &record(
+                    RecordFlags::empty(),
+                    vec![subrecord(*b"XLOC", original.clone())],
+                ),
+            )?;
+            assert!(matches!(
+                normalized,
+                HandlerOutput::Mutations(mutations)
+                    if mutations == [HandlerMutation::ReplacePayload {
+                        path: lock_path.to_owned(),
+                        occurrence: 0,
+                        data: [vec![1], original[1..].to_vec()].concat(),
+                    }]
+            ));
+            assert!(matches!(
+                invoke(
+                    game,
+                    &binding,
+                    &record(RecordFlags::empty(), vec![subrecord(*b"XLOC", vec![25])]),
+                )?,
+                HandlerOutput::None
+            ));
+            assert!(matches!(
+                invoke(
+                    game,
+                    &binding,
+                    &record(RecordFlags::DELETED, vec![subrecord(*b"XLOC", vec![0])]),
+                )?,
+                HandlerOutput::None
+            ));
+        }
         Ok(())
     }
 
