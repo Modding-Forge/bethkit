@@ -1008,6 +1008,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatCtdaConditionAlias { resolver: None }));
         registry.register(Arc::new(FormatCtdaStringParameter));
         registry.register(Arc::new(ResolveVmadObjectAliasLink { resolver: None }));
+        registry.register(Arc::new(ResolveQuestAliasLink { resolver: None }));
         registry.register(Arc::new(FormatLandscapePosition));
         registry.register(Arc::new(FormatClimateMoons));
         registry.register(Arc::new(FormatClimateTime));
@@ -1144,6 +1145,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(ResolveVmadObjectAliasLink {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(ResolveQuestAliasLink {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(SelectCoedOwner {
@@ -2431,6 +2435,10 @@ struct ResolveVmadObjectAliasLink {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct ResolveQuestAliasLink {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 struct FormatCtdaQuestStage {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
@@ -2903,6 +2911,73 @@ impl SemanticHandler for ResolveVmadObjectAliasLink {
         Ok(HandlerOutput::Link(SemanticLink::QuestAlias {
             quest_form_id,
             alias_index: raw,
+        }))
+    }
+}
+
+impl SemanticHandler for ResolveQuestAliasLink {
+    fn id(&self) -> &'static str {
+        "resolve.quest_alias"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ReferenceResolution {
+            return Ok(HandlerOutput::None);
+        }
+        let alias_index = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                indexed_record_error(self.id(), "quest alias link requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| indexed_record_error(self.id(), "quest alias index exceeds i64"))?;
+        if alias_index < 0 {
+            return Ok(HandlerOutput::None);
+        }
+        let source = handler_record_context(&invocation.context);
+        let quest_form_id =
+            match configured_text(self.id(), invocation.context.configuration, "quest_source")? {
+                "source_record" => invocation.context.form_id,
+                "sibling_quest" => {
+                    let Some(scope) = invocation.value_scope else {
+                        return Ok(HandlerOutput::None);
+                    };
+                    let active =
+                        scoped_named_value_by_name(scope, "Bethkit Active Repeat Occurrence")
+                            .map_or(scope, |field| &field.value);
+                    let Some(quest) = scoped_named_value_by_name(active, "Quest") else {
+                        return Ok(HandlerOutput::None);
+                    };
+                    callback_form_id(&quest.value, self.id())?
+                }
+                value => {
+                    return Err(indexed_record_error(
+                        self.id(),
+                        format!("unknown quest source {value:?}"),
+                    ));
+                }
+            };
+        let targets = [Signature(*b"QUST")];
+        let Some(quest) = self
+            .resolver
+            .as_deref()
+            .and_then(|resolver| resolver.resolve_form_id(source, quest_form_id, &targets))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(aliases) = quest.quest_aliases() else {
+            return Ok(HandlerOutput::None);
+        };
+        if aliases.iter().all(|alias| alias.index() != alias_index) {
+            return Ok(HandlerOutput::None);
+        }
+        Ok(HandlerOutput::Link(SemanticLink::QuestAlias {
+            quest_form_id,
+            alias_index,
         }))
     }
 }
@@ -11266,6 +11341,83 @@ mod tests {
                 Some(&none),
                 None,
                 Some(&scope),
+            )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Resolves same-quest and external Starfield quest aliases.
+    #[test]
+    fn quest_alias_link_handler_matches_xedit() -> TestResult {
+        // given
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source = HandlerRecordContext::new(
+            Signature(*b"QUST"),
+            FormId(0x5678),
+            0,
+            SchemaGame::Starfield,
+        );
+        let alias = FieldValue::Int(7);
+        let same_quest = test_metadata_binding(
+            "value.links_to",
+            "resolve.quest_alias",
+            serde_json::json!({ "quest_source": "source_record" }),
+        );
+        let external_quest = test_metadata_binding(
+            "value.links_to",
+            "resolve.quest_alias",
+            serde_json::json!({ "quest_source": "sibling_quest" }),
+        );
+        let quest = |form_id| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: "QUST/Alias Type/External Alias Reference/0:Quest".to_owned(),
+            effective_path: None,
+            name: "Quest".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 4 },
+            value: FieldValue::FormId {
+                value: FormId(form_id),
+                targets: vec![Signature(*b"QUST")],
+            },
+        };
+        let scope = FieldValue::Struct(vec![
+            crate::NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(u32::MAX),
+                path: String::new(),
+                effective_path: None,
+                name: "Bethkit Active Repeat Occurrence".to_owned(),
+                span: crate::ByteSpan { start: 0, end: 0 },
+                value: FieldValue::Struct(vec![quest(0x5678)]),
+            },
+            quest(0x9999),
+        ]);
+
+        // when / then
+        for (binding, value_scope) in [(&same_quest, None), (&external_quest, Some(&scope))] {
+            assert!(matches!(
+                handlers.invoke_with_value_scope(
+                    binding,
+                    source,
+                    HandlerPhase::ReferenceResolution,
+                    Some(&alias),
+                    None,
+                    value_scope,
+                )?,
+                HandlerOutput::Link(SemanticLink::QuestAlias {
+                    quest_form_id: FormId(0x5678),
+                    alias_index: 7,
+                })
+            ));
+        }
+        let unknown = FieldValue::Int(99);
+        assert!(matches!(
+            handlers.invoke(
+                &same_quest,
+                source,
+                HandlerPhase::ReferenceResolution,
+                Some(&unknown),
+                None,
             )?,
             HandlerOutput::None
         ));
