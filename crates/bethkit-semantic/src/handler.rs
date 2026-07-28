@@ -908,6 +908,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ResolveBlueprintComponent));
         registry.register(Arc::new(FormatIndexedRecordName { resolver: None }));
         registry.register(Arc::new(ResolveIndexedRecord { resolver: None }));
+        registry.register(Arc::new(FormatAvmdEntryReference { resolver: None }));
+        registry.register(Arc::new(ResolveAvmdEntryReference { resolver: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -1004,6 +1006,12 @@ impl SemanticHandlerRegistry {
             resolver: self.form_link_resolver.clone(),
         }));
         self.register(Arc::new(ResolveIndexedRecord {
+            resolver: self.form_link_resolver.clone(),
+        }));
+        self.register(Arc::new(FormatAvmdEntryReference {
+            resolver: self.form_link_resolver.clone(),
+        }));
+        self.register(Arc::new(ResolveAvmdEntryReference {
             resolver: self.form_link_resolver.clone(),
         }));
     }
@@ -3158,6 +3166,40 @@ fn scoped_string<'a>(value: &'a FieldValue<'static>, target_path: &str) -> Optio
         FieldValue::Array(values) => values
             .iter()
             .find_map(|value| scoped_string(value, target_path)),
+        _ => None,
+    }
+}
+
+fn scoped_named_value<'a>(
+    value: &'a FieldValue<'static>,
+    target_path: &str,
+) -> Option<&'a crate::NamedValue<'static>> {
+    match value {
+        FieldValue::Struct(values) => values.iter().find_map(|value| {
+            (value.path == target_path)
+                .then_some(value)
+                .or_else(|| scoped_named_value(&value.value, target_path))
+        }),
+        FieldValue::Array(values) => values
+            .iter()
+            .find_map(|value| scoped_named_value(value, target_path)),
+        _ => None,
+    }
+}
+
+fn scoped_named_value_by_name<'a>(
+    value: &'a FieldValue<'static>,
+    target_name: &str,
+) -> Option<&'a crate::NamedValue<'static>> {
+    match value {
+        FieldValue::Struct(values) => values.iter().find_map(|value| {
+            (value.name == target_name)
+                .then_some(value)
+                .or_else(|| scoped_named_value_by_name(&value.value, target_name))
+        }),
+        FieldValue::Array(values) => values
+            .iter()
+            .find_map(|value| scoped_named_value_by_name(value, target_name)),
         _ => None,
     }
 }
@@ -5377,6 +5419,14 @@ struct ResolveIndexedRecord {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatAvmdEntryReference {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+struct ResolveAvmdEntryReference {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 impl SemanticHandler for FormatIndexedRecordName {
     fn id(&self) -> &'static str {
         "format.indexed_record_name"
@@ -5435,6 +5485,129 @@ impl SemanticHandler for ResolveIndexedRecord {
             form_id: record.form_id(),
         }))
     }
+}
+
+impl SemanticHandler for FormatAvmdEntryReference {
+    fn id(&self) -> &'static str {
+        "format.avmd_entry_reference"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::Display {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(record) = resolve_avmd_entry_reference(&invocation, self.resolver.as_deref())?
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Text(record.link().value().to_owned()))
+    }
+}
+
+impl SemanticHandler for ResolveAvmdEntryReference {
+    fn id(&self) -> &'static str {
+        "resolve.avmd_entry_reference"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ReferenceResolution {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(record) = resolve_avmd_entry_reference(&invocation, self.resolver.as_deref())?
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Link(SemanticLink::Record {
+            form_id: record.form_id(),
+        }))
+    }
+}
+
+fn resolve_avmd_entry_reference(
+    invocation: &HandlerInvocation<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+) -> Result<Option<IndexedRecordInfo>> {
+    let handler = if invocation.phase == HandlerPhase::ReferenceResolution {
+        "resolve.avmd_entry_reference"
+    } else {
+        "format.avmd_entry_reference"
+    };
+    let mode = configured_text(handler, invocation.context.configuration, "mode")?;
+    let type_path = configured_text(handler, invocation.context.configuration, "type_path")?;
+    let value_path = configured_text(handler, invocation.context.configuration, "value_path")?;
+    let scope = invocation
+        .value_scope
+        .ok_or_else(|| indexed_record_error(handler, "AVMD lookup requires record scope"))?;
+    let record_type = scoped_named_value(scope, type_path)
+        .map(|field| &field.value)
+        .ok_or_else(|| indexed_record_error(handler, "AVMD Type field is missing"))?;
+    if !matches!(
+        record_type,
+        FieldValue::Enumeration {
+            name: Some(name),
+            ..
+        } if name == "Complex Group"
+    ) {
+        return Ok(None);
+    }
+    let active = scoped_named_value_by_name(scope, "Bethkit Active Repeat Occurrence")
+        .map(|field| &field.value)
+        .ok_or_else(|| indexed_record_error(handler, "active AVMD entry scope is missing"))?;
+    let value = invocation
+        .value
+        .ok_or_else(|| indexed_record_error(handler, "AVMD lookup requires a string value"))?;
+    let FieldValue::String(value) = value else {
+        return Err(indexed_record_error(
+            handler,
+            "AVMD lookup value is not a string",
+        ));
+    };
+    let candidates: Vec<(&str, String)> = match mode {
+        "name" => {
+            if scoped_named_value(active, value_path).is_some() {
+                return Ok(None);
+            }
+            ["simple_group", "complex_group", "modulation"]
+                .into_iter()
+                .map(|index| (index, value.to_string()))
+                .collect()
+        }
+        "value" => {
+            let Some((prefix, key)) = value.split_once('_') else {
+                return Ok(None);
+            };
+            if key.is_empty() {
+                return Ok(None);
+            }
+            let index = match prefix {
+                "SimpleGroup" => "simple_group",
+                "ComplexGroup" => "complex_group",
+                "Modulation" => "modulation",
+                _ => return Ok(None),
+            };
+            vec![(index, key.to_owned())]
+        }
+        _ => {
+            return Err(indexed_record_error(
+                handler,
+                format!("unknown AVMD entry mode {mode:?}"),
+            ))
+        }
+    };
+    let source = handler_record_context(&invocation.context);
+    Ok(resolver.and_then(|resolver| {
+        candidates.into_iter().find_map(|(index, key)| {
+            resolver.resolve_record_index(source, index, &RecordIndexKeyValue::Text(key))
+        })
+    }))
 }
 
 fn record_index_key(value: &FieldValue<'_>, handler: &str) -> Result<RecordIndexKeyValue> {
@@ -8545,6 +8718,24 @@ mod tests {
                         ),
                     ))
                 }
+                ("complex_group", RecordIndexKeyValue::Text(key)) if key == "EntryName" => {
+                    Some(IndexedRecordInfo::new(
+                        FormId(0x3456),
+                        FormLinkInfo::new(
+                            "Complex Entry [AVMD:00003456]",
+                            "Complex Entry [AVMD:00003456]",
+                        ),
+                    ))
+                }
+                ("modulation", RecordIndexKeyValue::Text(key)) if key == "EntryValue" => {
+                    Some(IndexedRecordInfo::new(
+                        FormId(0x4567),
+                        FormLinkInfo::new(
+                            "Modulation Entry [AVMD:00004567]",
+                            "Modulation Entry [AVMD:00004567]",
+                        ),
+                    ))
+                }
                 _ => None,
             }
         }
@@ -9389,6 +9580,93 @@ mod tests {
                 None,
             )?,
             HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Resolves AVMD entry names and prefixed values with their local entry context.
+    #[test]
+    fn avmd_entry_reference_handlers_match_xedit() -> TestResult {
+        // given
+        let type_path = "AVMD/2:Type";
+        let value_path = "AVMD/6:Entries/repeat/0:Entry/1:Value";
+        let field = |path: &str, name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: path.to_owned(),
+            effective_path: None,
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let active = field(
+            "",
+            "Bethkit Active Repeat Occurrence",
+            FieldValue::Struct(vec![field(
+                "AVMD/6:Entries/repeat/0:Entry/0:Name",
+                "Name",
+                FieldValue::String(Cow::Borrowed("EntryName")),
+            )]),
+        );
+        let scope = FieldValue::Struct(vec![
+            active,
+            field(
+                type_path,
+                "Type",
+                FieldValue::Enumeration {
+                    value: 2,
+                    name: Some("Complex Group".to_owned()),
+                },
+            ),
+        ]);
+        let name_binding = test_metadata_binding(
+            "def.value_transform",
+            "format.avmd_entry_reference",
+            serde_json::json!({
+                "mode": "name",
+                "type_path": type_path,
+                "value_path": value_path
+            }),
+        );
+        let value_binding = test_metadata_binding(
+            "value.links_to",
+            "resolve.avmd_entry_reference",
+            serde_json::json!({
+                "mode": "value",
+                "type_path": type_path,
+                "value_path": value_path
+            }),
+        );
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source =
+            HandlerRecordContext::new(Signature(*b"AVMD"), FormId::NULL, 0, SchemaGame::Starfield);
+        let name = FieldValue::String(Cow::Borrowed("EntryName"));
+        let value = FieldValue::String(Cow::Borrowed("Modulation_EntryValue"));
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &name_binding,
+                source,
+                HandlerPhase::Display,
+                Some(&name),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "Complex Entry [AVMD:00003456]"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &value_binding,
+                source,
+                HandlerPhase::ReferenceResolution,
+                Some(&value),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Link(SemanticLink::Record {
+                form_id: FormId(0x4567),
+            })
         ));
         Ok(())
     }

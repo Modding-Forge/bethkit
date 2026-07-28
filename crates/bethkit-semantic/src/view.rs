@@ -458,6 +458,87 @@ impl<'context, 'record> RecordView<'context, 'record> {
         self.format_value_as(path, &prepared, format)
     }
 
+    /// Formats one field inside a selected repeated structural occurrence.
+    ///
+    /// This supplies both the active repeat occurrence and the complete decoded record
+    /// context required by callbacks whose result depends on optional local siblings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the occurrence or field does not exist, structural
+    /// decoding fails, or the bound formatter rejects the value.
+    pub fn format_repeated_field_as(
+        &self,
+        structure_path: &str,
+        occurrence: usize,
+        field_path: &str,
+        format: ValueFormat,
+    ) -> Result<Option<String>> {
+        let structures = self.repeated_structures(structure_path)?;
+        let active = structures
+            .get(occurrence)
+            .ok_or_else(|| SemanticError::Decode {
+                path: structure_path.to_owned(),
+                message: format!("repeat occurrence {occurrence} does not exist"),
+            })?;
+        let field = find_named_value(active, field_path).ok_or_else(|| SemanticError::Decode {
+            path: field_path.to_owned(),
+            message: "field does not exist in the selected repeat occurrence".to_owned(),
+        })?;
+        let scope = self.repeated_field_scope(active)?;
+        self.context
+            .format_value_as_in_scope(self.record, field_path, &field.value, &scope, format)
+    }
+
+    /// Resolves one link inside a selected repeated structural occurrence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the occurrence or field does not exist, structural
+    /// decoding fails, or the bound link handler rejects the value.
+    pub fn resolve_repeated_field_link(
+        &self,
+        structure_path: &str,
+        occurrence: usize,
+        field_path: &str,
+    ) -> Result<Option<SemanticLink>> {
+        let structures = self.repeated_structures(structure_path)?;
+        let active = structures
+            .get(occurrence)
+            .ok_or_else(|| SemanticError::Decode {
+                path: structure_path.to_owned(),
+                message: format!("repeat occurrence {occurrence} does not exist"),
+            })?;
+        let field = find_named_value(active, field_path).ok_or_else(|| SemanticError::Decode {
+            path: field_path.to_owned(),
+            message: "field does not exist in the selected repeat occurrence".to_owned(),
+        })?;
+        let scope = self.repeated_field_scope(active)?;
+        self.context
+            .resolve_link_in_scope(self.record, field_path, &field.value, &scope)
+    }
+
+    fn repeated_field_scope(&self, active: &FieldValue<'record>) -> Result<FieldValue<'record>> {
+        Ok(FieldValue::Struct(vec![
+            NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(u32::MAX),
+                path: String::new(),
+                effective_path: None,
+                name: "Bethkit Active Repeat Occurrence".to_owned(),
+                span: ByteSpan { start: 0, end: 0 },
+                value: active.clone(),
+            },
+            NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(u32::MAX),
+                path: String::new(),
+                effective_path: None,
+                name: "Bethkit Structural Record Scope".to_owned(),
+                span: ByteSpan { start: 0, end: 0 },
+                value: self.structural_callback_scope()?,
+            },
+        ]))
+    }
+
     fn prepare_repeated_summary(
         &self,
         value: &FieldValue<'_>,
@@ -1309,6 +1390,26 @@ fn named_from_field<'a>(field: &Field<'a>) -> NamedValue<'a> {
     }
 }
 
+fn find_named_value<'a, 'value>(
+    value: &'value FieldValue<'a>,
+    target_path: &str,
+) -> Option<&'value NamedValue<'a>> {
+    match value {
+        FieldValue::Struct(values) => values.iter().find_map(|value| {
+            (value.path == target_path
+                || target_path
+                    .strip_suffix("/payload")
+                    .is_some_and(|parent| parent == value.path))
+            .then_some(value)
+            .or_else(|| find_named_value(&value.value, target_path))
+        }),
+        FieldValue::Array(values) => values
+            .iter()
+            .find_map(|value| find_named_value(value, target_path)),
+        _ => None,
+    }
+}
+
 fn repeat_position_value(index: usize, count: usize) -> NamedValue<'static> {
     let scalar = |name: &str, value: usize| NamedValue {
         node_id: bethkit_schema::SchemaNodeId(u32::MAX),
@@ -1996,6 +2097,43 @@ mod tests {
 
     use super::*;
     use crate::SemanticHandlerRegistry;
+
+    struct TestRecordIndexResolver;
+
+    impl crate::FormLinkResolver for TestRecordIndexResolver {
+        fn resolve_form_id(
+            &self,
+            _source: crate::HandlerRecordContext,
+            _form_id: bethkit_core::FormId,
+            _targets: &[bethkit_core::Signature],
+        ) -> Option<crate::FormLinkInfo> {
+            None
+        }
+
+        fn resolve_record_index(
+            &self,
+            _source: crate::HandlerRecordContext,
+            index: &str,
+            key: &crate::RecordIndexKeyValue,
+        ) -> Option<crate::IndexedRecordInfo> {
+            matches!(
+                (index, key),
+                (
+                    "complex_group",
+                    crate::RecordIndexKeyValue::Text(value)
+                ) if value == "EntryName"
+            )
+            .then(|| {
+                crate::IndexedRecordInfo::new(
+                    bethkit_core::FormId(0x1234),
+                    crate::FormLinkInfo::new(
+                        "Complex Entry [AVMD:00001234]",
+                        "Complex Entry [AVMD:00001234]",
+                    ),
+                )
+            })
+        }
+    }
 
     struct SourceRecordUnionSelector;
 
@@ -3397,6 +3535,229 @@ mod tests {
                 array_indices,
             }) if path == item_path && array_indices == vec![0, 0]
         ));
+        Ok(())
+    }
+
+    /// Keeps optional AVMD value fields local to their selected entry occurrence.
+    #[test]
+    fn repeated_field_callbacks_receive_active_occurrence_scope(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let type_path = "AVMD/0:Type";
+        let entry_path = "AVMD/1:Entries/repeat/0:Entry";
+        let name_path = format!("{entry_path}/0:Name");
+        let name_payload_path = format!("{name_path}/payload");
+        let value_path = format!("{entry_path}/1:Value");
+        let string_subrecord =
+            |id: u32, path: String, name: &str, signature: [u8; 4], required: bool| SchemaNode {
+                id: bethkit_schema::SchemaNodeId(id),
+                path: path.clone(),
+                name: name.to_owned(),
+                required,
+                conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Subrecord {
+                    signature: SchemaSignature(signature),
+                    payload: Box::new(SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(id + 1),
+                        path: format!("{path}/payload"),
+                        name: "String".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::String {
+                                string: StringType {
+                                    encoding: "windows_1252".to_owned(),
+                                    localized: false,
+                                    zero_terminated: true,
+                                    fixed_length: None,
+                                    length_prefix: None,
+                                    trailing_terminator: None,
+                                    allowed_values: Vec::new(),
+                                },
+                            },
+                        },
+                    }),
+                },
+            };
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "AVMD".to_owned(),
+            name: "AVM Data".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(1),
+                        path: type_path.to_owned(),
+                        name: "Type".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Subrecord {
+                            signature: SchemaSignature(*b"MNAM"),
+                            payload: Box::new(SchemaNode {
+                                id: bethkit_schema::SchemaNodeId(2),
+                                path: format!("{type_path}/payload"),
+                                name: "Type".to_owned(),
+                                required: true,
+                                conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Primitive {
+                                    primitive: PrimitiveType::Enumeration {
+                                        integer: IntegerType {
+                                            width: 4,
+                                            signed: false,
+                                            byte_order: ByteOrder::LittleEndian,
+                                        },
+                                        values: vec![(2, "Complex Group".to_owned())],
+                                    },
+                                },
+                            }),
+                        },
+                    },
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(3),
+                        path: "AVMD/1:Entries".to_owned(),
+                        name: "Entries".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Repeat {
+                            minimum: 1,
+                            maximum: None,
+                            child: Box::new(SchemaNode {
+                                id: bethkit_schema::SchemaNodeId(4),
+                                path: entry_path.to_owned(),
+                                name: "Entry".to_owned(),
+                                required: true,
+                                conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Sequence {
+                                    children: vec![
+                                        string_subrecord(5, name_path, "Name", *b"LNAM", true),
+                                        string_subrecord(
+                                            7,
+                                            value_path.clone(),
+                                            "Value",
+                                            *b"VNAM",
+                                            false,
+                                        ),
+                                    ],
+                                },
+                            }),
+                        },
+                    },
+                ],
+            },
+        };
+        let bindings = vec![
+            CallbackBinding {
+                path: name_payload_path.clone(),
+                callback_id: "def.value_transform".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "00".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "format.avmd_entry_reference".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "mode": "name",
+                            "type_path": type_path,
+                            "value_path": value_path
+                        }),
+                    },
+                },
+            },
+            CallbackBinding {
+                path: name_payload_path.clone(),
+                callback_id: "value.links_to".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "11".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "resolve.avmd_entry_reference".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "mode": "name",
+                            "type_path": type_path,
+                            "value_path": value_path
+                        }),
+                    },
+                },
+            },
+        ];
+        let mut manifest = test_manifest();
+        manifest.game = bethkit_schema::SchemaGame::Starfield;
+        manifest.callbacks_total = 2;
+        manifest.callbacks_classified = 2;
+        manifest.required_handlers = vec![
+            HandlerRequirement {
+                id: "format.avmd_entry_reference".to_owned(),
+                minimum_version: 1,
+            },
+            HandlerRequirement {
+                id: "resolve.avmd_entry_reference".to_owned(),
+                minimum_version: 1,
+            },
+        ];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"AVMD"),
+                name: "AVM Data".to_owned(),
+                root,
+            }],
+            bindings,
+        )?;
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestRecordIndexResolver));
+        let context = SemanticContext::new_with_handlers(
+            Arc::new(package),
+            crate::DecoderRegistry::builtin(),
+            handlers,
+        )?;
+        let record_bytes = test_record_with_subrecords(
+            b"AVMD",
+            &[
+                (b"MNAM", &[2, 0, 0, 0]),
+                (b"LNAM", b"EntryName\0"),
+                (b"LNAM", b"EntryName\0"),
+                (b"VNAM", b"ExplicitValue\0"),
+            ],
+        );
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::starfield())?;
+        let view = context.view(&record, false)?;
+
+        // when / then
+        assert_eq!(
+            view.format_repeated_field_as(
+                entry_path,
+                0,
+                &name_payload_path,
+                ValueFormat::Display,
+            )?,
+            Some("Complex Entry [AVMD:00001234]".to_owned())
+        );
+        assert!(matches!(
+            view.resolve_repeated_field_link(entry_path, 0, &name_payload_path)?,
+            Some(SemanticLink::Record {
+                form_id: bethkit_core::FormId(0x1234),
+            })
+        ));
+        assert_eq!(
+            view.format_repeated_field_as(
+                entry_path,
+                1,
+                &name_payload_path,
+                ValueFormat::Display,
+            )?,
+            None
+        );
         Ok(())
     }
 
