@@ -1191,6 +1191,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(OblivionLeveledListAfterLoad));
         registry.register(Arc::new(LegacyNpcAfterLoad));
         registry.register(Arc::new(LegacyInfoAfterLoad));
+        registry.register(Arc::new(LegacySoundAfterLoad));
         registry.register(Arc::new(LegacyMagicEffectAfterLoad));
         registry.register(Arc::new(SkyrimReferenceAfterLoad));
         registry.register(Arc::new(FalloutSceneBehaviorAfterLoad));
@@ -9355,6 +9356,174 @@ impl SemanticHandler for LegacyInfoAfterLoad {
             Ok(HandlerOutput::Mutations(mutations))
         }
     }
+}
+
+struct LegacySoundAfterLoad;
+
+impl SemanticHandler for LegacySoundAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.legacy_sound_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"SOUN")
+            || invocation.context.binding.path != "SOUN"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout3 | SchemaGame::FalloutNv
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy sound migration requires a guarded SOUN root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy sound migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy sound migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let base = match invocation.context.game {
+            SchemaGame::Fallout3 => 3,
+            SchemaGame::FalloutNv => 4,
+            _ => unreachable!("legacy sound game guard was checked above"),
+        };
+        let expected_paths = [
+            (
+                "new_data_path",
+                format!("SOUN/{base}:Sound Data/0:Sound Data"),
+            ),
+            (
+                "old_data_path",
+                format!("SOUN/{base}:Sound Data/1:Sound Data"),
+            ),
+            ("curve_path", format!("SOUN/{}:Attenuation Curve", base + 1)),
+            (
+                "reverb_path",
+                format!("SOUN/{}:Reverb Attenuation Control", base + 2),
+            ),
+            ("priority_path", format!("SOUN/{}:Priority", base + 3)),
+        ];
+        for (key, expected) in &expected_paths {
+            let actual = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("legacy sound migration requires {key}"),
+                })?;
+            if actual != expected {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "legacy sound migration requires materialized {key} {expected}"
+                    ),
+                });
+            }
+        }
+        if record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"SNDD"))
+        {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(old_data) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"SNDX"))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        if old_data.data.len() != 12 {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "legacy sound migration requires 12-byte SNDX, got {} bytes",
+                    old_data.data.len()
+                ),
+            });
+        }
+        let mut data = vec![0; 36];
+        data[..12].copy_from_slice(&old_data.data);
+        for (offset, value) in [(12, 100_i16), (14, 50), (16, 20), (18, 5), (20, 0)] {
+            data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        data[22..24].copy_from_slice(&80_i16.to_le_bytes());
+        data[24..28].copy_from_slice(&128_i32.to_le_bytes());
+        copy_legacy_sound_value(record, Signature(*b"ANAM"), 10, &mut data, 12, self.id())?;
+        copy_legacy_sound_value(record, Signature(*b"GNAM"), 2, &mut data, 22, self.id())?;
+        copy_legacy_sound_value(record, Signature(*b"HNAM"), 4, &mut data, 24, self.id())?;
+
+        let mut mutations = vec![HandlerMutation::RemoveFirstBySignature {
+            path: "SOUN".to_owned(),
+            signature: Signature(*b"SNDX"),
+        }];
+        for signature in [*b"ANAM", *b"GNAM", *b"HNAM"] {
+            if record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == Signature(signature))
+            {
+                mutations.push(HandlerMutation::RemoveFirstBySignature {
+                    path: "SOUN".to_owned(),
+                    signature: Signature(signature),
+                });
+            }
+        }
+        mutations.push(HandlerMutation::InsertPayload {
+            path: expected_paths[0].1.clone(),
+            data,
+        });
+        Ok(HandlerOutput::Mutations(mutations))
+    }
+}
+
+fn copy_legacy_sound_value(
+    record: &WritableRecord,
+    signature: Signature,
+    size: usize,
+    target: &mut [u8],
+    offset: usize,
+    handler: &str,
+) -> Result<()> {
+    let Some(source) = record
+        .subrecords
+        .iter()
+        .find(|subrecord| subrecord.signature == signature)
+    else {
+        return Ok(());
+    };
+    if source.data.len() != size {
+        return Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!(
+                "legacy sound migration requires {size}-byte {signature}, got {} bytes",
+                source.data.len()
+            ),
+        });
+    }
+    target[offset..offset + size].copy_from_slice(&source.data);
+    Ok(())
 }
 
 struct LegacyMagicEffectAfterLoad;
@@ -18646,6 +18815,176 @@ mod tests {
         assert!(matches!(
             invoke(SchemaGame::FalloutNv, &fallout_nv_binding, &deleted)?,
             HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Migrates legacy SOUN fields into xEdit's complete SNDD layout.
+    #[test]
+    fn legacy_sound_after_load_matches_xedit_migration() -> Result<()> {
+        let binding = |game| {
+            let base = if game == SchemaGame::Fallout3 { 3 } else { 4 };
+            CallbackBinding {
+                path: "SOUN".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "test-legacy-sound-after-load".to_owned(),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: bethkit_schema::BuiltInOperation {
+                        id: "migrate.legacy_sound_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "new_data_path": format!(
+                                "SOUN/{base}:Sound Data/0:Sound Data"
+                            ),
+                            "old_data_path": format!(
+                                "SOUN/{base}:Sound Data/1:Sound Data"
+                            ),
+                            "curve_path": format!(
+                                "SOUN/{}:Attenuation Curve",
+                                base + 1
+                            ),
+                            "reverb_path": format!(
+                                "SOUN/{}:Reverb Attenuation Control",
+                                base + 2
+                            ),
+                            "priority_path": format!("SOUN/{}:Priority", base + 3),
+                        }),
+                    },
+                },
+            }
+        };
+        let subrecord = |signature, data| bethkit_core::WritableSubRecord {
+            signature: Signature(signature),
+            data,
+        };
+        let record = |flags, subrecords| WritableRecord {
+            signature: Signature(*b"SOUN"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords,
+        };
+        let registry = SemanticHandlerRegistry::builtin();
+        let invoke = |game, record: &WritableRecord| {
+            registry.invoke_with_writable_record(
+                &binding(game),
+                HandlerRecordContext::new(Signature(*b"SOUN"), FormId(0x1111), 0, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+        let old_data = (0_u8..12).collect::<Vec<_>>();
+        let curve = [9_i16, 8, 7, 6, 5]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let migrated = invoke(
+            SchemaGame::FalloutNv,
+            &record(
+                RecordFlags::empty(),
+                vec![
+                    subrecord(*b"SNDX", old_data.clone()),
+                    subrecord(*b"ANAM", curve.clone()),
+                    subrecord(*b"GNAM", (-7_i16).to_le_bytes().to_vec()),
+                    subrecord(*b"HNAM", (-9_i32).to_le_bytes().to_vec()),
+                ],
+            ),
+        )?;
+        let HandlerOutput::Mutations(mutations) = migrated else {
+            return Err(SemanticError::Handler {
+                handler: "test".to_owned(),
+                message: "legacy sound migration did not return mutations".to_owned(),
+            });
+        };
+        assert_eq!(mutations.len(), 5);
+        let HandlerMutation::InsertPayload { path, data } = &mutations[4] else {
+            return Err(SemanticError::Handler {
+                handler: "test".to_owned(),
+                message: "legacy sound migration did not insert SNDD last".to_owned(),
+            });
+        };
+        assert_eq!(path, "SOUN/4:Sound Data/0:Sound Data");
+        assert_eq!(&data[..12], old_data);
+        assert_eq!(&data[12..22], curve);
+        assert_eq!(&data[22..24], &(-7_i16).to_le_bytes());
+        assert_eq!(&data[24..28], &(-9_i32).to_le_bytes());
+        assert_eq!(&data[28..], &[0; 8]);
+
+        let defaults = invoke(
+            SchemaGame::Fallout3,
+            &record(
+                RecordFlags::empty(),
+                vec![subrecord(*b"SNDX", old_data.clone())],
+            ),
+        )?;
+        let HandlerOutput::Mutations(default_mutations) = defaults else {
+            return Err(SemanticError::Handler {
+                handler: "test".to_owned(),
+                message: "legacy sound defaults did not return mutations".to_owned(),
+            });
+        };
+        let HandlerMutation::InsertPayload {
+            path,
+            data: default_data,
+        } = &default_mutations[1]
+        else {
+            return Err(SemanticError::Handler {
+                handler: "test".to_owned(),
+                message: "legacy sound defaults did not insert SNDD".to_owned(),
+            });
+        };
+        assert_eq!(path, "SOUN/3:Sound Data/0:Sound Data");
+        assert_eq!(&default_data[..12], old_data);
+        assert_eq!(
+            &default_data[12..22],
+            [100_i16, 50, 20, 5, 0]
+                .into_iter()
+                .flat_map(i16::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(&default_data[22..24], &80_i16.to_le_bytes());
+        assert_eq!(&default_data[24..28], &128_i32.to_le_bytes());
+        assert_eq!(&default_data[28..], &[0; 8]);
+
+        assert!(matches!(
+            invoke(
+                SchemaGame::Fallout3,
+                &record(
+                    RecordFlags::empty(),
+                    vec![
+                        subrecord(*b"SNDX", old_data.clone()),
+                        subrecord(*b"SNDD", vec![0; 36]),
+                    ],
+                ),
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::Fallout3,
+                &record(
+                    RecordFlags::DELETED,
+                    vec![subrecord(*b"SNDX", old_data.clone())],
+                ),
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::FalloutNv,
+                &record(
+                    RecordFlags::empty(),
+                    vec![
+                        subrecord(*b"SNDX", old_data),
+                        subrecord(*b"ANAM", vec![0; 8]),
+                    ],
+                ),
+            ),
+            Err(SemanticError::Handler { message, .. })
+                if message.contains("10-byte ANAM")
         ));
         Ok(())
     }

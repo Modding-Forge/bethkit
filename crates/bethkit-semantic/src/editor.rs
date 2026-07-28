@@ -6670,6 +6670,155 @@ mod tests {
         Ok(())
     }
 
+    /// Replaces legacy SOUN subrecords with one complete SNDD before decoding.
+    #[test]
+    fn editor_applies_legacy_sound_after_load_migration() -> Result<()> {
+        let data_path = "SOUN/3:Sound Data";
+        let new_data_path = "SOUN/3:Sound Data/0:Sound Data";
+        let old_data_path = "SOUN/3:Sound Data/1:Sound Data";
+        let curve_path = "SOUN/4:Attenuation Curve";
+        let reverb_path = "SOUN/5:Reverb Attenuation Control";
+        let priority_path = "SOUN/6:Priority";
+        let subrecord = |id, path: &str, name: &str, signature, length| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 1),
+                    path: format!("{path}/payload"),
+                    name: name.to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes {
+                            length: Some(length),
+                        },
+                    },
+                }),
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout3;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.legacy_sound_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"SOUN"),
+                name: "Sound".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "SOUN".to_owned(),
+                    name: "Sound".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            SchemaNode {
+                                id: SchemaNodeId(1),
+                                path: data_path.to_owned(),
+                                name: "Sound Data".to_owned(),
+                                required: true,
+                                conflict_priority: ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Choice {
+                                    alternatives: vec![
+                                        subrecord(2, new_data_path, "Sound Data", *b"SNDD", 36),
+                                        subrecord(4, old_data_path, "Sound Data", *b"SNDX", 12),
+                                    ],
+                                },
+                            },
+                            subrecord(6, curve_path, "Attenuation Curve", *b"ANAM", 10),
+                            subrecord(8, reverb_path, "Reverb Attenuation Control", *b"GNAM", 2),
+                            subrecord(10, priority_path, "Priority", *b"HNAM", 4),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "SOUN".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "db".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.legacy_sound_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "new_data_path": new_data_path,
+                            "old_data_path": old_data_path,
+                            "curve_path": curve_path,
+                            "reverb_path": reverb_path,
+                            "priority_path": priority_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let old_data = (0_u8..12).collect::<Vec<_>>();
+        let curve = [9_i16, 8, 7, 6, 5]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"SOUN"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"SNDX"),
+                    data: old_data.clone(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"ANAM"),
+                    data: curve.clone(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"GNAM"),
+                    data: (-7_i16).to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"HNAM"),
+                    data: (-9_i32).to_le_bytes().to_vec(),
+                },
+            ],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 1);
+        assert_eq!(writable.subrecords[0].signature, Signature(*b"SNDD"));
+        assert_eq!(&writable.subrecords[0].data[..12], old_data);
+        assert_eq!(&writable.subrecords[0].data[12..22], curve);
+        assert_eq!(
+            &writable.subrecords[0].data[22..24],
+            &(-7_i16).to_le_bytes()
+        );
+        assert_eq!(
+            &writable.subrecords[0].data[24..28],
+            &(-9_i32).to_le_bytes()
+        );
+        assert_eq!(&writable.subrecords[0].data[28..], &[0; 8]);
+        assert_eq!(source.subrecords()?.len(), 4);
+        assert_eq!(source.subrecords()?[0].as_bytes(), old_data);
+        Ok(())
+    }
+
     /// Rewrites only the legacy MGEF actor-value bytes before decoding.
     #[test]
     fn editor_applies_legacy_magic_effect_after_load_migration() -> Result<()> {
