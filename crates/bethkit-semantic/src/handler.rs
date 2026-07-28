@@ -909,6 +909,13 @@ pub trait FormLinkResolver: Send + Sync {
         None
     }
 
+    /// Returns the source record's immediate parent group type.
+    ///
+    /// The default returns `None` for resolvers without plugin group metadata.
+    fn source_parent_group_type(&self, _source: HandlerRecordContext) -> Option<u32> {
+        None
+    }
+
     /// Resolves one navigation mesh and its effective triangle-array metadata.
     ///
     /// The default returns `None` for resolvers without navigation-mesh metadata.
@@ -1198,6 +1205,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LightAfterLoad));
         registry.register(Arc::new(SkyrimCellAfterLoad));
         registry.register(Arc::new(FalloutCellAfterLoad));
+        registry.register(Arc::new(OblivionCellAfterLoad { resolver: None }));
         registry.register(Arc::new(LegacyEffectShaderAfterLoad));
         registry.register(Arc::new(LegacyFactionAfterLoad));
         registry.register(Arc::new(LegacyWaterAfterLoad));
@@ -1340,6 +1348,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(OblivionMagicEffectAfterLoad {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(OblivionCellAfterLoad {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(SelectCoedOwner {
@@ -8683,6 +8694,127 @@ impl SemanticHandler for FalloutCellAfterLoad {
     }
 }
 
+struct OblivionCellAfterLoad {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for OblivionCellAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.oblivion_cell_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.game != SchemaGame::Oblivion
+            || invocation.context.record_signature != Signature(*b"CELL")
+            || invocation.context.binding.path != "CELL"
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion cell migration requires a guarded CELL root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion cell migration requires a record-level binding".to_owned(),
+            });
+        }
+        for (key, expected) in [
+            ("data_path", "CELL/2:Flags"),
+            ("grid_path", "CELL/3:Grid"),
+            ("lighting_path", "CELL/4:Lighting"),
+        ] {
+            let actual = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("Oblivion cell migration requires {key}"),
+                })?;
+            if actual != expected {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "Oblivion cell migration requires materialized {key} {expected}"
+                    ),
+                });
+            }
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion cell migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(data) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"DATA"))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(flags) = data.data.first().copied() else {
+            return Ok(HandlerOutput::None);
+        };
+        if flags & 0x01 != 0 {
+            if record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == Signature(*b"XCLL"))
+            {
+                return Ok(HandlerOutput::None);
+            }
+            return Ok(HandlerOutput::Mutations(vec![
+                HandlerMutation::InsertPayload {
+                    path: "CELL/4:Lighting".to_owned(),
+                    data: vec![0; 36],
+                },
+            ]));
+        }
+
+        let mut mutations = Vec::new();
+        if !record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"XCLC"))
+        {
+            mutations.push(HandlerMutation::InsertPayload {
+                path: "CELL/3:Grid".to_owned(),
+                data: vec![0; 8],
+            });
+        }
+        let parent_group_type = self.resolver.as_ref().and_then(|resolver| {
+            resolver.source_parent_group_type(handler_record_context(&invocation.context))
+        });
+        if flags & 0x02 == 0 && parent_group_type == Some(1) {
+            let mut normalized = data.data.clone();
+            normalized[0] |= 0x02;
+            mutations.push(HandlerMutation::ReplacePayload {
+                path: "CELL/2:Flags".to_owned(),
+                occurrence: 0,
+                data: normalized,
+            });
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
+    }
+}
+
 fn required_cell_path<'a>(
     invocation: &'a HandlerInvocation<'_>,
     handler: &str,
@@ -13823,6 +13955,10 @@ mod tests {
 
         fn source_file_name(&self, _source: HandlerRecordContext) -> Option<String> {
             Some("Oblivion.esm".to_owned())
+        }
+
+        fn source_parent_group_type(&self, _source: HandlerRecordContext) -> Option<u32> {
+            Some(1)
         }
 
         fn resolve_record_index(
@@ -19240,6 +19376,100 @@ mod tests {
                 SchemaGame::FalloutNv,
                 &record(RecordFlags::DELETED, vec![(*b"DATA", vec![0x02])])
             )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Adds Oblivion CELL structural defaults and exterior group metadata.
+    #[test]
+    fn oblivion_cell_after_load_matches_xedit_structure() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "CELL".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-oblivion-cell-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.oblivion_cell_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "data_path": "CELL/2:Flags",
+                        "grid_path": "CELL/3:Grid",
+                        "lighting_path": "CELL/4:Lighting",
+                    }),
+                },
+            },
+        };
+        let record = |flags, subrecords: Vec<([u8; 4], Vec<u8>)>| WritableRecord {
+            signature: Signature(*b"CELL"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: subrecords
+                .into_iter()
+                .map(|(signature, data)| bethkit_core::WritableSubRecord {
+                    signature: Signature(signature),
+                    data,
+                })
+                .collect(),
+        };
+        let mut registry = SemanticHandlerRegistry::builtin();
+        registry.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let invoke = |record: &WritableRecord| {
+            registry.invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(
+                    Signature(*b"CELL"),
+                    FormId(0x1111),
+                    0,
+                    SchemaGame::Oblivion,
+                ),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+
+        assert!(matches!(
+            invoke(&record(
+                RecordFlags::empty(),
+                vec![(*b"DATA", vec![0x01, 0xaa])]
+            ))?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::InsertPayload {
+                    path: "CELL/4:Lighting".to_owned(),
+                    data: vec![0; 36],
+                }]
+        ));
+        assert!(matches!(
+            invoke(&record(
+                RecordFlags::empty(),
+                vec![(*b"DATA", vec![0x40, 0xaa])]
+            ))?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::InsertPayload {
+                        path: "CELL/3:Grid".to_owned(),
+                        data: vec![0; 8],
+                    },
+                    HandlerMutation::ReplacePayload {
+                        path: "CELL/2:Flags".to_owned(),
+                        occurrence: 0,
+                        data: vec![0x42, 0xaa],
+                    },
+                ]
+        ));
+        assert!(matches!(
+            invoke(&record(
+                RecordFlags::empty(),
+                vec![(*b"DATA", vec![0x42]), (*b"XCLC", vec![0; 8]),]
+            ))?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(&record(RecordFlags::DELETED, vec![(*b"DATA", vec![0x01])]))?,
             HandlerOutput::None
         ));
         Ok(())

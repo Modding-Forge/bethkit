@@ -3655,6 +3655,10 @@ mod tests {
         fn source_file_name(&self, _source: HandlerRecordContext) -> Option<String> {
             Some("Oblivion.esm".to_owned())
         }
+
+        fn source_parent_group_type(&self, _source: HandlerRecordContext) -> Option<u32> {
+            Some(1)
+        }
     }
 
     fn windows_1252_string(zero_terminated: bool) -> PrimitiveType {
@@ -5939,6 +5943,132 @@ mod tests {
         assert_eq!(writable.subrecords[2].data, vec![0]);
         assert_eq!(source.subrecords()?.len(), 1);
         assert_eq!(source.subrecords()?[0].as_bytes(), &[0x02]);
+        Ok(())
+    }
+
+    /// Inserts Oblivion CELL grid data and updates exterior flags transactionally.
+    #[test]
+    fn editor_applies_oblivion_cell_after_load_migration() -> Result<()> {
+        let data_path = "CELL/2:Flags";
+        let grid_path = "CELL/3:Grid";
+        let lighting_path = "CELL/4:Lighting";
+        let primitive_subrecord =
+            |id, path: &str, signature, primitive: PrimitiveType| SchemaNode {
+                id: SchemaNodeId(id),
+                path: path.to_owned(),
+                name: path.to_owned(),
+                required: false,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Subrecord {
+                    signature: SchemaSignature(signature),
+                    payload: Box::new(SchemaNode {
+                        id: SchemaNodeId(id + 1),
+                        path: format!("{path}/payload"),
+                        name: path.to_owned(),
+                        required: true,
+                        conflict_priority: ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive { primitive },
+                    }),
+                },
+            };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Oblivion;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.oblivion_cell_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"CELL"),
+                name: "Cell".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "CELL".to_owned(),
+                    name: "Cell".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            primitive_subrecord(
+                                1,
+                                data_path,
+                                *b"DATA",
+                                PrimitiveType::Integer {
+                                    integer: IntegerType {
+                                        width: 1,
+                                        signed: false,
+                                        byte_order: ByteOrder::LittleEndian,
+                                    },
+                                },
+                            ),
+                            primitive_subrecord(
+                                3,
+                                grid_path,
+                                *b"XCLC",
+                                PrimitiveType::Bytes { length: Some(8) },
+                            ),
+                            primitive_subrecord(
+                                5,
+                                lighting_path,
+                                *b"XCLL",
+                                PrimitiveType::Bytes { length: Some(36) },
+                            ),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "CELL".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "c1".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.oblivion_cell_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "data_path": data_path,
+                            "grid_path": grid_path,
+                            "lighting_path": lighting_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"CELL"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: vec![0x40],
+            }],
+        });
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestMagicEffectResolver));
+        let context = SemanticContext::new_with_handlers(
+            Arc::new(package),
+            crate::DecoderRegistry::builtin(),
+            handlers,
+        )?;
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 2);
+        assert_eq!(writable.subrecords[0].data, vec![0x42]);
+        assert_eq!(writable.subrecords[1].signature, Signature(*b"XCLC"));
+        assert_eq!(writable.subrecords[1].data, vec![0; 8]);
+        assert_eq!(source.subrecords()?.len(), 1);
+        assert_eq!(source.subrecords()?[0].as_bytes(), &[0x40]);
         Ok(())
     }
 
