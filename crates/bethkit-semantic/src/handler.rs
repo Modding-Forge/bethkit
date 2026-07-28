@@ -1267,6 +1267,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(GameSettingEditorIdAfterSet));
         registry.register(Arc::new(PerkEffectTypeAfterSet));
         registry.register(Arc::new(MagicEffectAssocItemAfterSet));
+        registry.register(Arc::new(PackageInputTypeAfterSet));
         registry.register(Arc::new(LegacyPerkEntryPointAfterSet));
         registry.register(Arc::new(LegacyPerkFunctionAfterSet));
         registry.register(Arc::new(LegacyPerkParameterTypeAfterSet));
@@ -2167,6 +2168,30 @@ fn configured_u8_array(
                     handler: handler.to_owned(),
                     message: format!("callback configuration `{key}[{index}]` must be a byte"),
                 })
+        })
+        .collect()
+}
+
+fn configured_text_array<'a>(
+    handler: &str,
+    configuration: &'a serde_json::Value,
+    key: &str,
+) -> Result<Vec<&'a str>> {
+    let values = configuration
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("callback configuration `{key}` must be an array"),
+        })?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.as_str().ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!("callback configuration `{key}[{index}]` must be text"),
+            })
         })
         .collect()
 }
@@ -12275,6 +12300,120 @@ impl SemanticHandler for MagicEffectAssocItemAfterSet {
                 value: OwnedFieldValue::Int(0xFF),
             },
         ]))
+    }
+}
+
+struct PackageInputTypeAfterSet;
+
+impl SemanticHandler for PackageInputTypeAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.package_input_type"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"PACK")
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+                    | SchemaGame::Starfield
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "package-input updates require a guarded PACK binding".to_owned(),
+            });
+        }
+        let type_path = configured_text(self.id(), invocation.context.configuration, "type_path")?;
+        if type_path != invocation.context.binding.path {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "package-input configuration does not match its binding path".to_owned(),
+            });
+        }
+        let Some(FieldValue::String(new_value)) = invocation.value else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "package-input updates require a new string value".to_owned(),
+            });
+        };
+        let Some(FieldValue::String(old_value)) = invocation.old_value else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "package-input updates require the previous string value".to_owned(),
+            });
+        };
+        if old_value == new_value {
+            return Ok(HandlerOutput::None);
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "package-input updates require the writable source record".to_owned(),
+            })?;
+        let index = invocation
+            .source_subrecord_index
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "package-input updates require the source ANAM index".to_owned(),
+            })?;
+        let type_signature = configured_signature(
+            self.id(),
+            invocation.context.configuration,
+            "type_signature",
+        )?;
+        let value_signature = configured_signature(
+            self.id(),
+            invocation.context.configuration,
+            "value_signature",
+        )?;
+        if record
+            .subrecords
+            .get(index)
+            .map(|subrecord| subrecord.signature)
+            != Some(type_signature)
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "package-input callback source is not its materialized type".to_owned(),
+            });
+        }
+        let value_present = record
+            .subrecords
+            .get(index.saturating_add(1))
+            .is_some_and(|subrecord| subrecord.signature == value_signature);
+        let value_path =
+            configured_text(self.id(), invocation.context.configuration, "value_path")?;
+        let value_types =
+            configured_text_array(self.id(), invocation.context.configuration, "value_types")?;
+        let requires_value = value_types.contains(&new_value.as_ref());
+        let mutation = match (requires_value, value_present) {
+            (true, true) => HandlerMutation::ResetToDefault {
+                path: value_path.to_owned(),
+                occurrence: 0,
+            },
+            (true, false) => HandlerMutation::InsertDefault {
+                path: value_path.to_owned(),
+            },
+            (false, true) => HandlerMutation::Remove {
+                path: value_path.to_owned(),
+                occurrence: 0,
+            },
+            (false, false) => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Mutations(vec![mutation]))
     }
 }
 
@@ -24105,6 +24244,124 @@ mod tests {
                         }
                     ] if textures.ends_with("/2:Textures") && model.ends_with("/0:File")
                 )
+        ));
+        Ok(())
+    }
+
+    /// Rebuilds repeat-local package input values for every xEdit type transition.
+    #[test]
+    fn package_input_type_rebuilds_repeat_local_value() -> Result<()> {
+        let type_path = "PACK/9:Package Data/0:Data Input Values/repeat/0:Value/0:Type";
+        let value_path = "PACK/9:Package Data/0:Data Input Values/repeat/0:Value/1:Value";
+        let binding = CallbackBinding {
+            path: type_path.to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-package-input-type".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.package_input_type".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "type_path": type_path,
+                        "value_path": value_path,
+                        "type_signature": "ANAM",
+                        "value_signature": "CNAM",
+                        "value_types": ["Bool", "Int", "Float", "ObjectList"]
+                    }),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"PACK"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let subrecord = |signature, data| bethkit_core::WritableSubRecord { signature, data };
+        let invoke = |subrecords: Vec<bethkit_core::WritableSubRecord>,
+                      old_value: &'static str,
+                      new_value: &'static str|
+         -> Result<HandlerOutput> {
+            let record = WritableRecord {
+                signature: Signature(*b"PACK"),
+                flags: RecordFlags::empty(),
+                form_id: FormId::NULL,
+                form_version: 0,
+                subrecords,
+            };
+            handlers.invoke_with_records(
+                &binding,
+                context,
+                HandlerInvocationAccess::writable_subrecord_with_scope(&record, 0, None),
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::String(new_value.into())),
+                Some(&FieldValue::String(old_value.into())),
+            )
+        };
+
+        let reset = invoke(
+            vec![
+                subrecord(Signature(*b"ANAM"), b"Int\0".to_vec()),
+                subrecord(Signature(*b"CNAM"), 42_u32.to_le_bytes().to_vec()),
+            ],
+            "Int",
+            "Float",
+        )?;
+        assert!(matches!(
+            reset,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::ResetToDefault {
+                    path: value_path.to_owned(),
+                    occurrence: 0,
+                }]
+        ));
+
+        let insert = invoke(
+            vec![subrecord(Signature(*b"ANAM"), b"Target\0".to_vec())],
+            "Target",
+            "ObjectList",
+        )?;
+        assert!(matches!(
+            insert,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::InsertDefault {
+                    path: value_path.to_owned(),
+                }]
+        ));
+
+        let remove = invoke(
+            vec![
+                subrecord(Signature(*b"ANAM"), b"Bool\0".to_vec()),
+                subrecord(Signature(*b"CNAM"), vec![1]),
+            ],
+            "Bool",
+            "Target",
+        )?;
+        assert!(matches!(
+            remove,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::Remove {
+                    path: value_path.to_owned(),
+                    occurrence: 0,
+                }]
+        ));
+
+        assert!(matches!(
+            invoke(
+                vec![subrecord(Signature(*b"ANAM"), b"Target\0".to_vec())],
+                "Target",
+                "Location",
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                vec![
+                    subrecord(Signature(*b"ANAM"), b"Int\0".to_vec()),
+                    subrecord(Signature(*b"CNAM"), 42_u32.to_le_bytes().to_vec()),
+                ],
+                "Int",
+                "Int",
+            )?,
+            HandlerOutput::None
         ));
         Ok(())
     }

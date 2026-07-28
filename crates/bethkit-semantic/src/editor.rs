@@ -9799,6 +9799,209 @@ mod tests {
         SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())
     }
 
+    fn package_input_editor_context() -> Result<SemanticContext> {
+        fn node(
+            id: u32,
+            path: &str,
+            name: &str,
+            required: bool,
+            kind: SchemaNodeKind,
+        ) -> SchemaNode {
+            SchemaNode {
+                id: SchemaNodeId(id),
+                path: path.to_owned(),
+                name: name.to_owned(),
+                required,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind,
+            }
+        }
+
+        let values_path = "PACK/9:Package Data/0:Data Input Values";
+        let item_path = "PACK/9:Package Data/0:Data Input Values/repeat/0:Value";
+        let type_path = "PACK/9:Package Data/0:Data Input Values/repeat/0:Value/0:Type";
+        let value_path = "PACK/9:Package Data/0:Data Input Values/repeat/0:Value/1:Value";
+        let union_path = "PACK/9:Package Data/0:Data Input Values/repeat/0:Value/1:Value/payload";
+        let primitive = |id, path: &str, name: &str, primitive| {
+            node(
+                id,
+                path,
+                name,
+                true,
+                SchemaNodeKind::Primitive { primitive },
+            )
+        };
+        let type_node = node(
+            3,
+            type_path,
+            "Type",
+            true,
+            SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(*b"ANAM"),
+                payload: Box::new(primitive(
+                    4,
+                    &format!("{type_path}/payload"),
+                    "Type",
+                    PrimitiveType::String {
+                        string: StringType {
+                            encoding: "windows_1252".to_owned(),
+                            localized: false,
+                            zero_terminated: true,
+                            fixed_length: None,
+                            length_prefix: None,
+                            trailing_terminator: None,
+                            allowed_values: Vec::new(),
+                        },
+                    },
+                )),
+            },
+        );
+        let integer = |width| IntegerType {
+            width,
+            signed: false,
+            byte_order: ByteOrder::LittleEndian,
+        };
+        let value_node = node(
+            5,
+            value_path,
+            "Value",
+            false,
+            SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(*b"CNAM"),
+                payload: Box::new(node(
+                    6,
+                    union_path,
+                    "Value",
+                    true,
+                    SchemaNodeKind::Union {
+                        selector: UnionSelector::Callback {
+                            callback_id: "union.select".to_owned(),
+                        },
+                        variants: vec![
+                            primitive(
+                                7,
+                                &format!("{union_path}/variants/0:Unknown"),
+                                "Unknown",
+                                PrimitiveType::Bytes { length: None },
+                            ),
+                            primitive(
+                                8,
+                                &format!("{union_path}/variants/1:Bool"),
+                                "Bool",
+                                PrimitiveType::Enumeration {
+                                    integer: integer(1),
+                                    values: vec![(0, "False".to_owned()), (1, "True".to_owned())],
+                                },
+                            ),
+                            primitive(
+                                9,
+                                &format!("{union_path}/variants/2:Integer"),
+                                "Integer",
+                                PrimitiveType::Integer {
+                                    integer: integer(4),
+                                },
+                            ),
+                            primitive(
+                                10,
+                                &format!("{union_path}/variants/3:Float"),
+                                "Float",
+                                PrimitiveType::Float {
+                                    width: 4,
+                                    byte_order: ByteOrder::LittleEndian,
+                                    scale: 1.0,
+                                    digits: 6,
+                                },
+                            ),
+                        ],
+                    },
+                )),
+            },
+        );
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 2;
+        manifest.callbacks_classified = 2;
+        manifest.required_handlers = vec![
+            HandlerRequirement {
+                id: "edit.package_input_type".to_owned(),
+                minimum_version: 1,
+            },
+            HandlerRequirement {
+                id: "select.package_input_value".to_owned(),
+                minimum_version: 1,
+            },
+        ];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"PACK"),
+                name: "Package".to_owned(),
+                root: node(
+                    0,
+                    "PACK",
+                    "Package",
+                    true,
+                    SchemaNodeKind::Sequence {
+                        children: vec![node(
+                            1,
+                            values_path,
+                            "Data Input Values",
+                            false,
+                            SchemaNodeKind::Repeat {
+                                minimum: 0,
+                                maximum: None,
+                                child: Box::new(node(
+                                    2,
+                                    item_path,
+                                    "Value",
+                                    false,
+                                    SchemaNodeKind::Sequence {
+                                        children: vec![type_node, value_node],
+                                    },
+                                )),
+                            },
+                        )],
+                    },
+                ),
+            }],
+            vec![
+                CallbackBinding {
+                    path: type_path.to_owned(),
+                    callback_id: "def.after_set".to_owned(),
+                    callback_slot: None,
+                    implementation_fingerprint: "aa".repeat(32),
+                    implementation: CallbackImplementation::BuiltIn {
+                        operation: BuiltInOperation {
+                            id: "edit.package_input_type".to_owned(),
+                            minimum_version: 1,
+                            configuration: serde_json::json!({
+                                "type_path": type_path,
+                                "value_path": value_path,
+                                "type_signature": "ANAM",
+                                "value_signature": "CNAM",
+                                "value_types": ["Bool", "Int", "Float", "ObjectList"]
+                            }),
+                        },
+                    },
+                },
+                CallbackBinding {
+                    path: union_path.to_owned(),
+                    callback_id: "union.select".to_owned(),
+                    callback_slot: None,
+                    implementation_fingerprint: "bb".repeat(32),
+                    implementation: CallbackImplementation::BuiltIn {
+                        operation: BuiltInOperation {
+                            id: "select.package_input_value".to_owned(),
+                            minimum_version: 1,
+                            configuration: serde_json::json!({}),
+                        },
+                    },
+                },
+            ],
+        )?;
+        SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())
+    }
+
     fn perk_effect_editor_context() -> Result<SemanticContext> {
         fn node(
             id: u32,
@@ -11572,6 +11775,102 @@ mod tests {
         )?;
 
         assert_eq!(protected_editor.record.subrecords[0].data[9], 7);
+        Ok(())
+    }
+
+    /// Rebuilds only the edited package input and preserves adjacent repeats and unknown bytes.
+    #[test]
+    fn package_input_type_change_is_repeat_local_and_lossless() -> Result<()> {
+        let context = package_input_editor_context()?;
+        let type_path = "PACK/9:Package Data/0:Data Input Values/repeat/0:Value/0:Type";
+        let source_subrecords = vec![
+            WritableSubRecord {
+                signature: Signature(*b"ANAM"),
+                data: b"Int\0".to_vec(),
+            },
+            WritableSubRecord {
+                signature: Signature(*b"CNAM"),
+                data: 42_u32.to_le_bytes().to_vec(),
+            },
+            WritableSubRecord {
+                signature: Signature(*b"ZZZZ"),
+                data: vec![0xaa, 0xbb],
+            },
+            WritableSubRecord {
+                signature: Signature(*b"ANAM"),
+                data: b"Bool\0".to_vec(),
+            },
+            WritableSubRecord {
+                signature: Signature(*b"CNAM"),
+                data: vec![1],
+            },
+        ];
+        let expected_source = source_subrecords
+            .iter()
+            .map(|subrecord| (subrecord.signature, subrecord.data.clone()))
+            .collect::<Vec<_>>();
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"PACK"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1234),
+            form_version: 44,
+            subrecords: source_subrecords,
+        });
+        let mut editor = context.edit(&source, false)?;
+
+        editor.set(type_path, 0, &OwnedFieldValue::String("Float".to_owned()))?;
+
+        assert_eq!(editor.record.subrecords[0].data, b"Float\0");
+        assert_eq!(editor.record.subrecords[1].data, 0_f32.to_le_bytes());
+        assert_eq!(editor.record.subrecords[2].signature, Signature(*b"ZZZZ"));
+        assert_eq!(editor.record.subrecords[2].data, vec![0xaa, 0xbb]);
+        assert_eq!(editor.record.subrecords[3].data, b"Bool\0");
+        assert_eq!(editor.record.subrecords[4].data, vec![1]);
+
+        editor.set(type_path, 0, &OwnedFieldValue::String("Target".to_owned()))?;
+
+        assert_eq!(
+            editor
+                .record
+                .subrecords
+                .iter()
+                .map(|subrecord| subrecord.signature)
+                .collect::<Vec<_>>(),
+            vec![
+                Signature(*b"ANAM"),
+                Signature(*b"ZZZZ"),
+                Signature(*b"ANAM"),
+                Signature(*b"CNAM"),
+            ]
+        );
+
+        editor.set(type_path, 0, &OwnedFieldValue::String("Bool".to_owned()))?;
+
+        assert_eq!(
+            editor
+                .record
+                .subrecords
+                .iter()
+                .map(|subrecord| subrecord.signature)
+                .collect::<Vec<_>>(),
+            vec![
+                Signature(*b"ANAM"),
+                Signature(*b"CNAM"),
+                Signature(*b"ZZZZ"),
+                Signature(*b"ANAM"),
+                Signature(*b"CNAM"),
+            ]
+        );
+        assert_eq!(editor.record.subrecords[1].data, vec![0]);
+        assert_eq!(editor.record.subrecords[4].data, vec![1]);
+        assert_eq!(
+            source
+                .subrecords()?
+                .iter()
+                .map(|subrecord| (subrecord.signature, subrecord.as_bytes().to_vec()))
+                .collect::<Vec<_>>(),
+            expected_source
+        );
         Ok(())
     }
 
