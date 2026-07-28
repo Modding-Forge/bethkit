@@ -398,6 +398,8 @@ pub struct FormLinkInfo {
     quest_objectives: Option<Vec<QuestObjectiveInfo>>,
     script_variables: Option<ScriptVariableMetadata>,
     magic_effect_actor_value: Option<i64>,
+    magic_effect_flags: Option<u32>,
+    magic_effect_associated_item: Option<i64>,
 }
 
 /// Key used to query one of xEdit's named record indexes.
@@ -563,6 +565,8 @@ impl FormLinkInfo {
             quest_objectives: None,
             script_variables: None,
             magic_effect_actor_value: None,
+            magic_effect_flags: None,
+            magic_effect_associated_item: None,
         }
     }
 
@@ -605,6 +609,13 @@ impl FormLinkInfo {
     /// Adds the effective numeric actor value stored by a resolved magic effect.
     pub fn with_magic_effect_actor_value(mut self, actor_value: i64) -> Self {
         self.magic_effect_actor_value = Some(actor_value);
+        self
+    }
+
+    /// Adds the effective flags and associated item stored by a resolved magic effect.
+    pub fn with_magic_effect_metadata(mut self, flags: u32, associated_item: i64) -> Self {
+        self.magic_effect_flags = Some(flags);
+        self.magic_effect_associated_item = Some(associated_item);
         self
     }
 
@@ -651,6 +662,16 @@ impl FormLinkInfo {
     /// Returns the effective numeric actor value when the record is a magic effect.
     pub fn magic_effect_actor_value(&self) -> Option<i64> {
         self.magic_effect_actor_value
+    }
+
+    /// Returns the effective flags when the record is a magic effect.
+    pub fn magic_effect_flags(&self) -> Option<u32> {
+        self.magic_effect_flags
+    }
+
+    /// Returns the effective associated item when the record is a magic effect.
+    pub fn magic_effect_associated_item(&self) -> Option<i64> {
+        self.magic_effect_associated_item
     }
 }
 
@@ -800,6 +821,17 @@ pub trait FormLinkResolver: Send + Sync {
         form_id: FormId,
         targets: &[Signature],
     ) -> Option<FormLinkInfo>;
+
+    /// Resolves one Oblivion magic-effect record through its four-byte effect code.
+    ///
+    /// The default returns `None` for resolvers without legacy MGEF-code metadata.
+    fn resolve_magic_effect_code(
+        &self,
+        _source: HandlerRecordContext,
+        _code: u32,
+    ) -> Option<FormLinkInfo> {
+        None
+    }
 
     /// Resolves one record through an xEdit named index.
     ///
@@ -1111,6 +1143,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacyEfitAfterLoad { resolver: None }));
         registry.register(Arc::new(VerifyModernEfitAfterLoad));
         registry.register(Arc::new(EmbeddedScriptAfterLoad));
+        registry.register(Arc::new(OblivionEfitAfterLoad { resolver: None }));
+        registry.register(Arc::new(VerifyOblivionEfixAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
@@ -1201,6 +1235,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(LegacyEfitAfterLoad {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(OblivionEfitAfterLoad {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(SelectCoedOwner {
@@ -7632,6 +7669,146 @@ impl SemanticHandler for EmbeddedScriptAfterLoad {
     }
 }
 
+struct OblivionEfitAfterLoad {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for OblivionEfitAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.oblivion_efit_actor_value"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.game != SchemaGame::Oblivion {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion EFIT migration is only valid for Oblivion".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion EFIT migration requires a writable record".to_owned(),
+            })?;
+        let index = invocation
+            .source_subrecord_index
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion EFIT migration requires a source subrecord".to_owned(),
+            })?;
+        let efit = record
+            .subrecords
+            .get(index)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("source subrecord index {index} is out of bounds"),
+            })?;
+        if efit.signature != Signature(*b"EFIT") || efit.data.len() != 24 {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "Oblivion EFIT migration requires a 24-byte payload, got {} bytes of {}",
+                    efit.data.len(),
+                    efit.signature
+                ),
+            });
+        }
+        let code = u32::from_le_bytes(
+            efit.data[..4]
+                .try_into()
+                .expect("four-byte EFIT code slice must convert"),
+        );
+        let Some(effect) = self.resolver.as_deref().and_then(|resolver| {
+            resolver.resolve_magic_effect_code(
+                HandlerRecordContext::new(
+                    invocation.context.record_signature,
+                    invocation.context.form_id,
+                    invocation.context.form_version,
+                    invocation.context.game,
+                ),
+                code,
+            )
+        }) else {
+            return Ok(HandlerOutput::None);
+        };
+        if effect.magic_effect_flags().unwrap_or_default() & 0x0100_0000 == 0 {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(associated_item) = effect.magic_effect_associated_item() else {
+            return Ok(HandlerOutput::None);
+        };
+        let actor_value = i32::try_from(associated_item).map_err(|_| SemanticError::Handler {
+            handler: self.id().to_owned(),
+            message: format!("resolved associated item {associated_item} exceeds i32"),
+        })?;
+        let bytes = actor_value.to_le_bytes();
+        if efit.data[20..24] == bytes {
+            return Ok(HandlerOutput::None);
+        }
+        let mut data = efit.data.clone();
+        data[20..24].copy_from_slice(&bytes);
+        Ok(HandlerOutput::SubrecordPayload(data))
+    }
+}
+
+struct VerifyOblivionEfixAfterLoad;
+
+impl SemanticHandler for VerifyOblivionEfixAfterLoad {
+    fn id(&self) -> &'static str {
+        "verify.inert_oblivion_efix_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.game != SchemaGame::Oblivion {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion EFIX verifier is only valid for Oblivion".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion EFIX verifier requires a writable record".to_owned(),
+            })?;
+        let index = invocation
+            .source_subrecord_index
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion EFIX verifier requires a source subrecord".to_owned(),
+            })?;
+        let efix = record
+            .subrecords
+            .get(index)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("source subrecord index {index} is out of bounds"),
+            })?;
+        if efix.signature != Signature(*b"EFIX") {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("Oblivion EFIX verifier received {}", efix.signature),
+            });
+        }
+        Ok(HandlerOutput::None)
+    }
+}
+
 struct CtdaRunOnAfterSet;
 
 impl SemanticHandler for CtdaRunOnAfterSet {
@@ -10151,6 +10328,21 @@ mod tests {
                 ),
                 _ => None,
             }
+        }
+
+        fn resolve_magic_effect_code(
+            &self,
+            _source: HandlerRecordContext,
+            code: u32,
+        ) -> Option<FormLinkInfo> {
+            (code == u32::from_le_bytes(*b"ABCD")).then(|| {
+                FormLinkInfo::new(
+                    "Example Effect [MGEF:00006789]",
+                    "Example Effect [MGEF:00006789]",
+                )
+                .with_signature(Signature(*b"MGEF"))
+                .with_magic_effect_metadata(0x0100_0000, 42)
+            })
         }
 
         fn resolve_record_index(
@@ -14764,6 +14956,123 @@ mod tests {
             None,
         )?;
         assert!(matches!(unresolved, HandlerOutput::None));
+        Ok(())
+    }
+
+    /// Synchronizes Oblivion EFIT actor values through the resolved MGEF effect code.
+    #[test]
+    fn oblivion_efit_after_load_uses_resolved_magic_effect_metadata() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/0:Effect/1:EFIT".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-oblivion-efit-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.oblivion_efit_actor_value".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let mut original_efit = (0_u8..24).collect::<Vec<_>>();
+        original_efit[..4].copy_from_slice(b"ABCD");
+        original_efit[20..24].copy_from_slice(&(-1_i32).to_le_bytes());
+        let record = WritableRecord {
+            signature: Signature(*b"TEST"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"EFIT"),
+                data: original_efit.clone(),
+            }],
+        };
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId(0x1111), 0, SchemaGame::Oblivion);
+        let output = handlers.invoke_with_records(
+            &binding,
+            source,
+            HandlerInvocationAccess::writable_subrecord_with_scope(&record, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+
+        let HandlerOutput::SubrecordPayload(migrated) = output else {
+            return Err(SemanticError::Handler {
+                handler: "migrate.oblivion_efit_actor_value".to_owned(),
+                message: "Oblivion EFIT migration did not return a payload".to_owned(),
+            });
+        };
+        assert_eq!(&migrated[..20], &original_efit[..20]);
+        assert_eq!(&migrated[20..24], &42_i32.to_le_bytes());
+
+        let unresolved = SemanticHandlerRegistry::builtin().invoke_with_records(
+            &binding,
+            source,
+            HandlerInvocationAccess::writable_subrecord_with_scope(&record, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        assert!(matches!(unresolved, HandlerOutput::None));
+        Ok(())
+    }
+
+    /// Verifies that Oblivion EFIX cannot expose the EFIT members used by the callback.
+    #[test]
+    fn oblivion_efix_after_load_verifier_rejects_signature_drift() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/0:Effect/1:EFIX".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-oblivion-efix-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "verify.inert_oblivion_efix_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let source =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId(0x1111), 0, SchemaGame::Oblivion);
+        let record = |signature| WritableRecord {
+            signature: Signature(*b"TEST"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature,
+                data: vec![0x5a; 20],
+            }],
+        };
+        let valid = record(Signature(*b"EFIX"));
+        let output = SemanticHandlerRegistry::builtin().invoke_with_records(
+            &binding,
+            source,
+            HandlerInvocationAccess::writable_subrecord_with_scope(&valid, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        assert!(matches!(output, HandlerOutput::None));
+
+        let drifted = record(Signature(*b"EFIT"));
+        let error = SemanticHandlerRegistry::builtin()
+            .invoke_with_records(
+                &binding,
+                source,
+                HandlerInvocationAccess::writable_subrecord_with_scope(&drifted, 0, None),
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+            .expect_err("an EFIT subrecord must fail the EFIX verifier");
+        assert!(error.to_string().contains("received EFIT"));
         Ok(())
     }
 

@@ -3373,6 +3373,21 @@ mod tests {
                 },
             )
         }
+
+        fn resolve_magic_effect_code(
+            &self,
+            _source: HandlerRecordContext,
+            code: u32,
+        ) -> Option<crate::FormLinkInfo> {
+            (code == u32::from_le_bytes(*b"ABCD")).then(|| {
+                crate::FormLinkInfo::new(
+                    "Example Effect [MGEF:00006789]",
+                    "Example Effect [MGEF:00006789]",
+                )
+                .with_signature(Signature(*b"MGEF"))
+                .with_magic_effect_metadata(0x0100_0000, 42)
+            })
+        }
     }
 
     fn windows_1252_string(zero_terminated: bool) -> PrimitiveType {
@@ -4759,6 +4774,101 @@ mod tests {
         let writable = editor.into_writable_record();
         assert_eq!(&writable.subrecords[1].data[..16], &efit[..16]);
         assert_eq!(&writable.subrecords[1].data[16..20], &48_i32.to_le_bytes());
+        Ok(())
+    }
+
+    /// Applies Oblivion's MGEF-code EFIT migration only to the writable snapshot.
+    #[test]
+    fn editor_applies_oblivion_efit_after_load_migration() -> Result<()> {
+        let efit_path = "TEST/0:EFIT";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Oblivion;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.oblivion_efit_actor_value".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "TEST".to_owned(),
+                    name: "Test".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: efit_path.to_owned(),
+                            name: "Effect Data".to_owned(),
+                            required: true,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"EFIT"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: format!("{efit_path}/payload"),
+                                    name: "Effect Data".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Bytes { length: Some(24) },
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: efit_path.to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "77".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.oblivion_efit_actor_value".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            }],
+        )?;
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestMagicEffectResolver));
+        let context = SemanticContext::new_with_handlers(
+            Arc::new(package),
+            crate::DecoderRegistry::builtin(),
+            handlers,
+        )?;
+        let mut efit = (0_u8..24).collect::<Vec<_>>();
+        efit[..4].copy_from_slice(b"ABCD");
+        efit[20..24].copy_from_slice(&(-1_i32).to_le_bytes());
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"TEST"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"EFIT"),
+                data: efit.clone(),
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(source.subrecords()?[0].as_bytes(), efit);
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(&writable.subrecords[0].data[..20], &efit[..20]);
+        assert_eq!(&writable.subrecords[0].data[20..24], &42_i32.to_le_bytes());
         Ok(())
     }
 
