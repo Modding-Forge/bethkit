@@ -9669,6 +9669,136 @@ mod tests {
         SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())
     }
 
+    fn magic_effect_assoc_item_editor_context() -> Result<SemanticContext> {
+        fn primitive(id: u32, path: &str, name: &str, primitive: PrimitiveType) -> SchemaNode {
+            SchemaNode {
+                id: SchemaNodeId(id),
+                path: path.to_owned(),
+                name: name.to_owned(),
+                required: true,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Primitive { primitive },
+            }
+        }
+
+        let data_path = "MGEF/0:Data";
+        let payload_path = "MGEF/0:Data/payload";
+        let assoc_item_path = "MGEF/0:Data/payload/1:Assoc. Item";
+        let archetype_path = "MGEF/0:Data/payload/3:Archtype";
+        let bytes = |id, suffix, length| {
+            primitive(
+                id,
+                &format!("{payload_path}/{suffix}"),
+                suffix,
+                PrimitiveType::Bytes {
+                    length: Some(length),
+                },
+            )
+        };
+        let assoc_item = SchemaNode {
+            id: SchemaNodeId(3),
+            path: assoc_item_path.to_owned(),
+            name: "Assoc. Item".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Union {
+                selector: UnionSelector::Expression(Expression::Int { value: 0 }),
+                variants: vec![primitive(
+                    4,
+                    &format!("{assoc_item_path}/variants/0:Assoc. Item"),
+                    "Assoc. Item",
+                    PrimitiveType::FormId {
+                        targets: Vec::new(),
+                    },
+                )],
+            },
+        };
+        let archetype = primitive(
+            6,
+            archetype_path,
+            "Archtype",
+            PrimitiveType::Enumeration {
+                integer: IntegerType {
+                    width: 4,
+                    signed: false,
+                    byte_order: ByteOrder::LittleEndian,
+                },
+                values: vec![(0, "Value Modifier".to_owned())],
+            },
+        );
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "edit.magic_effect_assoc_item".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"MGEF"),
+                name: "Magic Effect".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "MGEF".to_owned(),
+                    name: "Magic Effect".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: data_path.to_owned(),
+                            name: "Data".to_owned(),
+                            required: true,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"DATA"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: payload_path.to_owned(),
+                                    name: "Data".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Struct {
+                                        fields: vec![
+                                            bytes(5, "0:Prefix", 2),
+                                            assoc_item,
+                                            bytes(7, "2:Unknown", 3),
+                                            archetype,
+                                            bytes(8, "4:Tail", 2),
+                                        ],
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: assoc_item_path.to_owned(),
+                callback_id: "def.after_set".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "99".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "edit.magic_effect_assoc_item".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "assoc_item_path": assoc_item_path,
+                            "archetype_path": archetype_path
+                        }),
+                    },
+                },
+            }],
+        )?;
+        SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())
+    }
+
     fn perk_effect_editor_context() -> Result<SemanticContext> {
         fn node(
             id: u32,
@@ -11375,6 +11505,73 @@ mod tests {
             localized_editor.record.subrecords[1].data,
             0_u32.to_le_bytes()
         );
+        Ok(())
+    }
+
+    /// Applies MGEF associated-item protection locally without changing unrelated bytes.
+    #[test]
+    fn magic_effect_assoc_item_change_is_lossless() -> Result<()> {
+        let context = magic_effect_assoc_item_editor_context()?;
+        let original = vec![
+            0xaa, 0xbb, 0, 0, 0, 0, 0xcc, 0xdd, 0xee, 0, 0, 0, 0, 0x11, 0x22,
+        ];
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"MGEF"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1234),
+            form_version: 44,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: original.clone(),
+            }],
+        });
+        let mut editor = context.edit(&source, false)?;
+
+        editor.set(
+            "MGEF/0:Data",
+            0,
+            &OwnedFieldValue::Struct(vec![
+                OwnedFieldValue::Bytes(vec![0xaa, 0xbb]),
+                OwnedFieldValue::FormId(bethkit_core::FormId(0x0102_0304)),
+                OwnedFieldValue::Bytes(vec![0xcc, 0xdd, 0xee]),
+                OwnedFieldValue::Int(0),
+                OwnedFieldValue::Bytes(vec![0x11, 0x22]),
+            ]),
+        )?;
+
+        let mut expected = original.clone();
+        expected[2..6].copy_from_slice(&0x0102_0304_u32.to_le_bytes());
+        expected[9..13].copy_from_slice(&0xff_u32.to_le_bytes());
+        assert_eq!(editor.record.subrecords[0].data, expected);
+        assert_eq!(source.subrecords()?[0].as_bytes(), original);
+
+        let mut protected = original;
+        protected[9] = 7;
+        let protected_source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"MGEF"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1234),
+            form_version: 44,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: protected,
+            }],
+        });
+        let mut protected_editor = context.edit(&protected_source, false)?;
+
+        protected_editor.set(
+            "MGEF/0:Data",
+            0,
+            &OwnedFieldValue::Struct(vec![
+                OwnedFieldValue::Bytes(vec![0xaa, 0xbb]),
+                OwnedFieldValue::FormId(bethkit_core::FormId(0x0102_0304)),
+                OwnedFieldValue::Bytes(vec![0xcc, 0xdd, 0xee]),
+                OwnedFieldValue::Int(7),
+                OwnedFieldValue::Bytes(vec![0x11, 0x22]),
+            ]),
+        )?;
+
+        assert_eq!(protected_editor.record.subrecords[0].data[9], 7);
         Ok(())
     }
 

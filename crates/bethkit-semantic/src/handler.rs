@@ -1266,6 +1266,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(GameSettingEditorIdAfterSet));
         registry.register(Arc::new(PerkEffectTypeAfterSet));
+        registry.register(Arc::new(MagicEffectAssocItemAfterSet));
         registry.register(Arc::new(LegacyPerkEntryPointAfterSet));
         registry.register(Arc::new(LegacyPerkFunctionAfterSet));
         registry.register(Arc::new(LegacyPerkParameterTypeAfterSet));
@@ -12205,6 +12206,75 @@ impl SemanticHandler for PerkEffectTypeAfterSet {
             });
         }
         Ok(HandlerOutput::Mutations(mutations))
+    }
+}
+
+struct MagicEffectAssocItemAfterSet;
+
+impl SemanticHandler for MagicEffectAssocItemAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.magic_effect_assoc_item"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"MGEF")
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout3
+                    | SchemaGame::FalloutNv
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "associated-item updates require a guarded MGEF binding".to_owned(),
+            });
+        }
+        let assoc_item_path = configured_text(
+            self.id(),
+            invocation.context.configuration,
+            "assoc_item_path",
+        )?;
+        if assoc_item_path != invocation.context.binding.path {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "associated-item configuration does not match its binding path".to_owned(),
+            });
+        }
+        let Some(FieldValue::FormId { value, .. }) = invocation.value else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "associated-item updates require a FormID value".to_owned(),
+            });
+        };
+        if value.0 == 0 {
+            return Ok(HandlerOutput::None);
+        }
+        let archetype_path = configured_text(
+            self.id(),
+            invocation.context.configuration,
+            "archetype_path",
+        )?;
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::SetIfEqual {
+                path: archetype_path.to_owned(),
+                occurrence: 0,
+                expected: OwnedFieldValue::Int(0),
+                value: OwnedFieldValue::Int(0xFF),
+            },
+        ]))
     }
 }
 
@@ -24036,6 +24106,86 @@ mod tests {
                     ] if textures.ends_with("/2:Textures") && model.ends_with("/0:File")
                 )
         ));
+        Ok(())
+    }
+
+    /// Protects a zero MGEF archetype when a non-null associated item is assigned.
+    #[test]
+    fn magic_effect_assoc_item_protects_unset_archetype() -> Result<()> {
+        let handlers = SemanticHandlerRegistry::builtin();
+        for (game, assoc_item_path, archetype_path) in [
+            (
+                SchemaGame::Fallout3,
+                "MGEF/5:Data/payload/2:Assoc. Item",
+                "MGEF/5:Data/payload/17:Archtype",
+            ),
+            (
+                SchemaGame::SkyrimSe,
+                "MGEF/6:Magic Effect Data/0:Data/payload/2:Assoc. Item",
+                "MGEF/6:Magic Effect Data/0:Data/payload/16:Archtype",
+            ),
+            (
+                SchemaGame::Fallout76,
+                "MGEF/5:Magic Effect Data/0:Data/payload/3:Assoc. Item",
+                "MGEF/5:Magic Effect Data/0:Data/payload/17:Archetype",
+            ),
+        ] {
+            let binding = CallbackBinding {
+                path: assoc_item_path.to_owned(),
+                callback_id: "def.after_set".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "test-mgef-assoc-item".to_owned(),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: bethkit_schema::BuiltInOperation {
+                        id: "edit.magic_effect_assoc_item".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "assoc_item_path": assoc_item_path,
+                            "archetype_path": archetype_path
+                        }),
+                    },
+                },
+            };
+            let record = HandlerRecordContext::new(Signature(*b"MGEF"), FormId::NULL, 0, game);
+            let protected = handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::FormId {
+                    value: FormId(0x1234),
+                    targets: Vec::new(),
+                }),
+                Some(&FieldValue::FormId {
+                    value: FormId::NULL,
+                    targets: Vec::new(),
+                }),
+            )?;
+            assert!(matches!(
+                protected,
+                HandlerOutput::Mutations(mutations)
+                    if mutations == [HandlerMutation::SetIfEqual {
+                        path: archetype_path.to_owned(),
+                        occurrence: 0,
+                        expected: OwnedFieldValue::Int(0),
+                        value: OwnedFieldValue::Int(0xff),
+                    }]
+            ));
+
+            let null = handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::FormId {
+                    value: FormId::NULL,
+                    targets: Vec::new(),
+                }),
+                Some(&FieldValue::FormId {
+                    value: FormId(0x1234),
+                    targets: Vec::new(),
+                }),
+            )?;
+            assert!(matches!(null, HandlerOutput::None));
+        }
         Ok(())
     }
 
