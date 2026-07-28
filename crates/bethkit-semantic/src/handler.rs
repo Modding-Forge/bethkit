@@ -1187,6 +1187,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacyEffectShaderAfterLoad));
         registry.register(Arc::new(LegacyFactionAfterLoad));
         registry.register(Arc::new(LegacyWaterAfterLoad));
+        registry.register(Arc::new(OblivionReferenceAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -8914,6 +8915,85 @@ impl SemanticHandler for LegacyWaterAfterLoad {
             data: new_visual,
         });
         Ok(HandlerOutput::Mutations(mutations))
+    }
+}
+
+struct OblivionReferenceAfterLoad;
+
+impl SemanticHandler for OblivionReferenceAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.oblivion_reference_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        let (expected_root, expected_path) = match invocation.context.record_signature {
+            Signature(signature) if signature == *b"ACHR" => ("ACHR", "ACHR/2:Unused/0:Unused"),
+            Signature(signature) if signature == *b"REFR" => ("REFR", "REFR/11:Unused/0:Unused"),
+            _ => {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "Oblivion reference migration requires ACHR or REFR".to_owned(),
+                });
+            }
+        };
+        if invocation.context.binding.path != expected_root
+            || invocation.context.game != SchemaGame::Oblivion
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion reference migration requires a guarded root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion reference migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion reference migration requires a writable record".to_owned(),
+            })?;
+        if record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let unused_path = invocation
+            .context
+            .configuration
+            .get("unused_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion reference migration requires unused_path".to_owned(),
+            })?;
+        if unused_path != expected_path {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion reference migration path does not match the record".to_owned(),
+            });
+        }
+        if !record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"XPCI"))
+        {
+            return Ok(HandlerOutput::None);
+        }
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::RemoveFirstBySignature {
+                path: invocation.context.binding.path.to_owned(),
+                signature: Signature(*b"XPCI"),
+            },
+        ]))
     }
 }
 
@@ -17497,6 +17577,88 @@ mod tests {
             invoke(
                 SchemaGame::FalloutNv,
                 &record(vec![(*b"DATA", vec![0_u8; 185])]),
+            )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Removes only the first Oblivion reference XPCI, including on deleted records.
+    #[test]
+    fn oblivion_reference_after_load_matches_xedit_unused_cleanup() -> Result<()> {
+        let binding = |path: &str, unused_path: &str| CallbackBinding {
+            path: path.to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-oblivion-reference-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.oblivion_reference_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "unused_path": unused_path,
+                    }),
+                },
+            },
+        };
+        let record = |signature, flags, subrecords: Vec<([u8; 4], Vec<u8>)>| WritableRecord {
+            signature: Signature(signature),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: subrecords
+                .into_iter()
+                .map(|(signature, data)| bethkit_core::WritableSubRecord {
+                    signature: Signature(signature),
+                    data,
+                })
+                .collect(),
+        };
+        let registry = SemanticHandlerRegistry::builtin();
+        let invoke = |binding: &CallbackBinding, record: &WritableRecord| {
+            registry.invoke_with_writable_record(
+                binding,
+                HandlerRecordContext::new(
+                    record.signature,
+                    FormId(0x1111),
+                    0,
+                    SchemaGame::Oblivion,
+                ),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+
+        let achr = binding("ACHR", "ACHR/2:Unused/0:Unused");
+        assert!(matches!(
+            invoke(
+                &achr,
+                &record(
+                    *b"ACHR",
+                    RecordFlags::DELETED,
+                    vec![
+                        (*b"XPCI", vec![1, 0, 0, 0]),
+                        (*b"XPCI", vec![2, 0, 0, 0]),
+                    ],
+                ),
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::RemoveFirstBySignature {
+                    path: "ACHR".to_owned(),
+                    signature: Signature(*b"XPCI"),
+                }]
+        ));
+        let refr = binding("REFR", "REFR/11:Unused/0:Unused");
+        assert!(matches!(
+            invoke(
+                &refr,
+                &record(
+                    *b"REFR",
+                    RecordFlags::empty(),
+                    vec![(*b"EDID", b"Reference\0".to_vec())],
+                ),
             )?,
             HandlerOutput::None
         ));

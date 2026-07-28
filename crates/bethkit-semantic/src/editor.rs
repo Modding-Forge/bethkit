@@ -6245,6 +6245,103 @@ mod tests {
         Ok(())
     }
 
+    /// Removes one Oblivion ACHR XPCI before decoding even when the record is deleted.
+    #[test]
+    fn editor_applies_oblivion_reference_after_load_migration() -> Result<()> {
+        let unused_path = "ACHR/2:Unused/0:Unused";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Oblivion;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.oblivion_reference_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"ACHR"),
+                name: "Placed NPC".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "ACHR".to_owned(),
+                    name: "Placed NPC".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: unused_path.to_owned(),
+                            name: "Unused".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"XPCI"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: format!("{unused_path}/payload"),
+                                    name: "Unused".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::FormId {
+                                            targets: Vec::new(),
+                                        },
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "ACHR".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "d3".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.oblivion_reference_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "unused_path": unused_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"ACHR"),
+            flags: bethkit_core::RecordFlags::DELETED,
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"XPCI"),
+                    data: 1_u32.to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"XPCI"),
+                    data: 2_u32.to_le_bytes().to_vec(),
+                },
+            ],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 1);
+        assert_eq!(writable.subrecords[0].signature, Signature(*b"XPCI"));
+        assert_eq!(writable.subrecords[0].data, 2_u32.to_le_bytes());
+        assert_eq!(source.subrecords()?.len(), 2);
+        Ok(())
+    }
+
     /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
     fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {
