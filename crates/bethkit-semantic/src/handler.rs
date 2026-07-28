@@ -12159,26 +12159,8 @@ impl SemanticHandler for PerkEffectTypeAfterSet {
         if invocation.phase != HandlerPhase::AfterSet {
             return Ok(HandlerOutput::None);
         }
-        if invocation.context.record_signature != Signature(*b"PERK")
-            || !matches!(
-                invocation.context.game,
-                SchemaGame::SkyrimLe
-                    | SchemaGame::SkyrimSe
-                    | SchemaGame::SkyrimVr
-                    | SchemaGame::Fallout3
-                    | SchemaGame::FalloutNv
-                    | SchemaGame::Fallout4
-                    | SchemaGame::Fallout4Vr
-                    | SchemaGame::Fallout76
-                    | SchemaGame::Starfield
-            )
-        {
-            return Err(SemanticError::Handler {
-                handler: self.id().to_owned(),
-                message: "perk effect type updates require a guarded PERK binding".to_owned(),
-            });
-        }
-        let type_path = configured_text(self.id(), invocation.context.configuration, "type_path")?;
+        let configuration = invocation.context.configuration;
+        let type_path = configured_text(self.id(), configuration, "type_path")?;
         if type_path != invocation.context.binding.path {
             return Err(SemanticError::Handler {
                 handler: self.id().to_owned(),
@@ -12203,23 +12185,9 @@ impl SemanticHandler for PerkEffectTypeAfterSet {
         if old_type == new_type {
             return Ok(HandlerOutput::None);
         }
-        if !(0..=2).contains(&new_type) {
-            return Err(SemanticError::Handler {
-                handler: self.id().to_owned(),
-                message: format!("unsupported perk effect type {new_type}"),
-            });
-        }
-        let data_path = configured_text(self.id(), invocation.context.configuration, "data_path")?;
-        let conditions_path = configured_text(
-            self.id(),
-            invocation.context.configuration,
-            "conditions_path",
-        )?;
-        let parameters_path = configured_text(
-            self.id(),
-            invocation.context.configuration,
-            "parameters_path",
-        )?;
+        let data_path = configured_text(self.id(), configuration, "data_path")?;
+        let conditions_path = configured_text(self.id(), configuration, "conditions_path")?;
+        let parameters_path = configured_text(self.id(), configuration, "parameters_path")?;
         let mut mutations = vec![
             HandlerMutation::ResetToDefault {
                 path: data_path.to_owned(),
@@ -12232,24 +12200,23 @@ impl SemanticHandler for PerkEffectTypeAfterSet {
                 path: parameters_path.to_owned(),
             },
         ];
-        if new_type == 2 {
-            let parameter_type_path = configured_text(
-                self.id(),
-                invocation.context.configuration,
-                "parameter_type_path",
-            )?;
-            let function_path =
-                configured_text(self.id(), invocation.context.configuration, "function_path")?;
-            mutations.push(HandlerMutation::SynchronizePresence {
-                path: parameter_type_path.to_owned(),
-                occurrence: 0,
-                present: true,
-                value: OwnedFieldValue::Int(0),
+        let entry_point_type = i128::from(configured_i64(
+            self.id(),
+            configuration,
+            "entry_point_type",
+        )?);
+        if new_type == entry_point_type {
+            mutations.push(HandlerMutation::InsertDefault {
+                path: configured_text(self.id(), configuration, "parameter_type_path")?.to_owned(),
             });
             mutations.push(HandlerMutation::Set {
-                path: function_path.to_owned(),
+                path: configured_text(self.id(), configuration, "function_path")?.to_owned(),
                 occurrence: 0,
-                value: OwnedFieldValue::Int(2),
+                value: OwnedFieldValue::Int(configured_i64(
+                    self.id(),
+                    configuration,
+                    "entry_point_function",
+                )?),
             });
         }
         Ok(HandlerOutput::Mutations(mutations))
@@ -23892,14 +23859,16 @@ mod tests {
                         "conditions_path": conditions_path,
                         "parameters_path": parameters_path,
                         "parameter_type_path": parameter_type_path,
-                        "function_path": function_path
+                        "function_path": function_path,
+                        "entry_point_type": 2,
+                        "entry_point_function": 2
                     }),
                 },
             },
         };
         let handlers = SemanticHandlerRegistry::builtin();
         let record =
-            HandlerRecordContext::new(Signature(*b"PERK"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Morrowind);
 
         let output = handlers.invoke(
             &binding,
@@ -23923,11 +23892,8 @@ mod tests {
                     HandlerMutation::RemoveContainer {
                         path: parameters_path.to_owned(),
                     },
-                    HandlerMutation::SynchronizePresence {
+                    HandlerMutation::InsertDefault {
                         path: parameter_type_path.to_owned(),
-                        occurrence: 0,
-                        present: true,
-                        value: OwnedFieldValue::Int(0),
                     },
                     HandlerMutation::Set {
                         path: function_path.to_owned(),
@@ -23945,6 +23911,22 @@ mod tests {
                 Some(&FieldValue::Int(1)),
             )?,
             HandlerOutput::None
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::Int(9)),
+                Some(&FieldValue::Int(1)),
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations.len() == 3
+                    && matches!(
+                        mutations.last(),
+                        Some(HandlerMutation::RemoveContainer { path })
+                            if path == parameters_path
+                    )
         ));
         Ok(())
     }

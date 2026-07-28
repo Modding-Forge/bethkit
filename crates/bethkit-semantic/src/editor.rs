@@ -10294,7 +10294,9 @@ mod tests {
                                 "conditions_path": conditions_path,
                                 "parameters_path": parameters_path,
                                 "parameter_type_path": parameter_type_path,
-                                "function_path": function_path
+                                "function_path": function_path,
+                                "entry_point_type": 2,
+                                "entry_point_function": 2
                             }),
                         },
                     },
