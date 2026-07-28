@@ -5,8 +5,8 @@
 //! [`PluginPatcher`] walks an already-parsed [`Plugin`] and serialises it
 //! back to a writer. Records and groups whose [`Record::source_range`] /
 //! [`Group::source_range`] is set are written verbatim from the original
-//! source bytes; only records present in [`PluginPatcher::patches`] are
-//! re-serialised.
+//! source bytes; only records present in [`PluginPatcher::patches`] and
+//! explicitly reordered groups are re-serialised.
 //!
 //! Group sizes are recomputed from the actual emitted children so that
 //! patches changing record sizes still produce a valid plugin. Groups that
@@ -110,6 +110,7 @@ impl RecordPatch {
 pub struct PluginPatcher<'p> {
     plugin: &'p Plugin,
     patches: HashMap<FormId, RecordPatch>,
+    group_orders: HashMap<Range<usize>, Vec<FormId>>,
     header_patch: Option<PluginHeaderPatch>,
 }
 
@@ -122,6 +123,7 @@ impl<'p> PluginPatcher<'p> {
         Self {
             plugin,
             patches: HashMap::new(),
+            group_orders: HashMap::new(),
             header_patch: None,
         }
     }
@@ -134,6 +136,63 @@ impl<'p> PluginPatcher<'p> {
     pub fn replace_record(&mut self, form_id: FormId, patch: RecordPatch) -> &mut Self {
         self.patches.insert(form_id, patch);
         self
+    }
+
+    /// Reorders every direct record child in `group`.
+    ///
+    /// `form_ids` must contain each direct child record exactly once. Groups
+    /// containing nested groups cannot be reordered through this operation.
+    /// Registered record replacements remain attached to their FormIDs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::UnexpectedEof`] when `group` has no source range.
+    /// Returns [`CoreError::InvalidGroupRecordOrder`] when the group contains
+    /// nested groups, an ID is duplicated or unknown, or an ID is omitted.
+    pub fn reorder_group_records(
+        &mut self,
+        group: &Group,
+        form_ids: &[FormId],
+    ) -> Result<&mut Self> {
+        let range = group.source_range.clone().ok_or(CoreError::UnexpectedEof {
+            context: "group source range",
+        })?;
+        let mut expected = HashSet::new();
+        for child in group.children() {
+            let GroupChild::Record(record) = child else {
+                return Err(CoreError::InvalidGroupRecordOrder(
+                    "group contains nested groups".to_owned(),
+                ));
+            };
+            if !expected.insert(record.header.form_id) {
+                return Err(CoreError::InvalidGroupRecordOrder(format!(
+                    "group contains duplicate FormID {}",
+                    record.header.form_id
+                )));
+            }
+        }
+        let mut supplied = HashSet::new();
+        for form_id in form_ids {
+            if !supplied.insert(*form_id) {
+                return Err(CoreError::InvalidGroupRecordOrder(format!(
+                    "order contains duplicate FormID {form_id}"
+                )));
+            }
+            if !expected.contains(form_id) {
+                return Err(CoreError::InvalidGroupRecordOrder(format!(
+                    "order contains unknown FormID {form_id}"
+                )));
+            }
+        }
+        if supplied.len() != expected.len() {
+            return Err(CoreError::InvalidGroupRecordOrder(format!(
+                "order contains {} of {} direct records",
+                supplied.len(),
+                expected.len()
+            )));
+        }
+        self.group_orders.insert(range, form_ids.to_vec());
+        Ok(self)
     }
 
     /// Registers a header patch.
@@ -152,6 +211,11 @@ impl<'p> PluginPatcher<'p> {
         self.patches.len()
     }
 
+    /// Returns the number of registered direct-record group reorderings.
+    pub fn group_reorder_count(&self) -> usize {
+        self.group_orders.len()
+    }
+
     /// Writes the patched plugin to `writer`.
     ///
     /// # Errors
@@ -165,7 +229,7 @@ impl<'p> PluginPatcher<'p> {
     pub fn write_to(&self, writer: &mut impl Write) -> Result<()> {
         // Fast path: no patches and the whole source slice is available —
         // copy verbatim.
-        if self.patches.is_empty() && self.header_patch.is_none() {
+        if self.patches.is_empty() && self.group_orders.is_empty() && self.header_patch.is_none() {
             writer
                 .write_all(self.plugin.source_bytes())
                 .map_err(io_err)?;
@@ -177,6 +241,7 @@ impl<'p> PluginPatcher<'p> {
         let mut touched_groups: HashSet<Range<usize>> = HashSet::new();
         for group in self.plugin.groups() {
             mark_touched(group, &self.patches, &mut touched_groups);
+            mark_reordered(group, &self.group_orders, &mut touched_groups);
         }
 
         let source: &[u8] = self.plugin.source_bytes();
@@ -335,11 +400,29 @@ impl<'p> PluginPatcher<'p> {
         // Serialise children into a temporary buffer so we can compute the
         // new group_size before writing the GRUP header.
         let mut children_buf: Vec<u8> = Vec::new();
-        for child in group.children() {
-            match child {
-                GroupChild::Record(r) => self.write_record(r, source, &mut children_buf)?,
-                GroupChild::Group(g) => {
-                    self.write_group(g, source, touched, &mut children_buf)?;
+        let order = group
+            .source_range
+            .as_ref()
+            .and_then(|range| self.group_orders.get(range));
+        if let Some(order) = order {
+            for form_id in order {
+                let record = group
+                    .records()
+                    .find(|record| record.header.form_id == *form_id)
+                    .ok_or_else(|| {
+                        CoreError::InvalidGroupRecordOrder(format!(
+                            "registered FormID {form_id} is no longer in the group"
+                        ))
+                    })?;
+                self.write_record(record, source, &mut children_buf)?;
+            }
+        } else {
+            for child in group.children() {
+                match child {
+                    GroupChild::Record(r) => self.write_record(r, source, &mut children_buf)?,
+                    GroupChild::Group(g) => {
+                        self.write_group(g, source, touched, &mut children_buf)?;
+                    }
                 }
             }
         }
@@ -392,6 +475,29 @@ fn mark_touched(
         }
     }
     any
+}
+
+/// Recursively flags reordered groups and every containing ancestor.
+fn mark_reordered(
+    group: &Group,
+    group_orders: &HashMap<Range<usize>, Vec<FormId>>,
+    touched: &mut HashSet<Range<usize>>,
+) -> bool {
+    let own_reordered = group
+        .source_range
+        .as_ref()
+        .is_some_and(|range| group_orders.contains_key(range));
+    let descendant_reordered = group.children().iter().any(|child| match child {
+        GroupChild::Record(_) => false,
+        GroupChild::Group(child_group) => mark_reordered(child_group, group_orders, touched),
+    });
+    let reordered = own_reordered || descendant_reordered;
+    if reordered {
+        if let Some(range) = &group.source_range {
+            touched.insert(range.clone());
+        }
+    }
+    reordered
 }
 
 /// Re-emits a group header with a recalculated `group_size`.
@@ -459,6 +565,20 @@ mod tests {
         plugin
     }
 
+    fn sample_info_plugin_bytes() -> Vec<u8> {
+        let hedr = build_hedr(1.7, 3, 0x800);
+        let tes4_data = build_subrecord(b"HEDR", &hedr);
+        let tes4 = build_record(b"TES4", 0, 0, &tes4_data);
+        let mut children = Vec::new();
+        children.extend_from_slice(&build_record(b"INFO", 0, 0x11, &[]));
+        children.extend_from_slice(&build_record(b"INFO", 0, 0x12, &[]));
+        children.extend_from_slice(&build_record(b"INFO", 0, 0x13, &[]));
+        let group = build_grup(&0x10_u32.to_le_bytes(), 7, &children);
+        let mut plugin = tes4;
+        plugin.extend_from_slice(&group);
+        plugin
+    }
+
     /// Verifies that a patcher with no edits produces byte-identical output.
     #[test]
     fn no_op_patcher_is_byte_identical() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -473,6 +593,80 @@ mod tests {
 
         // then
         assert_eq!(out, original);
+        Ok(())
+    }
+
+    /// Reorders a complete direct-record group and preserves every record byte.
+    #[test]
+    fn group_reordering_is_complete_and_lossless(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let original = sample_info_plugin_bytes();
+        let plugin = Plugin::from_bytes(&original, GameContext::sse())?;
+        let group = &plugin.groups()[0];
+        let original_record_bytes = group
+            .records()
+            .map(|record| {
+                (
+                    record.header.form_id,
+                    record
+                        .source_bytes(plugin.source_bytes())
+                        .expect("parsed records have source bytes")
+                        .to_vec(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        // when
+        let mut patcher = PluginPatcher::new(&plugin);
+        patcher.reorder_group_records(group, &[FormId(0x13), FormId(0x11), FormId(0x12)])?;
+        let mut output = Vec::new();
+        patcher.write_to(&mut output)?;
+
+        // then
+        let reparsed = Plugin::from_bytes(&output, GameContext::sse())?;
+        let records = reparsed.groups()[0].records().collect::<Vec<_>>();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.header.form_id)
+                .collect::<Vec<_>>(),
+            [FormId(0x13), FormId(0x11), FormId(0x12)]
+        );
+        for record in records {
+            assert_eq!(
+                record
+                    .source_bytes(reparsed.source_bytes())
+                    .expect("reparsed records have source bytes"),
+                original_record_bytes[&record.header.form_id]
+            );
+        }
+        assert_eq!(patcher.group_reorder_count(), 1);
+        Ok(())
+    }
+
+    /// Rejects incomplete and duplicate direct-record group orders.
+    #[test]
+    fn group_reordering_rejects_invalid_orders(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let original = sample_info_plugin_bytes();
+        let plugin = Plugin::from_bytes(&original, GameContext::sse())?;
+        let group = &plugin.groups()[0];
+        let mut patcher = PluginPatcher::new(&plugin);
+
+        // when
+        let incomplete = patcher
+            .reorder_group_records(group, &[FormId(0x11), FormId(0x12)])
+            .is_err();
+        let duplicate = patcher
+            .reorder_group_records(group, &[FormId(0x11), FormId(0x12), FormId(0x12)])
+            .is_err();
+
+        // then
+        assert!(incomplete);
+        assert!(duplicate);
+        assert_eq!(patcher.group_reorder_count(), 0);
         Ok(())
     }
 

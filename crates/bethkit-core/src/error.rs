@@ -19,6 +19,10 @@ pub enum CoreError {
     #[error("Invalid GRUP type: {0}")]
     InvalidGroupType(i32),
 
+    /// A requested direct-record order does not exactly match a GRUP's children.
+    #[error("Invalid GRUP record order: {0}")]
+    InvalidGroupRecordOrder(String),
+
     /// The parser ran out of data while reading a named structure.
     #[error("Unexpected end of file while parsing {context}")]
     UnexpectedEof { context: &'static str },
