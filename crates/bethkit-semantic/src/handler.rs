@@ -1109,6 +1109,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(LegacyCtdaAfterLoad));
         registry.register(Arc::new(LegacyEfitAfterLoad { resolver: None }));
+        registry.register(Arc::new(VerifyModernEfitAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
@@ -7484,6 +7485,84 @@ impl SemanticHandler for LegacyEfitAfterLoad {
         let mut data = efit.data.clone();
         data[16..20].copy_from_slice(&bytes);
         Ok(HandlerOutput::SubrecordPayload(data))
+    }
+}
+
+struct VerifyModernEfitAfterLoad;
+
+impl SemanticHandler for VerifyModernEfitAfterLoad {
+    fn id(&self) -> &'static str {
+        "verify.inert_modern_efit_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if !matches!(
+            invocation.context.game,
+            SchemaGame::SkyrimLe
+                | SchemaGame::SkyrimSe
+                | SchemaGame::SkyrimVr
+                | SchemaGame::Fallout4
+                | SchemaGame::Fallout4Vr
+                | SchemaGame::Fallout76
+        ) {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "modern inert EFIT callback is not valid for this game".to_owned(),
+            });
+        }
+        let expected_size = invocation
+            .context
+            .configuration
+            .get("expected_payload_size")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|size| usize::try_from(size).ok());
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "modern inert EFIT verifier requires a writable record".to_owned(),
+            })?;
+        let index = invocation
+            .source_subrecord_index
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "modern inert EFIT verifier requires a source subrecord".to_owned(),
+            })?;
+        let efit = record
+            .subrecords
+            .get(index)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("source subrecord index {index} is out of bounds"),
+            })?;
+        if efit.signature != Signature(*b"EFIT") {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "modern inert EFIT verifier expected EFIT, got {}",
+                    efit.signature
+                ),
+            });
+        }
+        if let Some(expected_size) = expected_size {
+            if efit.data.len() != expected_size {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "modern inert EFIT verifier expected {expected_size} bytes, got {}",
+                        efit.data.len()
+                    ),
+                });
+            }
+        }
+        Ok(HandlerOutput::None)
     }
 }
 
@@ -14619,6 +14698,85 @@ mod tests {
             None,
         )?;
         assert!(matches!(unresolved, HandlerOutput::None));
+        Ok(())
+    }
+
+    /// Verifies the fixed modern EFIT layout that makes xEdit's stale setter inert.
+    #[test]
+    fn modern_efit_after_load_verifier_rejects_layout_drift() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/0:Effect/1:EFIT".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-modern-efit-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "verify.inert_modern_efit_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({ "expected_payload_size": 12 }),
+                },
+            },
+        };
+        let source =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId(0x1111), 0, SchemaGame::SkyrimSe);
+        let record = |size| WritableRecord {
+            signature: Signature(*b"TEST"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"EFIT"),
+                data: vec![0x5a; size],
+            }],
+        };
+        let valid = record(12);
+        let output = SemanticHandlerRegistry::builtin().invoke_with_records(
+            &binding,
+            source,
+            HandlerInvocationAccess::writable_subrecord_with_scope(&valid, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        assert!(matches!(output, HandlerOutput::None));
+
+        let drifted = record(20);
+        let error = SemanticHandlerRegistry::builtin()
+            .invoke_with_records(
+                &binding,
+                source,
+                HandlerInvocationAccess::writable_subrecord_with_scope(&drifted, 0, None),
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+            .expect_err("a legacy-sized EFIT must fail the modern verifier");
+        assert!(error.to_string().contains("expected 12 bytes"));
+
+        let mut versioned_binding = binding;
+        let CallbackImplementation::BuiltIn { operation } = &mut versioned_binding.implementation
+        else {
+            return Err(SemanticError::Handler {
+                handler: "verify.inert_modern_efit_after_load".to_owned(),
+                message: "test binding is not built in".to_owned(),
+            });
+        };
+        operation.configuration = serde_json::json!({});
+        let versioned = record(24);
+        let output = SemanticHandlerRegistry::builtin().invoke_with_records(
+            &versioned_binding,
+            HandlerRecordContext::new(
+                Signature(*b"TEST"),
+                FormId(0x1111),
+                166,
+                SchemaGame::Fallout76,
+            ),
+            HandlerInvocationAccess::writable_subrecord_with_scope(&versioned, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        assert!(matches!(output, HandlerOutput::None));
         Ok(())
     }
 
