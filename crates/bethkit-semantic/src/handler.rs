@@ -386,6 +386,39 @@ pub struct FormLinkInfo {
     script_variables: Option<ScriptVariableMetadata>,
 }
 
+/// Key used to query one of xEdit's named record indexes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordIndexKeyValue {
+    /// Case-sensitive text key.
+    Text(String),
+    /// Signed integer key.
+    Integer(i64),
+}
+
+/// Resolved record returned from one of xEdit's named indexes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedRecordInfo {
+    form_id: FormId,
+    link: FormLinkInfo,
+}
+
+impl IndexedRecordInfo {
+    /// Creates indexed-record metadata.
+    pub const fn new(form_id: FormId, link: FormLinkInfo) -> Self {
+        Self { form_id, link }
+    }
+
+    /// Returns the file-local FormID of the indexed record.
+    pub const fn form_id(&self) -> FormId {
+        self.form_id
+    }
+
+    /// Returns the record's xEdit-compatible presentation metadata.
+    pub const fn link(&self) -> &FormLinkInfo {
+        &self.link
+    }
+}
+
 impl FormLinkInfo {
     /// Creates presentation metadata for one resolved main record.
     pub fn new(value: impl Into<String>, short_name: impl Into<String>) -> Self {
@@ -625,6 +658,18 @@ pub trait FormLinkResolver: Send + Sync {
         targets: &[Signature],
     ) -> Option<FormLinkInfo>;
 
+    /// Resolves one record through an xEdit named index.
+    ///
+    /// The default returns `None` for resolvers that only support FormIDs.
+    fn resolve_record_index(
+        &self,
+        _source: HandlerRecordContext,
+        _index: &str,
+        _key: &RecordIndexKeyValue,
+    ) -> Option<IndexedRecordInfo> {
+        None
+    }
+
     /// Resolves the effective quest context inherited by an INFO condition.
     ///
     /// The default returns `None` because resolving INFO parent groups requires
@@ -861,6 +906,8 @@ impl SemanticHandlerRegistry {
         }));
         registry.register(Arc::new(FormatBlueprintComponentSummary { resolver: None }));
         registry.register(Arc::new(ResolveBlueprintComponent));
+        registry.register(Arc::new(FormatIndexedRecordName { resolver: None }));
+        registry.register(Arc::new(ResolveIndexedRecord { resolver: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -951,6 +998,12 @@ impl SemanticHandlerRegistry {
             resolver: Some(resolver),
         }));
         self.register(Arc::new(FormatBlueprintComponentSummary {
+            resolver: self.form_link_resolver.clone(),
+        }));
+        self.register(Arc::new(FormatIndexedRecordName {
+            resolver: self.form_link_resolver.clone(),
+        }));
+        self.register(Arc::new(ResolveIndexedRecord {
             resolver: self.form_link_resolver.clone(),
         }));
     }
@@ -5316,6 +5369,95 @@ struct FormatBlueprintComponentSummary {
 
 struct ResolveBlueprintComponent;
 
+struct FormatIndexedRecordName {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+struct ResolveIndexedRecord {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for FormatIndexedRecordName {
+    fn id(&self) -> &'static str {
+        "format.indexed_record_name"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::Display {
+            return Ok(HandlerOutput::None);
+        }
+        let index = configured_text(self.id(), invocation.context.configuration, "index")?;
+        let key = record_index_key(
+            invocation.value.ok_or_else(|| {
+                indexed_record_error(self.id(), "index lookup requires a scalar value")
+            })?,
+            self.id(),
+        )?;
+        let Some(record) = self.resolver.as_deref().and_then(|resolver| {
+            resolver.resolve_record_index(handler_record_context(&invocation.context), index, &key)
+        }) else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Text(record.link().value().to_owned()))
+    }
+}
+
+impl SemanticHandler for ResolveIndexedRecord {
+    fn id(&self) -> &'static str {
+        "resolve.indexed_record"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ReferenceResolution {
+            return Ok(HandlerOutput::None);
+        }
+        let index = configured_text(self.id(), invocation.context.configuration, "index")?;
+        let key = record_index_key(
+            invocation.value.ok_or_else(|| {
+                indexed_record_error(self.id(), "index lookup requires a scalar value")
+            })?,
+            self.id(),
+        )?;
+        let Some(record) = self.resolver.as_deref().and_then(|resolver| {
+            resolver.resolve_record_index(handler_record_context(&invocation.context), index, &key)
+        }) else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Link(SemanticLink::Record {
+            form_id: record.form_id(),
+        }))
+    }
+}
+
+fn record_index_key(value: &FieldValue<'_>, handler: &str) -> Result<RecordIndexKeyValue> {
+    match value {
+        FieldValue::String(value) => Ok(RecordIndexKeyValue::Text(value.to_string())),
+        FieldValue::Int(value) => Ok(RecordIndexKeyValue::Integer(*value)),
+        FieldValue::UInt(value) => i64::try_from(*value)
+            .map(RecordIndexKeyValue::Integer)
+            .map_err(|_| indexed_record_error(handler, "index key exceeds i64")),
+        _ => Err(indexed_record_error(
+            handler,
+            "index key is not a string or integer",
+        )),
+    }
+}
+
+fn indexed_record_error(handler: &str, message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: handler.to_owned(),
+        message: message.into(),
+    }
+}
+
 impl SemanticHandler for FormatBlueprintComponentSummary {
     fn id(&self) -> &'static str {
         "format.blueprint_component_summary"
@@ -8378,6 +8520,35 @@ mod tests {
             }
         }
 
+        fn resolve_record_index(
+            &self,
+            _source: HandlerRecordContext,
+            index: &str,
+            key: &RecordIndexKeyValue,
+        ) -> Option<IndexedRecordInfo> {
+            match (index, key) {
+                ("simple_group", RecordIndexKeyValue::Text(key)) if key == "ExampleColor" => {
+                    Some(IndexedRecordInfo::new(
+                        FormId(0x1234),
+                        FormLinkInfo::new(
+                            "Example Color [AVMD:00001234]",
+                            "Example Color [AVMD:00001234]",
+                        ),
+                    ))
+                }
+                ("collision_layer", RecordIndexKeyValue::Integer(7)) => {
+                    Some(IndexedRecordInfo::new(
+                        FormId(0x2468),
+                        FormLinkInfo::new(
+                            "Example Collision [COLL:00002468]",
+                            "Example Collision [COLL:00002468]",
+                        ),
+                    ))
+                }
+                _ => None,
+            }
+        }
+
         fn resolve_condition_quest_form_id(
             &self,
             _source: HandlerRecordContext,
@@ -9162,6 +9333,63 @@ mod tests {
         assert_eq!(found.array_indices, vec![0]);
         assert!(find_blueprint_component(&scope, -1).is_none());
         assert!(find_blueprint_component(&scope, 8).is_none());
+        Ok(())
+    }
+
+    /// Resolves Starfield strings and integers through xEdit named record indexes.
+    #[test]
+    fn indexed_record_handlers_match_xedit() -> TestResult {
+        // given
+        let format_binding = test_metadata_binding(
+            "def.value_transform",
+            "format.indexed_record_name",
+            serde_json::json!({ "index": "simple_group" }),
+        );
+        let link_binding = test_metadata_binding(
+            "value.links_to",
+            "resolve.indexed_record",
+            serde_json::json!({ "index": "collision_layer" }),
+        );
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Starfield);
+        let color = FieldValue::String(Cow::Borrowed("ExampleColor"));
+        let collision = FieldValue::UInt(7);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke(
+                &format_binding,
+                source,
+                HandlerPhase::Display,
+                Some(&color),
+                None,
+            )?,
+            HandlerOutput::Text(value) if value == "Example Color [AVMD:00001234]"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &link_binding,
+                source,
+                HandlerPhase::ReferenceResolution,
+                Some(&collision),
+                None,
+            )?,
+            HandlerOutput::Link(SemanticLink::Record {
+                form_id: FormId(0x2468),
+            })
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &format_binding,
+                source,
+                HandlerPhase::Summary,
+                Some(&color),
+                None,
+            )?,
+            HandlerOutput::None
+        ));
         Ok(())
     }
 
