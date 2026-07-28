@@ -1949,6 +1949,19 @@ impl RecordEditor {
                         remove_decoded_occurrence(decoded_values, &path, 0);
                     }
                 }
+                HandlerMutation::RemoveAllBySignature { path, signature } => {
+                    if !decoded_values.is_empty() {
+                        return Err(SemanticError::Handler {
+                            handler: "def.after_load".to_owned(),
+                            message: format!(
+                                "raw signature removal for {path} must run before initial decoding"
+                            ),
+                        });
+                    }
+                    record
+                        .subrecords
+                        .retain(|subrecord| subrecord.signature != signature);
+                }
                 HandlerMutation::SynchronizeCount {
                     path,
                     occurrence,
@@ -2173,6 +2186,10 @@ impl RecordEditor {
             HandlerMutation::RemoveAll { path } => {
                 self.remove_all_in_scope(record, decoded_values, repeat_scope, &path)
             }
+            HandlerMutation::RemoveAllBySignature { .. } => Err(SemanticError::Handler {
+                handler: "def.after_set".to_owned(),
+                message: "scoped callbacks cannot remove raw subrecords by signature".to_owned(),
+            }),
             HandlerMutation::SynchronizeCount {
                 path,
                 occurrence,
@@ -2738,6 +2755,13 @@ impl RecordEditor {
                             message: "scoped callbacks cannot remove all subrecords".to_owned(),
                         });
                     }
+                    HandlerMutation::RemoveAllBySignature { .. } => {
+                        return Err(SemanticError::Handler {
+                            handler: "def.after_set".to_owned(),
+                            message: "scoped callbacks cannot remove raw subrecords by signature"
+                                .to_owned(),
+                        });
+                    }
                     HandlerMutation::SynchronizeCount {
                         path,
                         occurrence,
@@ -2953,6 +2977,7 @@ fn mutation_path(mutation: &HandlerMutation) -> &str {
         | HandlerMutation::Insert { path, .. }
         | HandlerMutation::Remove { path, .. }
         | HandlerMutation::RemoveAll { path }
+        | HandlerMutation::RemoveAllBySignature { path, .. }
         | HandlerMutation::SynchronizeCount { path, .. }
         | HandlerMutation::SynchronizePresence { path, .. } => path,
     }
@@ -5509,6 +5534,114 @@ mod tests {
         assert_eq!(writable.subrecords[0].data, expected);
         assert_eq!(writable.subrecords[1].signature, Signature(*b"FNAM"));
         assert_eq!(writable.subrecords[1].data, 1.0_f32.to_le_bytes());
+        Ok(())
+    }
+
+    /// Removes raw FO76 OFST subrecords that are intentionally absent from its schema.
+    #[test]
+    fn editor_removes_offset_data_by_signature_before_decoding() -> Result<()> {
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout76;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.remove_offset_data".to_owned(),
+            minimum_version: 1,
+        }];
+        let subrecord = |id, path: &str, signature| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 10),
+                    path: format!("{path}/payload"),
+                    name: "Raw data".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: None },
+                    },
+                }),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TES4"),
+                name: "Main File Header".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "TES4".to_owned(),
+                    name: "Main File Header".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(1, "TES4/0:Header", *b"HEDR"),
+                            subrecord(2, "TES4/1:Author", *b"CNAM"),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "TES4".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "dd".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.remove_offset_data".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            }],
+        )?;
+        let header_data = (0_u8..12).collect::<Vec<_>>();
+        let author_data = b"Author\0".to_vec();
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"TES4"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId::NULL,
+            form_version: 0,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"HEDR"),
+                    data: header_data.clone(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"OFST"),
+                    data: vec![1, 2, 3],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"OFST"),
+                    data: vec![4, 5],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"CNAM"),
+                    data: author_data.clone(),
+                },
+            ],
+        });
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(source.subrecords()?.len(), 4);
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 2);
+        assert_eq!(writable.subrecords[0].signature, Signature(*b"HEDR"));
+        assert_eq!(writable.subrecords[0].data, header_data);
+        assert_eq!(writable.subrecords[1].signature, Signature(*b"CNAM"));
+        assert_eq!(writable.subrecords[1].data, author_data);
         Ok(())
     }
 

@@ -222,6 +222,13 @@ pub enum HandlerMutation {
         /// Stable schema path.
         path: String,
     },
+    /// Remove every raw subrecord with one signature before initial decoding.
+    RemoveAllBySignature {
+        /// Stable record path that owns the raw subrecords.
+        path: String,
+        /// Raw subrecord signature.
+        signature: Signature,
+    },
     /// Make an integer counter match a decoded collection length.
     SynchronizeCount {
         /// Stable path of the counter subrecord.
@@ -1160,6 +1167,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(DefaultObjectArrayAfterLoad));
         registry.register(Arc::new(SkyrimWeaponAfterLoad));
         registry.register(Arc::new(LightAfterLoad));
+        registry.register(Arc::new(RemoveOffsetDataAfterLoad { enabled: true }));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
@@ -1199,6 +1207,14 @@ impl SemanticHandlerRegistry {
         self.register(Arc::new(NextObjectIdFormatter {
             resolver: Some(resolver),
         }));
+    }
+
+    /// Selects whether plugin-header OFST data is removed during load.
+    ///
+    /// The default is `true`, matching xEdit. Setting this to `false` matches
+    /// xEdit's `-dontremoveoffsetdata` command-line option.
+    pub fn set_remove_offset_data(&mut self, enabled: bool) {
+        self.register(Arc::new(RemoveOffsetDataAfterLoad { enabled }));
     }
 
     /// Installs the load-order resolver used by FormID-dependent summaries.
@@ -8370,6 +8386,73 @@ impl SemanticHandler for LightAfterLoad {
         } else {
             Ok(HandlerOutput::Mutations(mutations))
         }
+    }
+}
+
+struct RemoveOffsetDataAfterLoad {
+    enabled: bool,
+}
+
+impl SemanticHandler for RemoveOffsetDataAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.remove_offset_data"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"TES4")
+            || invocation.context.binding.path != "TES4"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Oblivion
+                    | SchemaGame::Fallout3
+                    | SchemaGame::FalloutNv
+                    | SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+                    | SchemaGame::Starfield
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "offset-data removal is only valid for modern TES4 headers".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "offset-data removal requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "offset-data removal requires a writable record".to_owned(),
+            })?;
+        if !self.enabled
+            || !record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == Signature(*b"OFST"))
+        {
+            return Ok(HandlerOutput::None);
+        }
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::RemoveAllBySignature {
+                path: "TES4".to_owned(),
+                signature: Signature(*b"OFST"),
+            },
+        ]))
     }
 }
 
@@ -16108,6 +16191,70 @@ mod tests {
                     }]
         ));
         assert_eq!(&data[64..], &(64_u8..72).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    /// Removes OFST by raw signature and honors xEdit's disable switch.
+    #[test]
+    fn offset_data_after_load_matches_xedit_option() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TES4".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-offset-data-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.remove_offset_data".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let record = WritableRecord {
+            signature: Signature(*b"TES4"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"OFST"),
+                data: vec![1, 2, 3, 4],
+            }],
+        };
+        let source =
+            HandlerRecordContext::new(Signature(*b"TES4"), FormId::NULL, 0, SchemaGame::Fallout76);
+
+        let output = SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+            &binding,
+            source,
+            &record,
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if mutations
+                    == [HandlerMutation::RemoveAllBySignature {
+                        path: "TES4".to_owned(),
+                        signature: Signature(*b"OFST"),
+                    }]
+        ));
+
+        let mut disabled = SemanticHandlerRegistry::builtin();
+        disabled.set_remove_offset_data(false);
+        assert!(matches!(
+            disabled.invoke_with_writable_record(
+                &binding,
+                source,
+                &record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )?,
+            HandlerOutput::None
+        ));
         Ok(())
     }
 
