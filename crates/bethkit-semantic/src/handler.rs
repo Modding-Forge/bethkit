@@ -1145,6 +1145,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(EmbeddedScriptAfterLoad));
         registry.register(Arc::new(OblivionEfitAfterLoad { resolver: None }));
         registry.register(Arc::new(VerifyOblivionEfixAfterLoad));
+        registry.register(Arc::new(RemoveOrphanedKeywordArrayAfterLoad));
+        registry.register(Arc::new(VerifyInertBodyTemplateAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
@@ -7803,6 +7805,142 @@ impl SemanticHandler for VerifyOblivionEfixAfterLoad {
             return Err(SemanticError::Handler {
                 handler: self.id().to_owned(),
                 message: format!("Oblivion EFIX verifier received {}", efix.signature),
+            });
+        }
+        Ok(HandlerOutput::None)
+    }
+}
+
+struct RemoveOrphanedKeywordArrayAfterLoad;
+
+impl SemanticHandler for RemoveOrphanedKeywordArrayAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.remove_orphaned_keyword_array"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        let game = invocation.context.game;
+        let signature = invocation.context.record_signature;
+        let supported_game = matches!(
+            game,
+            SchemaGame::SkyrimLe
+                | SchemaGame::SkyrimSe
+                | SchemaGame::SkyrimVr
+                | SchemaGame::Fallout4
+                | SchemaGame::Fallout4Vr
+                | SchemaGame::Fallout76
+        );
+        let supported_record = matches!(
+            signature,
+            Signature([b'A', b'L', b'C', b'H'])
+                | Signature([b'A', b'M', b'M', b'O'])
+                | Signature([b'A', b'R', b'M', b'O'])
+                | Signature([b'M', b'I', b'S', b'C'])
+        ) || (signature == Signature(*b"NPC_")
+            && matches!(
+                game,
+                SchemaGame::SkyrimLe | SchemaGame::SkyrimSe | SchemaGame::SkyrimVr
+            ));
+        if !supported_game || !supported_record {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "orphaned keyword migration is not valid for {signature} in {game:?}"
+                ),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "orphaned keyword migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "orphaned keyword migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED)
+            || record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == Signature(*b"KSIZ"))
+            || !record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == Signature(*b"KWDA"))
+        {
+            return Ok(HandlerOutput::None);
+        }
+        let path = invocation
+            .context
+            .configuration
+            .get("keyword_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "orphaned keyword migration requires keyword_path".to_owned(),
+            })?;
+        let expected_prefix = format!("{signature}/");
+        if !path.starts_with(&expected_prefix) {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("keyword path {path} is outside {signature}"),
+            });
+        }
+        Ok(HandlerOutput::Mutations(vec![HandlerMutation::Remove {
+            path: path.to_owned(),
+            occurrence: 0,
+        }]))
+    }
+}
+
+struct VerifyInertBodyTemplateAfterLoad;
+
+impl SemanticHandler for VerifyInertBodyTemplateAfterLoad {
+    fn id(&self) -> &'static str {
+        "verify.inert_body_template_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if !matches!(
+            invocation.context.game,
+            SchemaGame::SkyrimLe
+                | SchemaGame::SkyrimSe
+                | SchemaGame::SkyrimVr
+                | SchemaGame::Fallout4
+                | SchemaGame::Fallout4Vr
+                | SchemaGame::Fallout76
+        ) || invocation.context.record_signature != Signature(*b"ARMA")
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "disabled body-template migration is only valid for modern ARMA records"
+                    .to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some()
+            || invocation.source_writable_record.is_none()
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "disabled body-template migration requires a writable record-level source"
+                    .to_owned(),
             });
         }
         Ok(HandlerOutput::None)
@@ -15073,6 +15211,136 @@ mod tests {
             )
             .expect_err("an EFIT subrecord must fail the EFIX verifier");
         assert!(error.to_string().contains("received EFIT"));
+        Ok(())
+    }
+
+    /// Removes the first orphaned keyword array only when its KSIZ counter is absent.
+    #[test]
+    fn orphaned_keyword_after_load_matches_xedit_record_cleanup() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "MISC".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-orphaned-keyword-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.remove_orphaned_keyword_array".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "keyword_path": "MISC/10:Keywords",
+                    }),
+                },
+            },
+        };
+        let source =
+            HandlerRecordContext::new(Signature(*b"MISC"), FormId(0x1111), 0, SchemaGame::SkyrimSe);
+        let record = |flags, signatures: &[[u8; 4]]| WritableRecord {
+            signature: Signature(*b"MISC"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: signatures
+                .iter()
+                .map(|signature| bethkit_core::WritableSubRecord {
+                    signature: Signature(*signature),
+                    data: vec![0x5a; 4],
+                })
+                .collect(),
+        };
+        let orphaned = record(RecordFlags::empty(), &[*b"KWDA"]);
+        let output = SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+            &binding,
+            source,
+            &orphaned,
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if mutations
+                    == [HandlerMutation::Remove {
+                        path: "MISC/10:Keywords".to_owned(),
+                        occurrence: 0,
+                    }]
+        ));
+
+        let counted = record(RecordFlags::empty(), &[*b"KSIZ", *b"KWDA"]);
+        let output = SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+            &binding,
+            source,
+            &counted,
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        assert!(matches!(output, HandlerOutput::None));
+
+        let deleted = record(RecordFlags::DELETED, &[*b"KWDA"]);
+        let output = SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+            &binding,
+            source,
+            &deleted,
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        assert!(matches!(output, HandlerOutput::None));
+        Ok(())
+    }
+
+    /// Verifies the unconditional early exit in modern ARMA body-template migrations.
+    #[test]
+    fn body_template_after_load_verifier_rejects_non_arma_records() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "ARMA".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-body-template-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "verify.inert_body_template_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let record = |signature| WritableRecord {
+            signature,
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: Vec::new(),
+        };
+        let valid = record(Signature(*b"ARMA"));
+        let output = SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"ARMA"), FormId(0x1111), 0, SchemaGame::SkyrimSe),
+            &valid,
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        assert!(matches!(output, HandlerOutput::None));
+
+        let drifted = record(Signature(*b"ARMO"));
+        let error = SemanticHandlerRegistry::builtin()
+            .invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(
+                    Signature(*b"ARMO"),
+                    FormId(0x1111),
+                    0,
+                    SchemaGame::SkyrimSe,
+                ),
+                &drifted,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+            .expect_err("an ARMO record must fail the ARMA verifier");
+        assert!(error.to_string().contains("only valid for modern ARMA"));
         Ok(())
     }
 

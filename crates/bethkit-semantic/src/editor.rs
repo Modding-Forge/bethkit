@@ -351,7 +351,7 @@ impl RecordEditor {
         self.localized
     }
 
-    /// Returns the number of subrecord payloads normalized by `after_load` callbacks.
+    /// Returns the number of normalization operations applied by `after_load` callbacks.
     pub fn after_load_migration_count(&self) -> usize {
         self.after_load_migrations
     }
@@ -395,7 +395,9 @@ impl RecordEditor {
                     ),
                 _ => binding.path.clone(),
             };
-            let indices = {
+            let targets = if binding.path == record_path {
+                vec![None]
+            } else {
                 let grammar = self.grammar_for(&self.record)?;
                 grammar
                     .assignments
@@ -404,19 +406,25 @@ impl RecordEditor {
                     .filter_map(|(index, assignment)| {
                         assignment
                             .is_some_and(|node| node.path == anchor_path)
-                            .then_some(index)
+                            .then_some(Some(index))
                     })
                     .collect::<Vec<_>>()
             };
-            for index in indices {
+            for target in targets {
+                let access = target.map_or_else(
+                    || HandlerInvocationAccess::writable_with_scope(&self.record, None),
+                    |index| {
+                        HandlerInvocationAccess::writable_subrecord_with_scope(
+                            &self.record,
+                            index,
+                            None,
+                        )
+                    },
+                );
                 let output = self.handlers.invoke_with_records(
                     &binding,
                     self.handler_record(),
-                    HandlerInvocationAccess::writable_subrecord_with_scope(
-                        &self.record,
-                        index,
-                        None,
-                    ),
+                    access,
                     HandlerPhase::AfterLoad,
                     None,
                     None,
@@ -424,7 +432,42 @@ impl RecordEditor {
                 match output {
                     HandlerOutput::None => {}
                     HandlerOutput::SubrecordPayload(data) => {
+                        let Some(index) = target else {
+                            return Err(SemanticError::Handler {
+                                handler: binding.callback_id.clone(),
+                                message: "record-level after-load callback returned payload bytes"
+                                    .to_owned(),
+                            });
+                        };
                         self.record.subrecords[index].data = data;
+                        self.after_load_migrations = self.after_load_migrations.saturating_add(1);
+                    }
+                    HandlerOutput::Mutations(mutations) => {
+                        if mutations.is_empty() {
+                            continue;
+                        }
+                        let mut updated = WritableRecord {
+                            signature: self.record.signature,
+                            flags: self.record.flags,
+                            form_id: self.record.form_id,
+                            form_version: self.record.form_version,
+                            subrecords: self
+                                .record
+                                .subrecords
+                                .iter()
+                                .map(|subrecord| WritableSubRecord {
+                                    signature: subrecord.signature,
+                                    data: subrecord.data.clone(),
+                                })
+                                .collect(),
+                        };
+                        let mut decoded_values = BTreeMap::new();
+                        self.apply_mutations_with_values(
+                            &mut updated,
+                            &mut decoded_values,
+                            mutations,
+                        )?;
+                        self.record = updated;
                         self.after_load_migrations = self.after_load_migrations.saturating_add(1);
                     }
                     _ => {
@@ -4869,6 +4912,97 @@ mod tests {
         let writable = editor.into_writable_record();
         assert_eq!(&writable.subrecords[0].data[..20], &efit[..20]);
         assert_eq!(&writable.subrecords[0].data[20..24], &42_i32.to_le_bytes());
+        Ok(())
+    }
+
+    /// Applies a record-level keyword cleanup before the initial decoded snapshot.
+    #[test]
+    fn editor_applies_record_after_load_mutations() -> Result<()> {
+        let keyword_path = "MISC/1:Keywords";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::SkyrimSe;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.remove_orphaned_keyword_array".to_owned(),
+            minimum_version: 1,
+        }];
+        let subrecord = |id, path: &str, name: &str, signature| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 1),
+                    path: format!("{path}/payload"),
+                    name: name.to_owned(),
+                    required: false,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: Some(4) },
+                    },
+                }),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"MISC"),
+                name: "Misc. Item".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "MISC".to_owned(),
+                    name: "Misc. Item".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(1, "MISC/0:Keyword Count", "Keyword Count", *b"KSIZ"),
+                            subrecord(3, keyword_path, "Keywords", *b"KWDA"),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "MISC".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "88".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.remove_orphaned_keyword_array".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "keyword_path": keyword_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"MISC"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"KWDA"),
+                data: 0x1234_u32.to_le_bytes().to_vec(),
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(source.subrecords()?.len(), 1);
+        assert_eq!(source.subrecords()?[0].signature, Signature(*b"KWDA"));
+        assert_eq!(editor.after_load_migration_count(), 1);
+        assert!(editor.into_writable_record().subrecords.is_empty());
         Ok(())
     }
 
