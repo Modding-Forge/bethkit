@@ -988,6 +988,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ResolveAvmdEntryReference { resolver: None }));
         registry.register(Arc::new(FormatSnapNodeSummary { resolver: None }));
         registry.register(Arc::new(ResolveSnapNode { resolver: None }));
+        registry.register(Arc::new(ResolveLocalArrayElement));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -5519,6 +5520,8 @@ struct ResolveSnapNode {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct ResolveLocalArrayElement;
+
 impl SemanticHandler for FormatIndexedRecordName {
     fn id(&self) -> &'static str {
         "format.indexed_record_name"
@@ -5734,6 +5737,82 @@ fn snap_node_reference_path(
             format!("unsupported snap node binding path {path:?}"),
         )),
     }
+}
+
+impl SemanticHandler for ResolveLocalArrayElement {
+    fn id(&self) -> &'static str {
+        "resolve.local_array_element"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ReferenceResolution {
+            return Ok(HandlerOutput::None);
+        }
+        let index = callback_integer(
+            invocation.value.ok_or_else(|| {
+                indexed_record_error(self.id(), "array element link requires an integer")
+            })?,
+            self.id(),
+        )?;
+        if index < 0 {
+            return Ok(HandlerOutput::None);
+        }
+        let index = usize::try_from(index)
+            .map_err(|_| indexed_record_error(self.id(), "array element index exceeds usize"))?;
+        let (array_path, element_path) = local_array_target_paths(self.id(), &invocation.context)?;
+        let scope = invocation.value_scope.ok_or_else(|| {
+            indexed_record_error(self.id(), "array element link requires record scope")
+        })?;
+        let Some(array) = scoped_named_value(scope, &array_path) else {
+            return Ok(HandlerOutput::None);
+        };
+        let FieldValue::Array(elements) = &array.value else {
+            return Err(indexed_record_error(
+                self.id(),
+                format!("configured target {array_path:?} is not an array"),
+            ));
+        };
+        if index >= elements.len() {
+            return Ok(HandlerOutput::None);
+        }
+        Ok(HandlerOutput::Link(SemanticLink::Element {
+            path: element_path,
+            array_indices: vec![index],
+        }))
+    }
+}
+
+fn local_array_target_paths(
+    handler: &str,
+    context: &HandlerContext<'_>,
+) -> Result<(String, String)> {
+    let source_container = configured_text(handler, context.configuration, "source_container")?;
+    let target_segment = configured_text(handler, context.configuration, "target_segment")?;
+    let components: Vec<&str> = context.binding.path.split('/').collect();
+    let Some(source_index) = components.iter().position(|component| {
+        component
+            .split_once(':')
+            .is_some_and(|(_, name)| name == source_container)
+    }) else {
+        return Err(indexed_record_error(
+            handler,
+            format!(
+                "binding path {:?} has no {source_container:?} container",
+                context.binding.path
+            ),
+        ));
+    };
+    let mut array_path = components[..source_index].join("/");
+    if !array_path.is_empty() {
+        array_path.push('/');
+    }
+    array_path.push_str(target_segment);
+    let element_path = format!("{array_path}/element");
+    Ok((array_path, element_path))
 }
 
 fn resolve_avmd_entry_reference(
@@ -10029,6 +10108,72 @@ mod tests {
                 targets: vec![Signature(*b"REFR")],
             },
         }
+    }
+
+    /// Resolves only valid non-negative indexes into a configured local record array.
+    #[test]
+    fn local_array_element_handler_resolves_bounded_indexes() -> TestResult {
+        // given
+        let array_path = "ACTI/41:Navmesh Geometry/payload/variants/1:Navmesh Geometry/2:Vertices";
+        let element_path =
+            "ACTI/41:Navmesh Geometry/payload/variants/1:Navmesh Geometry/2:Vertices/element";
+        let mut binding = test_metadata_binding(
+            "value.links_to",
+            "resolve.local_array_element",
+            serde_json::json!({
+                "source_container": "Triangles",
+                "target_segment": "2:Vertices"
+            }),
+        );
+        binding.path = concat!(
+            "ACTI/41:Navmesh Geometry/payload/variants/1:Navmesh Geometry/",
+            "3:Triangles/element/0:Vertex 0"
+        )
+        .to_owned();
+        let scope = FieldValue::Struct(vec![crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: array_path.to_owned(),
+            effective_path: None,
+            name: "Vertices".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 24 },
+            value: FieldValue::Array(vec![
+                FieldValue::Bytes(std::borrow::Cow::Borrowed(&[0; 12])),
+                FieldValue::Bytes(std::borrow::Cow::Borrowed(&[1; 12])),
+            ]),
+        }]);
+        let handlers = SemanticHandlerRegistry::builtin();
+        let source =
+            HandlerRecordContext::new(Signature(*b"NAVM"), FormId(0x1234), 0, SchemaGame::SkyrimSe);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                source,
+                HandlerPhase::ReferenceResolution,
+                Some(&FieldValue::Int(1)),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Link(SemanticLink::Element {
+                path,
+                array_indices,
+            }) if path == element_path && array_indices == vec![1]
+        ));
+        for index in [-1, 2] {
+            assert!(matches!(
+                handlers.invoke_with_value_scope(
+                    &binding,
+                    source,
+                    HandlerPhase::ReferenceResolution,
+                    Some(&FieldValue::Int(index)),
+                    None,
+                    Some(&scope),
+                )?,
+                HandlerOutput::None
+            ));
+        }
+        Ok(())
     }
 
     /// Resolves VMAD object aliases through their sibling quest FormID.

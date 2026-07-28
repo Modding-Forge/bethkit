@@ -140,7 +140,9 @@ impl<'context, 'record> RecordView<'context, 'record> {
     /// Returns [`SemanticError::Handler`] when the bound link callback rejects
     /// the value or returns an invalid result.
     pub fn resolve_link(&self, path: &str, value: &FieldValue<'_>) -> Result<Option<SemanticLink>> {
-        if self.uses_handler(path, "resolve.blueprint_component") {
+        if self.uses_handler(path, "resolve.blueprint_component")
+            || self.uses_handler(path, "resolve.local_array_element")
+        {
             let scope = self.structural_callback_scope()?;
             return self
                 .context
