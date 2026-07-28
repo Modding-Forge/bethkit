@@ -6869,6 +6869,135 @@ mod tests {
         Ok(())
     }
 
+    /// Applies both nested FO4 SCEN clamps to the shared VNAM payload.
+    #[test]
+    fn editor_applies_fallout_scene_behavior_after_load_migrations() -> Result<()> {
+        let subrecord_path = "SCEN/8:Actor Behavior Settings";
+        let field_path =
+            |index: usize, name: &str| format!("{subrecord_path}/payload/{index}:{name}");
+        let integer_field = |id, index, name: &str| SchemaNode {
+            id: SchemaNodeId(id),
+            path: field_path(index, name),
+            name: name.to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::Integer {
+                    integer: IntegerType {
+                        width: 4,
+                        signed: false,
+                        byte_order: ByteOrder::LittleEndian,
+                    },
+                },
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout4;
+        manifest.callbacks_total = 2;
+        manifest.callbacks_classified = 2;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.fallout_scene_behavior_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"SCEN"),
+                name: "Scene".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "SCEN".to_owned(),
+                    name: "Scene".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: subrecord_path.to_owned(),
+                            name: "Actor Behavior Settings".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"VNAM"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: format!("{subrecord_path}/payload"),
+                                    name: "Actor Behavior Settings".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Struct {
+                                        fields: vec![
+                                            integer_field(3, 0, "Death"),
+                                            integer_field(4, 1, "Combat"),
+                                            integer_field(5, 2, "Player Dialogue"),
+                                            integer_field(6, 3, "Observe Combat"),
+                                        ],
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![
+                CallbackBinding {
+                    path: field_path(2, "Player Dialogue"),
+                    callback_id: "def.after_load".to_owned(),
+                    callback_slot: None,
+                    implementation_fingerprint: "d9".repeat(32),
+                    implementation: CallbackImplementation::BuiltIn {
+                        operation: BuiltInOperation {
+                            id: "migrate.fallout_scene_behavior_after_load".to_owned(),
+                            minimum_version: 1,
+                            configuration: serde_json::json!({ "field_offset": 8 }),
+                        },
+                    },
+                },
+                CallbackBinding {
+                    path: field_path(3, "Observe Combat"),
+                    callback_id: "def.after_load".to_owned(),
+                    callback_slot: None,
+                    implementation_fingerprint: "da".repeat(32),
+                    implementation: CallbackImplementation::BuiltIn {
+                        operation: BuiltInOperation {
+                            id: "migrate.fallout_scene_behavior_after_load".to_owned(),
+                            minimum_version: 1,
+                            configuration: serde_json::json!({ "field_offset": 12 }),
+                        },
+                    },
+                },
+            ],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut original = (0_u8..16).collect::<Vec<_>>();
+        original[8..12].copy_from_slice(&4_u32.to_le_bytes());
+        original[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"SCEN"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 131,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"VNAM"),
+                data: original.clone(),
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 2);
+        let writable = editor.into_writable_record();
+        assert_eq!(&writable.subrecords[0].data[..8], &original[..8]);
+        assert_eq!(&writable.subrecords[0].data[8..12], &3_u32.to_le_bytes());
+        assert_eq!(&writable.subrecords[0].data[12..16], &3_u32.to_le_bytes());
+        assert_eq!(source.subrecords()?[0].as_bytes(), original);
+        Ok(())
+    }
+
     /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
     fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {

@@ -1193,6 +1193,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacyInfoAfterLoad));
         registry.register(Arc::new(LegacyMagicEffectAfterLoad));
         registry.register(Arc::new(SkyrimReferenceAfterLoad));
+        registry.register(Arc::new(FalloutSceneBehaviorAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -9572,6 +9573,111 @@ impl SemanticHandler for SkyrimReferenceAfterLoad {
         } else {
             Ok(HandlerOutput::Mutations(mutations))
         }
+    }
+}
+
+struct FalloutSceneBehaviorAfterLoad;
+
+impl SemanticHandler for FalloutSceneBehaviorAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.fallout_scene_behavior_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        let path = invocation.context.binding.path.as_str();
+        let expected_offset = match path {
+            "SCEN/8:Actor Behavior Settings/payload/2:Player Dialogue" => 8,
+            "SCEN/8:Actor Behavior Settings/payload/3:Observe Combat" => 12,
+            _ => {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "Fallout scene behavior migration requires a guarded SCEN field"
+                        .to_owned(),
+                });
+            }
+        };
+        if invocation.context.record_signature != Signature(*b"SCEN")
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout4 | SchemaGame::Fallout4Vr
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout scene behavior migration is only valid for FO4 SCEN records"
+                    .to_owned(),
+            });
+        }
+        let configured_offset = invocation
+            .context
+            .configuration
+            .get("field_offset")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout scene behavior migration requires field_offset".to_owned(),
+            })?;
+        if configured_offset != expected_offset {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "Fallout scene behavior field {path} requires byte offset {expected_offset}"
+                ),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout scene behavior migration requires a writable record".to_owned(),
+            })?;
+        let index = invocation
+            .source_subrecord_index
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout scene behavior migration requires a source subrecord".to_owned(),
+            })?;
+        let behavior = record
+            .subrecords
+            .get(index)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("source subrecord index {index} is out of bounds"),
+            })?;
+        if behavior.signature != Signature(*b"VNAM") {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "Fallout scene behavior migration requires VNAM, got {}",
+                    behavior.signature
+                ),
+            });
+        }
+        let Some(bytes) = behavior
+            .data
+            .get(configured_offset..configured_offset.saturating_add(4))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let value = u32::from_le_bytes(
+            bytes
+                .try_into()
+                .expect("four-byte scene behavior value must convert"),
+        );
+        if value <= 3 {
+            return Ok(HandlerOutput::None);
+        }
+        let mut normalized = behavior.data.clone();
+        normalized[configured_offset..configured_offset + 4].copy_from_slice(&3_u32.to_le_bytes());
+        Ok(HandlerOutput::SubrecordPayload(normalized))
     }
 }
 
@@ -18763,6 +18869,99 @@ mod tests {
                     RecordFlags::DELETED,
                     vec![subrecord(*b"XPTL", vec![1]), subrecord(*b"XLOC", vec![0]),],
                 ),
+            )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Clamps both FO4 SCEN behavior fields without changing neighboring VNAM bytes.
+    #[test]
+    fn fallout_scene_behavior_after_load_matches_xedit_clamp() -> Result<()> {
+        let binding = |path: &str, field_offset| CallbackBinding {
+            path: path.to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-fo4-scen-behavior-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.fallout_scene_behavior_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({ "field_offset": field_offset }),
+                },
+            },
+        };
+        let record = |data| WritableRecord {
+            signature: Signature(*b"SCEN"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 131,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"VNAM"),
+                data,
+            }],
+        };
+        let invoke = |game, binding: &CallbackBinding, record: &WritableRecord| {
+            SemanticHandlerRegistry::builtin().invoke_with_records(
+                binding,
+                HandlerRecordContext::new(Signature(*b"SCEN"), FormId(0x1111), 131, game),
+                HandlerInvocationAccess::writable_subrecord_with_scope(record, 0, None),
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+        let player_path = "SCEN/8:Actor Behavior Settings/payload/2:Player Dialogue";
+        let observe_path = "SCEN/8:Actor Behavior Settings/payload/3:Observe Combat";
+        let mut original = (0_u8..20).collect::<Vec<_>>();
+        original[8..12].copy_from_slice(&4_u32.to_le_bytes());
+        original[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let player = invoke(
+            SchemaGame::Fallout4,
+            &binding(player_path, 8),
+            &record(original.clone()),
+        )?;
+        let HandlerOutput::SubrecordPayload(player) = player else {
+            return Err(SemanticError::Handler {
+                handler: "test".to_owned(),
+                message: "player-dialogue clamp did not return a payload".to_owned(),
+            });
+        };
+        assert_eq!(&player[..8], &original[..8]);
+        assert_eq!(&player[8..12], &3_u32.to_le_bytes());
+        assert_eq!(&player[12..], &original[12..]);
+
+        let observe = invoke(
+            SchemaGame::Fallout4Vr,
+            &binding(observe_path, 12),
+            &record(original.clone()),
+        )?;
+        let HandlerOutput::SubrecordPayload(observe) = observe else {
+            return Err(SemanticError::Handler {
+                handler: "test".to_owned(),
+                message: "observe-combat clamp did not return a payload".to_owned(),
+            });
+        };
+        assert_eq!(&observe[..12], &original[..12]);
+        assert_eq!(&observe[12..16], &3_u32.to_le_bytes());
+        assert_eq!(&observe[16..], &original[16..]);
+
+        let mut valid = original;
+        valid[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        assert!(matches!(
+            invoke(
+                SchemaGame::Fallout4,
+                &binding(player_path, 8),
+                &record(valid),
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::Fallout4,
+                &binding(observe_path, 12),
+                &record(vec![0xaa; 15]),
             )?,
             HandlerOutput::None
         ));
