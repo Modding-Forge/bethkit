@@ -1176,6 +1176,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SkyrimWeaponAfterLoad));
         registry.register(Arc::new(LightAfterLoad));
         registry.register(Arc::new(SkyrimCellAfterLoad));
+        registry.register(Arc::new(FalloutCellAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -8525,6 +8526,112 @@ impl SemanticHandler for SkyrimCellAfterLoad {
             Ok(HandlerOutput::Mutations(mutations))
         }
     }
+}
+
+struct FalloutCellAfterLoad;
+
+impl SemanticHandler for FalloutCellAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.fallout_cell_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"CELL")
+            || invocation.context.binding.path != "CELL"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout3 | SchemaGame::FalloutNv
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout cell migration requires a guarded CELL root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout cell migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout cell migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let _data_path = required_cell_path(&invocation, self.id(), "data_path")?;
+        let water_height_path = required_cell_path(&invocation, self.id(), "water_height_path")?;
+        let water_noise_path = required_cell_path(&invocation, self.id(), "water_noise_path")?;
+        let has_water = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"DATA"))
+            .and_then(|subrecord| subrecord.data.first())
+            .is_some_and(|flags| flags & 0x02 != 0);
+        if !has_water {
+            return Ok(HandlerOutput::None);
+        }
+        let mut mutations = Vec::new();
+        if !record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"XCLW"))
+        {
+            mutations.push(HandlerMutation::Insert {
+                path: water_height_path.to_owned(),
+                value: OwnedFieldValue::Float(f64::from(f32::MAX)),
+            });
+        }
+        if !record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"XNAM"))
+        {
+            mutations.push(HandlerMutation::Insert {
+                path: water_noise_path.to_owned(),
+                value: OwnedFieldValue::String(String::new()),
+            });
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
+    }
+}
+
+fn required_cell_path<'a>(
+    invocation: &'a HandlerInvocation<'_>,
+    handler: &str,
+    key: &str,
+) -> Result<&'a str> {
+    let path = invocation
+        .context
+        .configuration
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("cell migration requires {key}"),
+        })?;
+    if !path.starts_with("CELL/") {
+        return Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("cell migration {key} must be inside CELL"),
+        });
+    }
+    Ok(path)
 }
 
 struct RemoveOffsetDataAfterLoad {
@@ -16761,6 +16868,101 @@ mod tests {
         ));
         assert!(matches!(
             invoke(&record(RecordFlags::DELETED, vec![(*b"DATA", vec![0x02])]))?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Adds Fallout CELL water defaults only when the record's water flag is set.
+    #[test]
+    fn fallout_cell_after_load_matches_xedit_water_defaults() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "CELL".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-fallout-cell-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.fallout_cell_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "data_path": "CELL/2:Flags",
+                        "water_height_path": "CELL/7:Water Height",
+                        "water_noise_path": "CELL/8:Water Noise Texture",
+                    }),
+                },
+            },
+        };
+        let record = |flags, subrecords: Vec<([u8; 4], Vec<u8>)>| WritableRecord {
+            signature: Signature(*b"CELL"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: subrecords
+                .into_iter()
+                .map(|(signature, data)| bethkit_core::WritableSubRecord {
+                    signature: Signature(signature),
+                    data,
+                })
+                .collect(),
+        };
+        let invoke = |game, record: &WritableRecord| {
+            SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(Signature(*b"CELL"), FormId(0x1111), 0, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+
+        assert!(matches!(
+            invoke(
+                SchemaGame::Fallout3,
+                &record(RecordFlags::empty(), vec![(*b"DATA", vec![0x02])])
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::Insert {
+                        path: "CELL/7:Water Height".to_owned(),
+                        value: OwnedFieldValue::Float(f64::from(f32::MAX)),
+                    },
+                    HandlerMutation::Insert {
+                        path: "CELL/8:Water Noise Texture".to_owned(),
+                        value: OwnedFieldValue::String(String::new()),
+                    },
+                ]
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::FalloutNv,
+                &record(
+                    RecordFlags::empty(),
+                    vec![
+                        (*b"DATA", vec![0x02]),
+                        (*b"XCLW", 7.5_f32.to_le_bytes().to_vec()),
+                    ]
+                )
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::Insert {
+                    path: "CELL/8:Water Noise Texture".to_owned(),
+                    value: OwnedFieldValue::String(String::new()),
+                }]
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::Fallout3,
+                &record(RecordFlags::empty(), vec![(*b"DATA", vec![0x01])])
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::FalloutNv,
+                &record(RecordFlags::DELETED, vec![(*b"DATA", vec![0x02])])
+            )?,
             HandlerOutput::None
         ));
         Ok(())

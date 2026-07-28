@@ -5749,6 +5749,145 @@ mod tests {
         Ok(())
     }
 
+    /// Inserts Fallout CELL water defaults before decoding without mutating the source.
+    #[test]
+    fn editor_applies_fallout_cell_after_load_migration() -> Result<()> {
+        let data_path = "CELL/2:Flags";
+        let water_height_path = "CELL/7:Water Height";
+        let water_noise_path = "CELL/8:Water Noise Texture";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout3;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.fallout_cell_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let primitive_subrecord = |id, path: &str, name: &str, signature, primitive| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 1),
+                    path: format!("{path}/payload"),
+                    name: name.to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive { primitive },
+                }),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"CELL"),
+                name: "Cell".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "CELL".to_owned(),
+                    name: "Cell".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            primitive_subrecord(
+                                1,
+                                data_path,
+                                "Flags",
+                                *b"DATA",
+                                PrimitiveType::Integer {
+                                    integer: IntegerType {
+                                        width: 1,
+                                        signed: false,
+                                        byte_order: ByteOrder::LittleEndian,
+                                    },
+                                },
+                            ),
+                            primitive_subrecord(
+                                3,
+                                water_height_path,
+                                "Water Height",
+                                *b"XCLW",
+                                PrimitiveType::Float {
+                                    width: 4,
+                                    byte_order: ByteOrder::LittleEndian,
+                                    scale: 1.0,
+                                    digits: 6,
+                                },
+                            ),
+                            primitive_subrecord(
+                                5,
+                                water_noise_path,
+                                "Water Noise Texture",
+                                *b"XNAM",
+                                PrimitiveType::String {
+                                    string: StringType {
+                                        encoding: "windows_1252".to_owned(),
+                                        localized: false,
+                                        zero_terminated: true,
+                                        fixed_length: None,
+                                        length_prefix: None,
+                                        trailing_terminator: None,
+                                        allowed_values: Vec::new(),
+                                    },
+                                },
+                            ),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "CELL".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "cf".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.fallout_cell_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "data_path": data_path,
+                            "water_height_path": water_height_path,
+                            "water_noise_path": water_noise_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"CELL"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 15,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: vec![0x02],
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 3);
+        assert_eq!(writable.subrecords[0].data, vec![0x02]);
+        assert_eq!(writable.subrecords[1].signature, Signature(*b"XCLW"));
+        assert_eq!(writable.subrecords[1].data, f32::MAX.to_le_bytes());
+        assert_eq!(writable.subrecords[2].signature, Signature(*b"XNAM"));
+        assert_eq!(writable.subrecords[2].data, vec![0]);
+        assert_eq!(source.subrecords()?.len(), 1);
+        assert_eq!(source.subrecords()?[0].as_bytes(), &[0x02]);
+        Ok(())
+    }
+
     /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
     fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {
