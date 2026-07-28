@@ -3647,6 +3647,10 @@ mod tests {
                 .with_magic_effect_metadata(0x0100_0000, 42)
             })
         }
+
+        fn source_master_morph_keys(&self, _source: HandlerRecordContext) -> Option<Vec<u32>> {
+            Some(vec![20, 10])
+        }
     }
 
     fn windows_1252_string(zero_terminated: bool) -> PrimitiveType {
@@ -7382,6 +7386,151 @@ mod tests {
         );
         assert_eq!(writable.subrecords[1].data, vec![0xbb]);
         assert_eq!(source.subrecords()?.len(), 5);
+        Ok(())
+    }
+
+    /// Applies keyword cleanup and paired master-relative morph sorting transactionally.
+    #[test]
+    fn editor_applies_fallout_npc_after_load_migration() -> Result<()> {
+        let keyword_count_path = "NPC_/36:Keyword Count";
+        let keywords_path = "NPC_/37:Keywords";
+        let keys_path = "NPC_/65:Morph Keys";
+        let values_path = "NPC_/66:Morph Values";
+        let subrecord = |id, path: &str, signature| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 100),
+                    path: format!("{path}/payload"),
+                    name: "Raw data".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: None },
+                    },
+                }),
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout4;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.fallout_npc_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"NPC_"),
+                name: "Non-Player Character".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "NPC_".to_owned(),
+                    name: "Non-Player Character".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(1, keyword_count_path, *b"KSIZ"),
+                            subrecord(2, keywords_path, *b"KWDA"),
+                            subrecord(3, keys_path, *b"MSDK"),
+                            subrecord(4, values_path, *b"MSDV"),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "NPC_".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "e0".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.fallout_npc_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "keyword_count_path": keyword_count_path,
+                            "keywords_path": keywords_path,
+                            "morph_keys_path": keys_path,
+                            "morph_values_path": values_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let original_keys = [10_u32, 30, 20]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let original_values = [1.0_f32, 3.0, 2.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"NPC_"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 131,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"KWDA"),
+                    data: vec![0xaa; 8],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"MSDK"),
+                    data: original_keys.clone(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"MSDV"),
+                    data: original_values.clone(),
+                },
+            ],
+        });
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestMagicEffectResolver));
+        let context = SemanticContext::new_with_handlers(
+            Arc::new(package),
+            crate::DecoderRegistry::builtin(),
+            handlers,
+        )?;
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(
+            writable
+                .subrecords
+                .iter()
+                .map(|subrecord| subrecord.signature)
+                .collect::<Vec<_>>(),
+            [Signature(*b"MSDK"), Signature(*b"MSDV")]
+        );
+        assert_eq!(
+            writable.subrecords[0].data,
+            [20_u32, 10, 30]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            writable.subrecords[1].data,
+            [2.0_f32, 1.0, 3.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(source.subrecords()?[1].as_bytes(), original_keys);
+        assert_eq!(source.subrecords()?[2].as_bytes(), original_values);
         Ok(())
     }
 

@@ -895,6 +895,13 @@ pub trait FormLinkResolver: Send + Sync {
         None
     }
 
+    /// Returns the effective master override's ordered NPC morph keys.
+    ///
+    /// The default returns `None` for resolvers without override-chain metadata.
+    fn source_master_morph_keys(&self, _source: HandlerRecordContext) -> Option<Vec<u32>> {
+        None
+    }
+
     /// Resolves one navigation mesh and its effective triangle-array metadata.
     ///
     /// The default returns `None` for resolvers without navigation-mesh metadata.
@@ -1195,6 +1202,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacyWeaponAfterLoad));
         registry.register(Arc::new(LegacyPackageAfterLoad));
         registry.register(Arc::new(FalloutLeveledListAfterLoad));
+        registry.register(Arc::new(FalloutNpcAfterLoad { resolver: None }));
         registry.register(Arc::new(LegacyMagicEffectAfterLoad));
         registry.register(Arc::new(SkyrimReferenceAfterLoad));
         registry.register(Arc::new(FalloutReferenceAfterLoad { resolver: None }));
@@ -1318,6 +1326,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FalloutReferenceAfterLoad {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FalloutNpcAfterLoad {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(SelectCoedOwner {
@@ -9695,7 +9706,7 @@ impl SemanticHandler for LegacyPackageAfterLoad {
             ),
             ("patrol_flags_path", "PACK/11:Patrol Flags"),
         ];
-        for (key, expected) in expected_paths {
+        for &(key, expected) in &expected_paths {
             let actual = invocation
                 .context
                 .configuration
@@ -10005,6 +10016,196 @@ impl SemanticHandler for FalloutLeveledListAfterLoad {
             Ok(HandlerOutput::Mutations(mutations))
         }
     }
+}
+
+struct FalloutNpcAfterLoad {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for FalloutNpcAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.fallout_npc_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"NPC_")
+            || invocation.context.binding.path != "NPC_"
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout NPC migration requires a guarded NPC_ root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout NPC migration requires a record-level binding".to_owned(),
+            });
+        }
+        let expected_paths = match invocation.context.game {
+            SchemaGame::Fallout4 | SchemaGame::Fallout4Vr => [
+                ("keyword_count_path", "NPC_/36:Keyword Count"),
+                ("keywords_path", "NPC_/37:Keywords"),
+                ("morph_keys_path", "NPC_/65:Morph Keys"),
+                ("morph_values_path", "NPC_/66:Morph Values"),
+            ],
+            SchemaGame::Fallout76 => [
+                ("keyword_count_path", "NPC_/42:Keywords/0:Keyword Count"),
+                ("keywords_path", "NPC_/42:Keywords/1:Keywords"),
+                ("morph_keys_path", "NPC_/71:Morph Keys"),
+                ("morph_values_path", "NPC_/72:Morph Values"),
+            ],
+            _ => {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "Fallout NPC migration requires a guarded game".to_owned(),
+                });
+            }
+        };
+        for &(key, expected) in &expected_paths {
+            let actual = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("Fallout NPC migration requires {key}"),
+                })?;
+            if actual != expected {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "Fallout NPC migration requires materialized {key} {expected}"
+                    ),
+                });
+            }
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout NPC migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let mut mutations = Vec::new();
+        let has_keyword_count = record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"KSIZ"));
+        if !has_keyword_count
+            && record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == Signature(*b"KWDA"))
+        {
+            mutations.push(HandlerMutation::RemoveFirstBySignature {
+                path: "NPC_".to_owned(),
+                signature: Signature(*b"KWDA"),
+            });
+        }
+        let master_keys = self.resolver.as_ref().and_then(|resolver| {
+            resolver.source_master_morph_keys(handler_record_context(&invocation.context))
+        });
+        if let Some(master_keys) = master_keys {
+            append_fallout_npc_morph_mutations(
+                &mut mutations,
+                record,
+                &master_keys,
+                expected_paths[2].1,
+                expected_paths[3].1,
+            );
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
+    }
+}
+
+fn append_fallout_npc_morph_mutations(
+    mutations: &mut Vec<HandlerMutation>,
+    record: &WritableRecord,
+    master_keys: &[u32],
+    keys_path: &str,
+    values_path: &str,
+) {
+    let Some(keys) = record
+        .subrecords
+        .iter()
+        .find(|subrecord| subrecord.signature == Signature(*b"MSDK"))
+    else {
+        return;
+    };
+    let Some(values) = record
+        .subrecords
+        .iter()
+        .find(|subrecord| subrecord.signature == Signature(*b"MSDV"))
+    else {
+        return;
+    };
+    if keys.data.len() % 4 != 0
+        || values.data.len() % 4 != 0
+        || keys.data.len() != values.data.len()
+        || keys.data.len() / 4 < master_keys.len()
+    {
+        return;
+    }
+    let current_keys = keys
+        .data
+        .chunks_exact(4)
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four-byte morph key")))
+        .collect::<Vec<_>>();
+    let mut master_positions = BTreeMap::new();
+    for (index, key) in master_keys.iter().copied().enumerate() {
+        if master_positions.insert(key, index).is_some() {
+            return;
+        }
+    }
+    let mut next_unknown = master_keys.len();
+    let mut needs_sort = false;
+    let mut sort_orders = Vec::with_capacity(current_keys.len());
+    for (index, key) in current_keys.iter().enumerate() {
+        if let Some(order) = master_positions.get(key).copied() {
+            needs_sort |= order != index;
+            sort_orders.push(order);
+        } else {
+            sort_orders.push(next_unknown);
+            next_unknown += 1;
+        }
+    }
+    if !needs_sort || next_unknown != current_keys.len() {
+        return;
+    }
+    let mut indices = (0..current_keys.len()).collect::<Vec<_>>();
+    indices.sort_by_key(|index| sort_orders[*index]);
+    let reorder = |data: &[u8]| {
+        let mut reordered = Vec::with_capacity(data.len());
+        for index in &indices {
+            reordered.extend_from_slice(&data[index * 4..index * 4 + 4]);
+        }
+        reordered
+    };
+    mutations.push(HandlerMutation::ReplacePayload {
+        path: keys_path.to_owned(),
+        occurrence: 0,
+        data: reorder(&keys.data),
+    });
+    mutations.push(HandlerMutation::ReplacePayload {
+        path: values_path.to_owned(),
+        occurrence: 0,
+        data: reorder(&values.data),
+    });
 }
 
 struct LegacyMagicEffectAfterLoad;
@@ -13480,6 +13681,10 @@ mod tests {
                 .with_signature(Signature(*b"MGEF"))
                 .with_magic_effect_metadata(0x0100_0000, 42)
             })
+        }
+
+        fn source_master_morph_keys(&self, _source: HandlerRecordContext) -> Option<Vec<u32>> {
+            Some(vec![20, 10])
         }
 
         fn resolve_record_index(
@@ -20578,6 +20783,146 @@ mod tests {
                     &binding,
                     &record(RecordFlags::DELETED, vec![subrecord(*b"XLOC", vec![0])]),
                 )?,
+                HandlerOutput::None
+            ));
+        }
+        Ok(())
+    }
+
+    /// Removes orphaned keywords and aligns NPC morph pairs to the master key order.
+    #[test]
+    fn fallout_npc_after_load_matches_xedit_morph_order() -> Result<()> {
+        let cases = [
+            (
+                SchemaGame::Fallout4,
+                "NPC_/36:Keyword Count",
+                "NPC_/37:Keywords",
+                "NPC_/65:Morph Keys",
+                "NPC_/66:Morph Values",
+            ),
+            (
+                SchemaGame::Fallout4Vr,
+                "NPC_/36:Keyword Count",
+                "NPC_/37:Keywords",
+                "NPC_/65:Morph Keys",
+                "NPC_/66:Morph Values",
+            ),
+            (
+                SchemaGame::Fallout76,
+                "NPC_/42:Keywords/0:Keyword Count",
+                "NPC_/42:Keywords/1:Keywords",
+                "NPC_/71:Morph Keys",
+                "NPC_/72:Morph Values",
+            ),
+        ];
+        let subrecord = |signature, data| bethkit_core::WritableSubRecord {
+            signature: Signature(signature),
+            data,
+        };
+        let record = |flags, subrecords| WritableRecord {
+            signature: Signature(*b"NPC_"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 131,
+            subrecords,
+        };
+        let mut registry = SemanticHandlerRegistry::builtin();
+        registry.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        for (game, keyword_count_path, keywords_path, keys_path, values_path) in cases {
+            let binding = CallbackBinding {
+                path: "NPC_".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "test-fallout-npc-after-load".to_owned(),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: bethkit_schema::BuiltInOperation {
+                        id: "migrate.fallout_npc_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "keyword_count_path": keyword_count_path,
+                            "keywords_path": keywords_path,
+                            "morph_keys_path": keys_path,
+                            "morph_values_path": values_path,
+                        }),
+                    },
+                },
+            };
+            let invoke = |record: &WritableRecord| {
+                registry.invoke_with_writable_record(
+                    &binding,
+                    HandlerRecordContext::new(Signature(*b"NPC_"), FormId(0x1111), 131, game),
+                    record,
+                    HandlerPhase::AfterLoad,
+                    None,
+                    None,
+                )
+            };
+            let keys = [10_u32, 30, 20]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>();
+            let values = [1.0_f32, 3.0, 2.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>();
+            let migrated = invoke(&record(
+                RecordFlags::empty(),
+                vec![
+                    subrecord(*b"KWDA", vec![0xaa; 8]),
+                    subrecord(*b"MSDK", keys),
+                    subrecord(*b"MSDV", values),
+                ],
+            ))?;
+            let expected_keys = [20_u32, 10, 30]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>();
+            let expected_values = [2.0_f32, 1.0, 3.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                migrated,
+                HandlerOutput::Mutations(mutations)
+                    if mutations == [
+                        HandlerMutation::RemoveFirstBySignature {
+                            path: "NPC_".to_owned(),
+                            signature: Signature(*b"KWDA"),
+                        },
+                        HandlerMutation::ReplacePayload {
+                            path: keys_path.to_owned(),
+                            occurrence: 0,
+                            data: expected_keys,
+                        },
+                        HandlerMutation::ReplacePayload {
+                            path: values_path.to_owned(),
+                            occurrence: 0,
+                            data: expected_values,
+                        },
+                    ]
+            ));
+
+            let ordered_keys = [20_u32, 10, 30]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                invoke(&record(
+                    RecordFlags::empty(),
+                    vec![
+                        subrecord(*b"KSIZ", 1_u32.to_le_bytes().to_vec()),
+                        subrecord(*b"KWDA", vec![0xaa; 4]),
+                        subrecord(*b"MSDK", ordered_keys),
+                        subrecord(*b"MSDV", vec![0; 12]),
+                    ],
+                ))?,
+                HandlerOutput::None
+            ));
+            assert!(matches!(
+                invoke(&record(
+                    RecordFlags::DELETED,
+                    vec![subrecord(*b"KWDA", vec![0xaa; 4])],
+                ))?,
                 HandlerOutput::None
             ));
         }
