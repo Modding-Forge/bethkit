@@ -1061,6 +1061,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatSnapNodeSummary { resolver: None }));
         registry.register(Arc::new(ResolveSnapNode { resolver: None }));
         registry.register(Arc::new(ResolveLocalArrayElement));
+        registry.register(Arc::new(FormatNavmeshVertex));
         registry.register(Arc::new(FormatNavmeshEdge { resolver: None }));
         registry.register(Arc::new(ResolveNavmeshEdge { resolver: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
@@ -5823,6 +5824,8 @@ struct FormatNavmeshEdge {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatNavmeshVertex;
+
 struct ResolveNavmeshEdge {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
@@ -5833,6 +5836,69 @@ struct NavmeshEdgeState {
     triangles_path: String,
     local_triangle_count: usize,
     external_navmesh: Option<ResolvedNavmeshInfo>,
+}
+
+impl SemanticHandler for FormatNavmeshVertex {
+    fn id(&self) -> &'static str {
+        "format.navmesh_vertex"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(input)) = invocation.value else {
+                return Err(indexed_record_error(
+                    self.id(),
+                    "vertex edit parsing requires text",
+                ));
+            };
+            let parsed = parse_delphi_integer(input, self.id()).unwrap_or(0);
+            return Ok(HandlerOutput::Value(FieldValue::Int(parsed)));
+        }
+        let raw = callback_integer(
+            invocation
+                .value
+                .ok_or_else(|| indexed_record_error(self.id(), "vertex requires an integer"))?,
+            self.id(),
+        )?;
+        let vertex = navmesh_vertex(&invocation, raw)?;
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary => {
+                let mut text = raw.to_string();
+                if let Some(vertex) = vertex {
+                    let [x, y, z] = navmesh_vertex_coordinates(vertex)?;
+                    text.push_str(&format!(
+                        " ({}, {}, {})",
+                        format_navmesh_vertex_float(x),
+                        format_navmesh_vertex_float(y),
+                        format_navmesh_vertex_float(z)
+                    ));
+                }
+                text
+            }
+            HandlerPhase::SortKey => {
+                let Some(vertex) = vertex else {
+                    return Ok(HandlerOutput::Text(format!("{:04X}", raw as i32 as u32)));
+                };
+                if matches!(
+                    invocation.context.game,
+                    SchemaGame::SkyrimLe | SchemaGame::SkyrimSe | SchemaGame::SkyrimVr
+                ) {
+                    navmesh_vertex_coordinates(vertex)?
+                        .map(format_navmesh_vertex_sort_key)
+                        .join("|")
+                } else {
+                    String::new()
+                }
+            }
+            HandlerPhase::EditValue => raw.to_string(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
 }
 
 impl SemanticHandler for FormatNavmeshEdge {
@@ -5890,6 +5956,113 @@ impl SemanticHandler for FormatNavmeshEdge {
         };
         Ok(HandlerOutput::Text(text))
     }
+}
+
+fn navmesh_vertex<'a>(
+    invocation: &'a HandlerInvocation<'_>,
+    raw: i128,
+) -> Result<Option<&'a FieldValue<'static>>> {
+    let vertices_path = navmesh_vertices_path(&invocation.context.binding.path)?;
+    let Some(index) = usize::try_from(raw).ok() else {
+        return Ok(None);
+    };
+    let Some(vertices) = invocation
+        .value_scope
+        .and_then(|scope| scoped_named_value(scope, &vertices_path))
+    else {
+        return Ok(None);
+    };
+    let FieldValue::Array(values) = &vertices.value else {
+        return Err(indexed_record_error(
+            "format.navmesh_vertex",
+            "Vertices target is not an array",
+        ));
+    };
+    Ok(values.get(index))
+}
+
+fn navmesh_vertices_path(path: &str) -> Result<String> {
+    let components: Vec<&str> = path.split('/').collect();
+    let Some(index) = components.iter().position(|component| {
+        component
+            .split_once(':')
+            .is_some_and(|(_, name)| name == "Triangles")
+    }) else {
+        return Err(indexed_record_error(
+            "format.navmesh_vertex",
+            format!("NAVM vertex binding path has no Triangles array: {path:?}"),
+        ));
+    };
+    let mut vertices = components[..index].to_vec();
+    vertices.push("2:Vertices");
+    Ok(vertices.join("/"))
+}
+
+fn navmesh_vertex_coordinates(vertex: &FieldValue<'_>) -> Result<[f64; 3]> {
+    let FieldValue::Struct(fields) = vertex else {
+        return Err(indexed_record_error(
+            "format.navmesh_vertex",
+            "selected Vertex is not a struct",
+        ));
+    };
+    let coordinate = |name: &str| {
+        condition_field(fields, &[name])
+            .and_then(|field| match field.value {
+                FieldValue::Float(value) => Some(value),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                indexed_record_error(
+                    "format.navmesh_vertex",
+                    format!("selected Vertex has no floating-point {name} coordinate"),
+                )
+            })
+    };
+    Ok([coordinate("X")?, coordinate("Y")?, coordinate("Z")?])
+}
+
+fn format_navmesh_vertex_float(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".to_owned()
+    } else if value.is_infinite() && value.is_sign_positive() {
+        "Inf".to_owned()
+    } else if value.is_infinite() {
+        "-Inf".to_owned()
+    } else if value == f64::from(f32::MAX) {
+        "Default".to_owned()
+    } else if value == f64::from(-f32::MAX) {
+        "Min".to_owned()
+    } else {
+        format!("{value:.6}")
+    }
+}
+
+fn format_navmesh_vertex_sort_key(value: f64) -> String {
+    if value.is_nan() {
+        return " ".repeat(40);
+    }
+    if value.is_infinite() {
+        return if value.is_sign_positive() {
+            "+".repeat(40)
+        } else {
+            "-".repeat(40)
+        };
+    }
+    if value == f64::from(f32::MAX) {
+        return format!("+{}", "9".repeat(39));
+    }
+    if value == f64::from(-f32::MAX) {
+        return format!("-{}", "9".repeat(39));
+    }
+    let value = if value.abs() <= f64::from(f32::from_bits(1)) {
+        0.0
+    } else {
+        value
+    };
+    let magnitude = format!("{:.6}", value.abs());
+    let padding = "0".repeat(39_usize.saturating_sub(magnitude.len()));
+    let sign = if value < 0.0 { '-' } else { '+' };
+    format!("{sign}{padding}{magnitude}")
 }
 
 impl SemanticHandler for ResolveNavmeshEdge {
@@ -10657,6 +10830,128 @@ mod tests {
             )?,
             HandlerOutput::Text(text) if text.is_empty()
         ));
+        Ok(())
+    }
+
+    /// Matches xEdit navigation-mesh vertex display, sorting, and edit parsing.
+    #[test]
+    fn navmesh_vertex_formatter_matches_xedit() -> TestResult {
+        // given
+        let vertices_path = "NAVM/0:Navigation Mesh/payload/2:Vertices";
+        let vertex_path = "NAVM/0:Navigation Mesh/payload/3:Triangles/element/0:Vertex 0";
+        let field = |path: &str, name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: path.to_owned(),
+            effective_path: None,
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let scope = FieldValue::Struct(vec![field(
+            vertices_path,
+            "Vertices",
+            FieldValue::Array(vec![FieldValue::Struct(vec![
+                field(
+                    &format!("{vertices_path}/element/0:X"),
+                    "X",
+                    FieldValue::Float(1.25),
+                ),
+                field(
+                    &format!("{vertices_path}/element/1:Y"),
+                    "Y",
+                    FieldValue::Float(-2.5),
+                ),
+                field(
+                    &format!("{vertices_path}/element/2:Z"),
+                    "Z",
+                    FieldValue::Float(0.0),
+                ),
+            ])]),
+        )]);
+        let mut binding = test_metadata_binding(
+            "integer.formatter",
+            "format.navmesh_vertex",
+            serde_json::json!({}),
+        );
+        binding.path = vertex_path.to_owned();
+        let handlers = SemanticHandlerRegistry::builtin();
+        let skyrim =
+            HandlerRecordContext::new(Signature(*b"NAVM"), FormId(0x1234), 0, SchemaGame::SkyrimSe);
+        let fallout =
+            HandlerRecordContext::new(Signature(*b"NAVM"), FormId(0x1234), 0, SchemaGame::Fallout4);
+        let valid = FieldValue::UInt(0);
+        let invalid = FieldValue::UInt(2);
+        let access = || HandlerInvocationAccess {
+            source: HandlerRecordSource::None,
+            value_scope: Some(&scope),
+            source_subrecord_index: None,
+            array_indices: &[],
+        };
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &binding,
+                skyrim,
+                access(),
+                HandlerPhase::Display,
+                Some(&valid),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "0 (1.250000, -2.500000, 0.000000)"
+        ));
+        let expected_sort_key = format!(
+            "+{}1.250000|-{}2.500000|+{}0.000000",
+            "0".repeat(31),
+            "0".repeat(31),
+            "0".repeat(31)
+        );
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &binding,
+                skyrim,
+                access(),
+                HandlerPhase::SortKey,
+                Some(&valid),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == expected_sort_key
+        ));
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &binding,
+                fallout,
+                access(),
+                HandlerPhase::SortKey,
+                Some(&valid),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text.is_empty()
+        ));
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &binding,
+                fallout,
+                access(),
+                HandlerPhase::SortKey,
+                Some(&invalid),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "0002"
+        ));
+        for (input, expected) in [("17", 17), ("garbage", 0), ("", 0)] {
+            let input = FieldValue::String(Cow::Borrowed(input));
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    fallout,
+                    HandlerPhase::ParseEditValue,
+                    Some(&input),
+                    None,
+                )?,
+                HandlerOutput::Value(FieldValue::Int(value)) if value == expected
+            ));
+        }
         Ok(())
     }
 
