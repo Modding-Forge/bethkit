@@ -1268,6 +1268,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(PerkEffectTypeAfterSet));
         registry.register(Arc::new(MagicEffectAssocItemAfterSet));
         registry.register(Arc::new(PackageInputTypeAfterSet));
+        registry.register(Arc::new(QuestScriptNameAfterSet));
         registry.register(Arc::new(LegacyPerkEntryPointAfterSet));
         registry.register(Arc::new(LegacyPerkFunctionAfterSet));
         registry.register(Arc::new(LegacyPerkParameterTypeAfterSet));
@@ -12414,6 +12415,68 @@ impl SemanticHandler for PackageInputTypeAfterSet {
             (false, false) => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Mutations(vec![mutation]))
+    }
+}
+
+struct QuestScriptNameAfterSet;
+
+impl SemanticHandler for QuestScriptNameAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.quest_script_name"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"QUST")
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+                    | SchemaGame::Starfield
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "quest script-name updates require a guarded QUST binding".to_owned(),
+            });
+        }
+        let name_path = configured_text(self.id(), invocation.context.configuration, "name_path")?;
+        if name_path != invocation.context.binding.path {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "quest script-name configuration does not match its binding".to_owned(),
+            });
+        }
+        let Some(FieldValue::String(new_value)) = invocation.value else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "quest script-name update requires a new string".to_owned(),
+            });
+        };
+        let Some(FieldValue::String(old_value)) = invocation.old_value else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "quest script-name update requires the previous string".to_owned(),
+            });
+        };
+        if old_value == new_value || old_value.is_empty() == new_value.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let script_path =
+            configured_text(self.id(), invocation.context.configuration, "script_path")?;
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::ResetToDefault {
+                path: script_path.to_owned(),
+                occurrence: 0,
+            },
+        ]))
     }
 }
 
@@ -24361,6 +24424,63 @@ mod tests {
                 "Int",
                 "Int",
             )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Resets quest fragment script data only when ScriptName crosses the empty boundary.
+    #[test]
+    fn quest_script_name_resets_script_on_presence_transition() -> Result<()> {
+        let name_path = "QUST/1:VMAD/payload/3:Script Fragments/2:ScriptName";
+        let script_path = "QUST/1:VMAD/payload/3:Script Fragments/3:Script";
+        let binding = CallbackBinding {
+            path: name_path.to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-quest-script-name".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.quest_script_name".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "name_path": name_path,
+                        "script_path": script_path
+                    }),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"QUST"), FormId::NULL, 0, SchemaGame::Fallout4);
+        let invoke = |old_value: &'static str, new_value: &'static str| {
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::String(new_value.into())),
+                Some(&FieldValue::String(old_value.into())),
+            )
+        };
+
+        assert!(matches!(
+            invoke("", "QuestScript")?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::ResetToDefault {
+                    path: script_path.to_owned(),
+                    occurrence: 0,
+                }]
+        ));
+        assert!(matches!(
+            invoke("QuestScript", "")?,
+            HandlerOutput::Mutations(_)
+        ));
+        assert!(matches!(
+            invoke("OldScript", "NewScript")?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke("SameScript", "SameScript")?,
             HandlerOutput::None
         ));
         Ok(())
