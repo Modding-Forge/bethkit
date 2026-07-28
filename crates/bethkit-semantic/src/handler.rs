@@ -2,7 +2,7 @@
 //!
 //! Versioned semantic callback handlers and built-in xEdit operations.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use bethkit_core::{FormId, Record, RecordFlags, Signature, WritableRecord};
@@ -167,6 +167,13 @@ pub struct HandlerContext<'a> {
 /// One transactional edit requested by a semantic handler.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HandlerMutation {
+    /// Replace main-record flags before initial decoding.
+    SetRecordFlags {
+        /// Stable record-root path.
+        path: String,
+        /// Complete replacement flags.
+        flags: RecordFlags,
+    },
     /// Replace an existing field occurrence.
     Set {
         /// Stable schema path.
@@ -1206,6 +1213,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SkyrimCellAfterLoad));
         registry.register(Arc::new(FalloutCellAfterLoad));
         registry.register(Arc::new(OblivionCellAfterLoad { resolver: None }));
+        registry.register(Arc::new(OblivionPathGridAfterLoad));
+        registry.register(Arc::new(OblivionInterCellConnectionsAfterLoad));
         registry.register(Arc::new(LegacyEffectShaderAfterLoad));
         registry.register(Arc::new(LegacyFactionAfterLoad));
         registry.register(Arc::new(LegacyWaterAfterLoad));
@@ -8813,6 +8822,297 @@ impl SemanticHandler for OblivionCellAfterLoad {
             Ok(HandlerOutput::Mutations(mutations))
         }
     }
+}
+
+struct OblivionPathGridAfterLoad;
+
+impl SemanticHandler for OblivionPathGridAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.oblivion_path_grid_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.game != SchemaGame::Oblivion
+            || invocation.context.record_signature != Signature(*b"PGRD")
+            || invocation.context.binding.path != "PGRD"
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion path-grid migration requires a guarded PGRD root binding"
+                    .to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion path-grid migration requires a record-level binding".to_owned(),
+            });
+        }
+        verify_oblivion_path_grid_configuration(&invocation, self.id())?;
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion path-grid migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(points) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"PGRP"))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let point_count = points.data.len() / 16;
+        let mut mutations = Vec::new();
+        if !record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"PGAG"))
+        {
+            mutations.push(HandlerMutation::InsertPayload {
+                path: "PGRD/2:Unknown".to_owned(),
+                data: vec![0; point_count.saturating_add(7) / 8],
+            });
+        }
+        if !record.flags.contains(RecordFlags::COMPRESSED) {
+            mutations.push(HandlerMutation::SetRecordFlags {
+                path: "PGRD".to_owned(),
+                flags: record.flags | RecordFlags::COMPRESSED,
+            });
+        }
+        let connections = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"PGRR"));
+        if let Some(connections) = connections {
+            if let Some((normalized_points, normalized_connections)) =
+                normalize_oblivion_point_connections(&points.data, &connections.data)
+            {
+                mutations.push(HandlerMutation::ReplacePayload {
+                    path: "PGRD/1:Points".to_owned(),
+                    occurrence: 0,
+                    data: normalized_points,
+                });
+                mutations.push(HandlerMutation::ReplacePayload {
+                    path: "PGRD/3:Point-to-Point Connections".to_owned(),
+                    occurrence: 0,
+                    data: normalized_connections,
+                });
+            }
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
+    }
+}
+
+fn verify_oblivion_path_grid_configuration(
+    invocation: &HandlerInvocation<'_>,
+    handler: &str,
+) -> Result<()> {
+    for (key, expected) in [
+        ("points_path", serde_json::json!("PGRD/1:Points")),
+        ("auxiliary_path", serde_json::json!("PGRD/2:Unknown")),
+        (
+            "connections_path",
+            serde_json::json!("PGRD/3:Point-to-Point Connections"),
+        ),
+        ("point_size", serde_json::json!(16)),
+        ("connection_count_offset", serde_json::json!(12)),
+    ] {
+        if invocation.context.configuration.get(key) != Some(&expected) {
+            return Err(SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!(
+                    "Oblivion path-grid migration requires materialized {key} {expected}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn normalize_oblivion_point_connections(
+    points: &[u8],
+    connections: &[u8],
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    if !points.len().is_multiple_of(16) || !connections.len().is_multiple_of(2) {
+        return None;
+    }
+    let expected_connections = points
+        .chunks_exact(16)
+        .map(|point| usize::from(point[12]))
+        .sum::<usize>();
+    if expected_connections.saturating_mul(2) != connections.len() {
+        return None;
+    }
+    let mut normalized_points = points.to_vec();
+    let mut normalized_connections = Vec::with_capacity(connections.len());
+    let mut source_offset = 0;
+    let mut changed = false;
+    for (index, point) in points.chunks_exact(16).enumerate() {
+        let count = usize::from(point[12]);
+        let end = source_offset + count * 2;
+        let connection_group = &connections[source_offset..end];
+        let retained_len = connection_group
+            .chunks_exact(2)
+            .rposition(|connection| connection != [0xff, 0xff])
+            .map_or(0, |last| last + 1);
+        if retained_len != count {
+            changed = true;
+            normalized_points[index * 16 + 12] =
+                u8::try_from(retained_len).expect("retained PGRR count fits its source byte");
+        }
+        normalized_connections.extend_from_slice(&connection_group[..retained_len * 2]);
+        source_offset = end;
+    }
+    changed.then_some((normalized_points, normalized_connections))
+}
+
+struct OblivionInterCellConnectionsAfterLoad;
+
+impl SemanticHandler for OblivionInterCellConnectionsAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.oblivion_inter_cell_connections_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.game != SchemaGame::Oblivion
+            || invocation.context.record_signature != Signature(*b"PGRD")
+            || invocation.context.binding.path != "PGRD/4:Inter-Cell Connections/payload"
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion inter-cell cleanup requires a guarded PGRI payload binding"
+                    .to_owned(),
+            });
+        }
+        for (key, expected) in [
+            ("entry_size", 16),
+            ("point_offset", 0),
+            ("x_offset", 4),
+            ("y_offset", 8),
+            ("z_offset", 12),
+        ] {
+            if invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                != Some(expected)
+            {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "Oblivion inter-cell cleanup requires materialized {key} {expected}"
+                    ),
+                });
+            }
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion inter-cell cleanup requires a writable record".to_owned(),
+            })?;
+        let index = invocation
+            .source_subrecord_index
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion inter-cell cleanup requires a source subrecord".to_owned(),
+            })?;
+        let connections = record
+            .subrecords
+            .get(index)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("source subrecord index {index} is out of bounds"),
+            })?;
+        if connections.signature != Signature(*b"PGRI") {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "Oblivion inter-cell cleanup requires PGRI, got {}",
+                    connections.signature
+                ),
+            });
+        }
+        let Some(normalized) = deduplicate_oblivion_inter_cell_connections(&connections.data)
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::SubrecordPayload(normalized))
+    }
+}
+
+fn deduplicate_oblivion_inter_cell_connections(data: &[u8]) -> Option<Vec<u8>> {
+    if !data.len().is_multiple_of(16) {
+        return None;
+    }
+    let entries = data.chunks_exact(16).collect::<Vec<_>>();
+    let mut keys = BTreeSet::new();
+    let mut keep = vec![true; entries.len()];
+    for (index, entry) in entries.iter().enumerate().rev() {
+        let key = (
+            u16::from_le_bytes(entry[..2].try_into().expect("two-byte PGRI point")),
+            oblivion_path_grid_float_sort_key(&entry[4..8]),
+            oblivion_path_grid_float_sort_key(&entry[8..12]),
+            oblivion_path_grid_float_sort_key(&entry[12..16]),
+        );
+        if !keys.insert(key) {
+            keep[index] = false;
+        }
+    }
+    if keep.iter().all(|retain| *retain) {
+        return None;
+    }
+    Some(
+        entries
+            .into_iter()
+            .zip(keep)
+            .filter_map(|(entry, retain)| retain.then_some(entry))
+            .flatten()
+            .copied()
+            .collect(),
+    )
+}
+
+fn oblivion_path_grid_float_sort_key(bytes: &[u8]) -> String {
+    let value = f32::from_le_bytes(bytes.try_into().expect("four-byte PGRI coordinate"));
+    if value.is_nan() {
+        return "nan".to_owned();
+    }
+    if value == f32::INFINITY {
+        return "+inf".to_owned();
+    }
+    if value == f32::NEG_INFINITY {
+        return "-inf".to_owned();
+    }
+    let normalized = if value == 0.0 || value.is_subnormal() {
+        0.0
+    } else {
+        value
+    };
+    format!("{normalized:.6}")
 }
 
 fn required_cell_path<'a>(
@@ -19471,6 +19771,156 @@ mod tests {
         assert!(matches!(
             invoke(&record(RecordFlags::DELETED, vec![(*b"DATA", vec![0x01])]))?,
             HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Repairs Oblivion PGRD auxiliary data, compression, and trailing sentinels.
+    #[test]
+    fn oblivion_path_grid_after_load_matches_xedit_repairs() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "PGRD".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-oblivion-pgrd-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.oblivion_path_grid_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "points_path": "PGRD/1:Points",
+                        "auxiliary_path": "PGRD/2:Unknown",
+                        "connections_path": "PGRD/3:Point-to-Point Connections",
+                        "point_size": 16,
+                        "connection_count_offset": 12,
+                    }),
+                },
+            },
+        };
+        let mut points = (0_u8..32).collect::<Vec<_>>();
+        points[12] = 3;
+        points[28] = 2;
+        let connections = [1_i16, -1, -1, 2, -1]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let record = WritableRecord {
+            signature: Signature(*b"PGRD"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"PGRP"),
+                    data: points.clone(),
+                },
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"PGRR"),
+                    data: connections,
+                },
+            ],
+        };
+
+        let output = SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"PGRD"), FormId(0x1111), 0, SchemaGame::Oblivion),
+            &record,
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+
+        points[12] = 1;
+        points[28] = 1;
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::InsertPayload {
+                        path: "PGRD/2:Unknown".to_owned(),
+                        data: vec![0],
+                    },
+                    HandlerMutation::SetRecordFlags {
+                        path: "PGRD".to_owned(),
+                        flags: RecordFlags::COMPRESSED,
+                    },
+                    HandlerMutation::ReplacePayload {
+                        path: "PGRD/1:Points".to_owned(),
+                        occurrence: 0,
+                        data: points,
+                    },
+                    HandlerMutation::ReplacePayload {
+                        path: "PGRD/3:Point-to-Point Connections".to_owned(),
+                        occurrence: 0,
+                        data: [1_i16, 2]
+                            .into_iter()
+                            .flat_map(i16::to_le_bytes)
+                            .collect(),
+                    },
+                ]
+        ));
+        Ok(())
+    }
+
+    /// Keeps the last Oblivion PGRI entry for each xEdit structural sort key.
+    #[test]
+    fn oblivion_inter_cell_after_load_matches_xedit_deduplication() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "PGRD/4:Inter-Cell Connections/payload".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-oblivion-pgri-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.oblivion_inter_cell_connections_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "entry_size": 16,
+                        "point_offset": 0,
+                        "x_offset": 4,
+                        "y_offset": 8,
+                        "z_offset": 12,
+                    }),
+                },
+            },
+        };
+        let entry = |point: u16, unused: [u8; 2], x: f32, y: f32, z: f32| {
+            [
+                point.to_le_bytes().as_slice(),
+                unused.as_slice(),
+                x.to_le_bytes().as_slice(),
+                y.to_le_bytes().as_slice(),
+                z.to_le_bytes().as_slice(),
+            ]
+            .concat()
+        };
+        let first = entry(7, [0xaa, 0xbb], 1.0, -0.0, 3.0);
+        let unique = entry(8, [0xcc, 0xdd], 2.0, 4.0, 6.0);
+        let retained = entry(7, [0x11, 0x22], 1.0, 0.0, 3.0);
+        let record = WritableRecord {
+            signature: Signature(*b"PGRD"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"PGRI"),
+                data: [first, unique.clone(), retained.clone()].concat(),
+            }],
+        };
+
+        let output = SemanticHandlerRegistry::builtin().invoke_with_records(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"PGRD"), FormId(0x1111), 0, SchemaGame::Oblivion),
+            HandlerInvocationAccess::writable_subrecord_with_scope(&record, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::SubrecordPayload(data)
+                if data == [unique, retained].concat()
         ));
         Ok(())
     }

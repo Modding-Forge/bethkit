@@ -1850,6 +1850,18 @@ impl RecordEditor {
     ) -> Result<()> {
         for mutation in mutations {
             match mutation {
+                HandlerMutation::SetRecordFlags { path, flags } => {
+                    if path != record.signature.to_string() {
+                        return Err(SemanticError::Handler {
+                            handler: "def.after_load".to_owned(),
+                            message: format!(
+                                "record flag mutation path {path} does not match {}",
+                                record.signature
+                            ),
+                        });
+                    }
+                    record.flags = flags;
+                }
                 HandlerMutation::Set {
                     path,
                     occurrence,
@@ -2178,6 +2190,10 @@ impl RecordEditor {
         mutation: HandlerMutation,
     ) -> Result<()> {
         match mutation {
+            HandlerMutation::SetRecordFlags { .. } => Err(SemanticError::Handler {
+                handler: "def.after_set".to_owned(),
+                message: "scoped callbacks cannot replace main-record flags".to_owned(),
+            }),
             HandlerMutation::Set {
                 path,
                 occurrence,
@@ -2777,6 +2793,12 @@ impl RecordEditor {
             .into_iter()
             .map(|mutation| {
                 Ok(match mutation {
+                    HandlerMutation::SetRecordFlags { .. } => {
+                        return Err(SemanticError::Handler {
+                            handler: "def.after_set".to_owned(),
+                            message: "scoped callbacks cannot replace main-record flags".to_owned(),
+                        });
+                    }
                     HandlerMutation::Set {
                         path,
                         occurrence,
@@ -3074,7 +3096,8 @@ fn insert_decoded_occurrence(
 
 fn mutation_path(mutation: &HandlerMutation) -> &str {
     match mutation {
-        HandlerMutation::Set { path, .. }
+        HandlerMutation::SetRecordFlags { path, .. }
+        | HandlerMutation::Set { path, .. }
         | HandlerMutation::SetIfEqual { path, .. }
         | HandlerMutation::ReplacePayload { path, .. }
         | HandlerMutation::InsertPayload { path, .. }
@@ -6069,6 +6092,184 @@ mod tests {
         assert_eq!(writable.subrecords[1].data, vec![0; 8]);
         assert_eq!(source.subrecords()?.len(), 1);
         assert_eq!(source.subrecords()?[0].as_bytes(), &[0x40]);
+        Ok(())
+    }
+
+    /// Applies both Oblivion PGRD load callbacks before decoding.
+    #[test]
+    fn editor_applies_oblivion_path_grid_after_load_migrations() -> Result<()> {
+        let subrecord = |id, path: &str, signature| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 1),
+                    path: format!("{path}/payload"),
+                    name: path.to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: None },
+                    },
+                }),
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Oblivion;
+        manifest.callbacks_total = 2;
+        manifest.callbacks_classified = 2;
+        manifest.required_handlers = vec![
+            HandlerRequirement {
+                id: "migrate.oblivion_path_grid_after_load".to_owned(),
+                minimum_version: 1,
+            },
+            HandlerRequirement {
+                id: "migrate.oblivion_inter_cell_connections_after_load".to_owned(),
+                minimum_version: 1,
+            },
+        ];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"PGRD"),
+                name: "Path Grid".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "PGRD".to_owned(),
+                    name: "Path Grid".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(1, "PGRD/0:Point Count", *b"DATA"),
+                            subrecord(3, "PGRD/1:Points", *b"PGRP"),
+                            subrecord(5, "PGRD/2:Unknown", *b"PGAG"),
+                            subrecord(7, "PGRD/3:Point-to-Point Connections", *b"PGRR"),
+                            subrecord(9, "PGRD/4:Inter-Cell Connections", *b"PGRI"),
+                        ],
+                    },
+                },
+            }],
+            vec![
+                CallbackBinding {
+                    path: "PGRD".to_owned(),
+                    callback_id: "def.after_load".to_owned(),
+                    callback_slot: None,
+                    implementation_fingerprint: "d1".repeat(32),
+                    implementation: CallbackImplementation::BuiltIn {
+                        operation: BuiltInOperation {
+                            id: "migrate.oblivion_path_grid_after_load".to_owned(),
+                            minimum_version: 1,
+                            configuration: serde_json::json!({
+                                "points_path": "PGRD/1:Points",
+                                "auxiliary_path": "PGRD/2:Unknown",
+                                "connections_path":
+                                    "PGRD/3:Point-to-Point Connections",
+                                "point_size": 16,
+                                "connection_count_offset": 12,
+                            }),
+                        },
+                    },
+                },
+                CallbackBinding {
+                    path: "PGRD/4:Inter-Cell Connections/payload".to_owned(),
+                    callback_id: "def.after_load".to_owned(),
+                    callback_slot: None,
+                    implementation_fingerprint: "d2".repeat(32),
+                    implementation: CallbackImplementation::BuiltIn {
+                        operation: BuiltInOperation {
+                            id: "migrate.oblivion_inter_cell_connections_after_load".to_owned(),
+                            minimum_version: 1,
+                            configuration: serde_json::json!({
+                                "entry_size": 16,
+                                "point_offset": 0,
+                                "x_offset": 4,
+                                "y_offset": 8,
+                                "z_offset": 12,
+                            }),
+                        },
+                    },
+                },
+            ],
+        )?;
+        let mut point = vec![0xaa; 16];
+        point[12] = 2;
+        let connection = |unused: [u8; 2]| {
+            [
+                7_u16.to_le_bytes().as_slice(),
+                unused.as_slice(),
+                1.0_f32.to_le_bytes().as_slice(),
+                2.0_f32.to_le_bytes().as_slice(),
+                3.0_f32.to_le_bytes().as_slice(),
+            ]
+            .concat()
+        };
+        let first_connection = connection([0xaa, 0xbb]);
+        let retained_connection = connection([0x11, 0x22]);
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"PGRD"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"DATA"),
+                    data: 1_u16.to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"PGRP"),
+                    data: point.clone(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"PGRR"),
+                    data: [3_i16, -1].into_iter().flat_map(i16::to_le_bytes).collect(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"PGRI"),
+                    data: [first_connection, retained_connection.clone()].concat(),
+                },
+            ],
+        });
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 2);
+        let writable = editor.into_writable_record();
+        assert!(writable
+            .flags
+            .contains(bethkit_core::RecordFlags::COMPRESSED));
+        assert_eq!(
+            writable
+                .subrecords
+                .iter()
+                .map(|subrecord| subrecord.signature)
+                .collect::<Vec<_>>(),
+            [
+                Signature(*b"DATA"),
+                Signature(*b"PGRP"),
+                Signature(*b"PGAG"),
+                Signature(*b"PGRR"),
+                Signature(*b"PGRI"),
+            ]
+        );
+        point[12] = 1;
+        assert_eq!(writable.subrecords[1].data, point);
+        assert_eq!(writable.subrecords[2].data, vec![0]);
+        assert_eq!(writable.subrecords[3].data, 3_i16.to_le_bytes());
+        assert_eq!(writable.subrecords[4].data, retained_connection);
+        assert!(!source
+            .header
+            .flags
+            .contains(bethkit_core::RecordFlags::COMPRESSED));
+        assert_eq!(source.subrecords()?.len(), 4);
         Ok(())
     }
 
