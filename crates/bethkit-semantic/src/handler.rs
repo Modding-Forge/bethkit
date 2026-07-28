@@ -284,6 +284,13 @@ pub enum SemanticLink {
         /// Numeric alias identifier inside the winning quest definition.
         alias_index: i64,
     },
+    /// One nested element inside the source record.
+    Element {
+        /// Stable schema path of the linked element.
+        path: String,
+        /// Zero-based enclosing array positions from outermost to innermost.
+        array_indices: Vec<usize>,
+    },
 }
 
 /// Input supplied to a semantic callback handler.
@@ -852,6 +859,8 @@ impl SemanticHandlerRegistry {
             table: None,
             resolver: None,
         }));
+        registry.register(Arc::new(FormatBlueprintComponentSummary { resolver: None }));
+        registry.register(Arc::new(ResolveBlueprintComponent));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -940,6 +949,9 @@ impl SemanticHandlerRegistry {
         self.register(Arc::new(FormatCtdaCondition {
             table: self.condition_function_table.clone(),
             resolver: Some(resolver),
+        }));
+        self.register(Arc::new(FormatBlueprintComponentSummary {
+            resolver: self.form_link_resolver.clone(),
         }));
     }
 
@@ -5298,6 +5310,237 @@ struct FormatCtdaCondition {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatBlueprintComponentSummary {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+struct ResolveBlueprintComponent;
+
+impl SemanticHandler for FormatBlueprintComponentSummary {
+    fn id(&self) -> &'static str {
+        "format.blueprint_component_summary"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::Display {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation.value.ok_or_else(|| {
+            blueprint_component_error(self.id(), "component formatting requires an integer")
+        })?;
+        let part_id = callback_integer(value, self.id())?;
+        if part_id < 0 {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(scope) = invocation.value_scope else {
+            return Err(blueprint_component_error(
+                self.id(),
+                "component formatting requires the decoded record scope",
+            ));
+        };
+        let Some(found) = find_blueprint_component(scope, part_id) else {
+            return Ok(HandlerOutput::None);
+        };
+        let summary = format_blueprint_component(
+            found.fields,
+            self.resolver.as_deref(),
+            handler_record_context(&invocation.context),
+        )?;
+        if summary.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Text(summary))
+        }
+    }
+}
+
+impl SemanticHandler for ResolveBlueprintComponent {
+    fn id(&self) -> &'static str {
+        "resolve.blueprint_component"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ReferenceResolution {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation.value.ok_or_else(|| {
+            blueprint_component_error(self.id(), "component resolution requires an integer")
+        })?;
+        let part_id = callback_integer(value, self.id())?;
+        if part_id < 0 {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(scope) = invocation.value_scope else {
+            return Err(blueprint_component_error(
+                self.id(),
+                "component resolution requires the decoded record scope",
+            ));
+        };
+        let Some(found) = find_blueprint_component(scope, part_id) else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Link(SemanticLink::Element {
+            path: found.path,
+            array_indices: found.array_indices,
+        }))
+    }
+}
+
+struct BlueprintComponent<'a> {
+    fields: &'a [crate::NamedValue<'static>],
+    path: String,
+    array_indices: Vec<usize>,
+}
+
+fn find_blueprint_component<'a>(
+    scope: &'a FieldValue<'static>,
+    part_id: i128,
+) -> Option<BlueprintComponent<'a>> {
+    fn visit<'a>(
+        value: &'a FieldValue<'static>,
+        part_id: i128,
+        array_indices: &mut Vec<usize>,
+    ) -> Option<BlueprintComponent<'a>> {
+        match value {
+            FieldValue::Struct(fields) => {
+                let part = condition_field(fields, &["Part ID"]);
+                let is_blueprint_item = condition_field(fields, &["Base Item"]).is_some()
+                    && condition_field(fields, &["Position/Rotation"]).is_some();
+                if is_blueprint_item
+                    && part.is_some_and(|field| {
+                        callback_integer(&field.value, "resolve.blueprint_component")
+                            .is_ok_and(|value| value == part_id)
+                    })
+                {
+                    let part = part?;
+                    let path = part
+                        .path
+                        .rsplit_once('/')
+                        .map_or_else(|| part.path.clone(), |(parent, _)| parent.to_owned());
+                    return Some(BlueprintComponent {
+                        fields,
+                        path,
+                        array_indices: array_indices.clone(),
+                    });
+                }
+                fields
+                    .iter()
+                    .find_map(|field| visit(&field.value, part_id, array_indices))
+            }
+            FieldValue::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    array_indices.push(index);
+                    let found = visit(value, part_id, array_indices);
+                    array_indices.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    visit(scope, part_id, &mut Vec::new())
+}
+
+fn format_blueprint_component(
+    fields: &[crate::NamedValue<'_>],
+    resolver: Option<&dyn FormLinkResolver>,
+    source: HandlerRecordContext,
+) -> Result<String> {
+    let part_id = condition_integer(fields, "Part ID")?;
+    let mut members = vec![format!("[{part_id}]")];
+    if let Some(base_item) = condition_field(fields, &["Base Item"]) {
+        members.push(format_blueprint_form_id(
+            &base_item.value,
+            resolver,
+            source,
+        )?);
+    }
+    if let Some(position_rotation) = condition_field(fields, &["Position/Rotation"]) {
+        members.push(format_blueprint_position_rotation(
+            &position_rotation.value,
+        )?);
+    }
+    if let Some(construction) = condition_field(fields, &["Construction Object"]) {
+        if !matches!(
+            construction.value,
+            FieldValue::FormId {
+                value: FormId::NULL,
+                ..
+            }
+        ) {
+            members.push(format_blueprint_form_id(
+                &construction.value,
+                resolver,
+                source,
+            )?);
+        }
+    }
+    Ok(members
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
+fn format_blueprint_form_id(
+    value: &FieldValue<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+    source: HandlerRecordContext,
+) -> Result<String> {
+    let FieldValue::FormId { value, targets } = value else {
+        return Err(blueprint_component_error(
+            "format.blueprint_component_summary",
+            "blueprint item link is not a FormID",
+        ));
+    };
+    Ok(resolver
+        .and_then(|resolver| resolver.resolve_form_id(source, *value, targets))
+        .map_or_else(
+            || format!("{:08X}", value.0),
+            |record| record.value().to_owned(),
+        ))
+}
+
+fn format_blueprint_position_rotation(value: &FieldValue<'_>) -> Result<String> {
+    let fields = struct_fields(value, "format.blueprint_component_summary")?;
+    let position = condition_field(fields, &["Position"]).ok_or_else(|| {
+        blueprint_component_error(
+            "format.blueprint_component_summary",
+            "blueprint item has no Position field",
+        )
+    })?;
+    let rotation = condition_field(fields, &["Rotation"]).ok_or_else(|| {
+        blueprint_component_error(
+            "format.blueprint_component_summary",
+            "blueprint item has no Rotation field",
+        )
+    })?;
+    Ok(format!(
+        "Pos:{} Rot:{}",
+        format_vec3(&position.value, Some(6))?,
+        format_vec3(&rotation.value, Some(4))?
+    ))
+}
+
+fn blueprint_component_error(handler: &str, message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: handler.to_owned(),
+        message: message.into(),
+    }
+}
+
 impl SemanticHandler for FormatCtdaCondition {
     fn id(&self) -> &'static str {
         "format.ctda_condition"
@@ -8850,6 +9093,75 @@ mod tests {
             format_item_summary(&value, Some(&TestFormLinkResolver), source)?,
             Some("3x Example Item [MISC:00001234]".to_owned())
         );
+        Ok(())
+    }
+
+    /// Resolves and summarizes Starfield blueprint component part identifiers.
+    #[test]
+    fn blueprint_component_handlers_match_xedit() -> TestResult {
+        // given
+        let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: format!("TEST/Blue Print Components/element/{name}"),
+            effective_path: None,
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let vector = |name: &str, values: [f64; 3]| {
+            field(
+                name,
+                FieldValue::Struct(
+                    ["X", "Y", "Z"]
+                        .into_iter()
+                        .zip(values)
+                        .map(|(name, value)| field(name, FieldValue::Float(value)))
+                        .collect(),
+                ),
+            )
+        };
+        let item = FieldValue::Struct(vec![
+            field(
+                "Base Item",
+                FieldValue::FormId {
+                    value: FormId(0x1234),
+                    targets: vec![Signature(*b"GBFM")],
+                },
+            ),
+            field(
+                "Construction Object",
+                FieldValue::FormId {
+                    value: FormId::NULL,
+                    targets: vec![Signature(*b"COBJ")],
+                },
+            ),
+            field(
+                "Position/Rotation",
+                FieldValue::Struct(vec![
+                    vector("Position", [1.0, 2.0, 3.0]),
+                    vector("Rotation", [90.0, 0.0, -45.0]),
+                ]),
+            ),
+            field("Part ID", FieldValue::UInt(7)),
+        ]);
+        let scope = FieldValue::Array(vec![item]);
+        let found =
+            find_blueprint_component(&scope, 7).ok_or("expected blueprint component resolution")?;
+        let source =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Starfield);
+
+        // when
+        let summary =
+            format_blueprint_component(found.fields, Some(&TestFormLinkResolver), source)?;
+
+        // then
+        assert_eq!(
+            summary,
+            "[7] [00001234] Example Faction Pos:(1, 2, 3) Rot:(90, 0, -45)"
+        );
+        assert_eq!(found.array_indices, vec![0]);
+        assert!(find_blueprint_component(&scope, -1).is_none());
+        assert!(find_blueprint_component(&scope, 8).is_none());
         Ok(())
     }
 

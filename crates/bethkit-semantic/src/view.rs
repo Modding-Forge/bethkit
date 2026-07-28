@@ -91,7 +91,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
     ///
     /// Returns [`SemanticError::Handler`] when the formatter rejects the value.
     pub fn format_value(&self, path: &str, value: &FieldValue<'_>) -> Result<Option<String>> {
-        self.context.format_value(self.record, path, value)
+        self.format_value_as(path, value, ValueFormat::Display)
     }
 
     /// Formats a decoded value using one explicit xEdit presentation mode.
@@ -106,6 +106,12 @@ impl<'context, 'record> RecordView<'context, 'record> {
         value: &FieldValue<'_>,
         format: ValueFormat,
     ) -> Result<Option<String>> {
+        if self.uses_handler(path, "format.blueprint_component_summary") {
+            let scope = self.structural_callback_scope()?;
+            return self
+                .context
+                .format_value_as_in_scope(self.record, path, value, &scope, format);
+        }
         self.context
             .format_value_as(self.record, path, value, format)
     }
@@ -134,6 +140,12 @@ impl<'context, 'record> RecordView<'context, 'record> {
     /// Returns [`SemanticError::Handler`] when the bound link callback rejects
     /// the value or returns an invalid result.
     pub fn resolve_link(&self, path: &str, value: &FieldValue<'_>) -> Result<Option<SemanticLink>> {
+        if self.uses_handler(path, "resolve.blueprint_component") {
+            let scope = self.structural_callback_scope()?;
+            return self
+                .context
+                .resolve_link_in_scope(self.record, path, value, &scope);
+        }
         self.context.resolve_link(self.record, path, value)
     }
 
@@ -311,6 +323,64 @@ impl<'context, 'record> RecordView<'context, 'record> {
             }
         }
         Ok(fields)
+    }
+
+    fn uses_handler(&self, path: &str, handler: &str) -> bool {
+        self.context
+            .registry()
+            .package()
+            .callback_bindings()
+            .iter()
+            .any(|binding| {
+                binding.path == path
+                    && matches!(
+                        &binding.implementation,
+                        CallbackImplementation::BuiltIn { operation }
+                            if operation.id == handler
+                    )
+            })
+    }
+
+    fn structural_callback_scope(&self) -> Result<FieldValue<'record>> {
+        let subrecords = self.record.subrecords()?;
+        let grammar = interpret(
+            &self.schema.root,
+            self.record.header.signature,
+            self.record.header.form_version,
+            subrecords,
+        )?;
+        let fields = self.fields()?;
+        let mut repeated: BTreeMap<String, BTreeMap<u32, Vec<NamedValue<'record>>>> =
+            BTreeMap::new();
+        for (index, field) in fields.iter().enumerate() {
+            let Some(scopes) = grammar.repeat_scopes.get(index) else {
+                continue;
+            };
+            for scope in scopes {
+                repeated
+                    .entry(scope.path.clone())
+                    .or_default()
+                    .entry(scope.occurrence)
+                    .or_default()
+                    .push(named_from_field(field));
+            }
+        }
+
+        let mut scope_values: Vec<NamedValue<'record>> = Vec::new();
+        for (path, occurrences) in repeated {
+            scope_values.push(NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(u32::MAX),
+                path,
+                effective_path: None,
+                name: "Repeated structural scope".to_owned(),
+                span: ByteSpan { start: 0, end: 0 },
+                value: FieldValue::Array(
+                    occurrences.into_values().map(FieldValue::Struct).collect(),
+                ),
+            });
+        }
+        scope_values.extend(fields.iter().map(named_from_field));
+        Ok(FieldValue::Struct(scope_values))
     }
 
     /// Decodes each occurrence of a repeated structural schema node.
@@ -1226,6 +1296,17 @@ fn top_level_subrecords(root: &SchemaNode) -> Vec<&SchemaNode> {
     let mut output: Vec<&SchemaNode> = Vec::new();
     collect(root, &mut output);
     output
+}
+
+fn named_from_field<'a>(field: &Field<'a>) -> NamedValue<'a> {
+    NamedValue {
+        node_id: field.node_id,
+        path: field.path.clone(),
+        effective_path: None,
+        name: field.name.clone(),
+        span: field.span,
+        value: field.value.clone(),
+    }
 }
 
 fn repeat_position_value(index: usize, count: usize) -> NamedValue<'static> {
@@ -3015,6 +3096,307 @@ mod tests {
             view.format_repeated_structure_as(structure_path, 1, ValueFormat::Summary)?,
             Some("Subject.GetDistance = 2".to_owned())
         );
+        Ok(())
+    }
+
+    /// Resolves nested blueprint component links through the decoded record structure.
+    #[test]
+    fn blueprint_component_callbacks_receive_structural_record_scope(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let repeat_path = "TEST/0:Components/repeat/0:Component";
+        let item_path = format!("{repeat_path}/0:Blue Print Components/payload/element");
+        let slot_path = format!("{repeat_path}/1:Ship Weapon Binding/payload/0:Weapon Slot 1");
+        let primitive = |id: u32, path: String, name: &str, primitive: PrimitiveType| SchemaNode {
+            id: bethkit_schema::SchemaNodeId(id),
+            path,
+            name: name.to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive { primitive },
+        };
+        let integer = |width: u8, signed: bool| PrimitiveType::Integer {
+            integer: IntegerType {
+                width,
+                signed,
+                byte_order: ByteOrder::LittleEndian,
+            },
+        };
+        let vector = |id: u32, path: String, name: &str, scale: f64, digits: i32| SchemaNode {
+            id: bethkit_schema::SchemaNodeId(id),
+            path: path.clone(),
+            name: name.to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: ["X", "Y", "Z"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        primitive(
+                            id + 1 + u32::try_from(index).expect("test vector index fits u32"),
+                            format!("{path}/{index}:{name}"),
+                            name,
+                            PrimitiveType::Float {
+                                width: 4,
+                                byte_order: ByteOrder::LittleEndian,
+                                scale,
+                                digits,
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        };
+        let position_rotation_path = format!("{item_path}/2:Position/Rotation");
+        let item = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(10),
+            path: item_path.clone(),
+            name: "Item".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    primitive(
+                        11,
+                        format!("{item_path}/0:Base Item"),
+                        "Base Item",
+                        PrimitiveType::FormId {
+                            targets: vec![SchemaSignature(*b"GBFM")],
+                        },
+                    ),
+                    primitive(
+                        12,
+                        format!("{item_path}/1:Construction Object"),
+                        "Construction Object",
+                        PrimitiveType::FormId {
+                            targets: vec![SchemaSignature(*b"COBJ")],
+                        },
+                    ),
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(13),
+                        path: position_rotation_path.clone(),
+                        name: "Position/Rotation".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Struct {
+                            fields: vec![
+                                vector(
+                                    14,
+                                    format!("{position_rotation_path}/0:Position"),
+                                    "Position",
+                                    1.0,
+                                    6,
+                                ),
+                                vector(
+                                    18,
+                                    format!("{position_rotation_path}/1:Rotation"),
+                                    "Rotation",
+                                    57.295_779_513_082_3,
+                                    4,
+                                ),
+                            ],
+                        },
+                    },
+                    primitive(
+                        22,
+                        format!("{item_path}/3:Part ID"),
+                        "Part ID",
+                        integer(4, false),
+                    ),
+                ],
+            },
+        };
+        let blueprint_path = format!("{repeat_path}/0:Blue Print Components");
+        let blueprint = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(8),
+            path: blueprint_path.clone(),
+            name: "Blue Print Components".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(*b"BUO4"),
+                payload: Box::new(SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(9),
+                    path: format!("{blueprint_path}/payload"),
+                    name: "Blue Print Components".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Array {
+                        element: Box::new(item),
+                        count: ArrayCount::Remainder,
+                    },
+                }),
+            },
+        };
+        let ship_path = format!("{repeat_path}/1:Ship Weapon Binding");
+        let ship = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(23),
+            path: ship_path.clone(),
+            name: "Ship Weapon Binding".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(*b"SHWB"),
+                payload: Box::new(SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(24),
+                    path: format!("{ship_path}/payload"),
+                    name: "Ship Weapon Binding".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Struct {
+                        fields: (0_u32..3)
+                            .map(|index| {
+                                primitive(
+                                    25 + index,
+                                    format!(
+                                        "{ship_path}/payload/{index}:Weapon Slot {}",
+                                        index + 1
+                                    ),
+                                    &format!("Weapon Slot {}", index + 1),
+                                    integer(4, true),
+                                )
+                            })
+                            .collect(),
+                    },
+                }),
+            },
+        };
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(1),
+                    path: "TEST/0:Components".to_owned(),
+                    name: "Components".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Repeat {
+                        minimum: 1,
+                        maximum: None,
+                        child: Box::new(SchemaNode {
+                            id: bethkit_schema::SchemaNodeId(2),
+                            path: repeat_path.to_owned(),
+                            name: "Component".to_owned(),
+                            required: true,
+                            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Sequence {
+                                children: vec![blueprint, ship],
+                            },
+                        }),
+                    },
+                }],
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = bethkit_schema::SchemaGame::Starfield;
+        manifest.callbacks_total = 2;
+        manifest.callbacks_classified = 2;
+        manifest.required_handlers = vec![
+            HandlerRequirement {
+                id: "format.blueprint_component_summary".to_owned(),
+                minimum_version: 1,
+            },
+            HandlerRequirement {
+                id: "resolve.blueprint_component".to_owned(),
+                minimum_version: 1,
+            },
+        ];
+        let bindings = vec![
+            CallbackBinding {
+                path: slot_path.clone(),
+                callback_id: "def.value_transform".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "00".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "format.blueprint_component_summary".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            },
+            CallbackBinding {
+                path: slot_path.clone(),
+                callback_id: "value.links_to".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "11".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "resolve.blueprint_component".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            },
+        ];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root,
+            }],
+            bindings,
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut blueprint_data = Vec::new();
+        blueprint_data.extend_from_slice(&0x1234_u32.to_le_bytes());
+        blueprint_data.extend_from_slice(&0_u32.to_le_bytes());
+        for value in [
+            1.0_f32,
+            2.0,
+            3.0,
+            std::f32::consts::FRAC_PI_2,
+            0.0,
+            -std::f32::consts::FRAC_PI_4,
+        ] {
+            blueprint_data.extend_from_slice(&value.to_le_bytes());
+        }
+        blueprint_data.extend_from_slice(&7_u32.to_le_bytes());
+        let mut ship_data = Vec::new();
+        for value in [7_i32, -1, -1] {
+            ship_data.extend_from_slice(&value.to_le_bytes());
+        }
+        let record_bytes = test_record_with_subrecords(
+            b"TEST",
+            &[(b"BUO4", &blueprint_data), (b"SHWB", &ship_data)],
+        );
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::starfield())?;
+        let view = context.view(&record, false)?;
+        let fields = view.fields()?;
+        let FieldValue::Struct(slots) = &fields[1].value else {
+            return Err("expected decoded ship weapon slots".into());
+        };
+
+        // when / then
+        assert_eq!(
+            view.format_value_as(&slot_path, &slots[0].value, ValueFormat::Display)?,
+            Some("[7] 00001234 Pos:(1, 2, 3) Rot:(90, 0, -45)".to_owned())
+        );
+        assert!(matches!(
+            view.resolve_link(&slot_path, &slots[0].value)?,
+            Some(SemanticLink::Element {
+                path,
+                array_indices,
+            }) if path == item_path && array_indices == vec![0, 0]
+        ));
         Ok(())
     }
 
