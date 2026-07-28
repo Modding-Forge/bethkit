@@ -1147,6 +1147,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(VerifyOblivionEfixAfterLoad));
         registry.register(Arc::new(RemoveOrphanedKeywordArrayAfterLoad));
         registry.register(Arc::new(VerifyInertBodyTemplateAfterLoad));
+        registry.register(Arc::new(MessageAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
@@ -7944,6 +7945,117 @@ impl SemanticHandler for VerifyInertBodyTemplateAfterLoad {
             });
         }
         Ok(HandlerOutput::None)
+    }
+}
+
+struct MessageAfterLoad;
+
+impl SemanticHandler for MessageAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.message_display_time"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"MESG")
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout3
+                    | SchemaGame::FalloutNv
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "message load migration is not valid for this record and game".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "message load migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "message load migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) {
+            return Ok(HandlerOutput::None);
+        }
+        let flags =
+            record
+                .subrecords
+                .iter()
+                .find(|subrecord| subrecord.signature == Signature(*b"DNAM"))
+                .map(|subrecord| {
+                    let bytes: [u8; 4] = subrecord.data.as_slice().try_into().map_err(|_| {
+                        SemanticError::Handler {
+                            handler: self.id().to_owned(),
+                            message: format!(
+                                "message DNAM requires a 4-byte payload, got {}",
+                                subrecord.data.len()
+                            ),
+                        }
+                    })?;
+                    Ok::<u32, SemanticError>(u32::from_le_bytes(bytes))
+                })
+                .transpose()?;
+        let has_display_time = record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"TNAM"));
+        let is_message_box = flags.unwrap_or_default() & 1 != 0;
+        if is_message_box != has_display_time {
+            return Ok(HandlerOutput::None);
+        }
+        let flags_path =
+            configured_text(self.id(), invocation.context.configuration, "flags_path")?;
+        let display_time_path = configured_text(
+            self.id(),
+            invocation.context.configuration,
+            "display_time_path",
+        )?;
+        let expected_prefix = "MESG/";
+        if !flags_path.starts_with(expected_prefix)
+            || !display_time_path.starts_with(expected_prefix)
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "message migration paths must be inside MESG".to_owned(),
+            });
+        }
+        let mutation = if is_message_box {
+            HandlerMutation::Remove {
+                path: display_time_path.to_owned(),
+                occurrence: 0,
+            }
+        } else if let Some(flags) = flags {
+            HandlerMutation::Set {
+                path: flags_path.to_owned(),
+                occurrence: 0,
+                value: OwnedFieldValue::UInt(u64::from(flags | 1)),
+            }
+        } else {
+            HandlerMutation::Insert {
+                path: flags_path.to_owned(),
+                value: OwnedFieldValue::UInt(1),
+            }
+        };
+        Ok(HandlerOutput::Mutations(vec![mutation]))
     }
 }
 
@@ -15341,6 +15453,105 @@ mod tests {
             )
             .expect_err("an ARMO record must fail the ARMA verifier");
         assert!(error.to_string().contains("only valid for modern ARMA"));
+        Ok(())
+    }
+
+    /// Reconciles MESG message-box flags and display-time presence exactly like xEdit.
+    #[test]
+    fn message_after_load_matches_xedit_truth_table() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "MESG".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-message-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.message_display_time".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "flags_path": "MESG/5:Flags",
+                        "display_time_path": "MESG/6:Display Time",
+                    }),
+                },
+            },
+        };
+        let source =
+            HandlerRecordContext::new(Signature(*b"MESG"), FormId(0x1111), 0, SchemaGame::SkyrimSe);
+        let record = |flags: Option<u32>, display_time: bool| {
+            let mut subrecords = Vec::new();
+            if let Some(flags) = flags {
+                subrecords.push(bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"DNAM"),
+                    data: flags.to_le_bytes().to_vec(),
+                });
+            }
+            if display_time {
+                subrecords.push(bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"TNAM"),
+                    data: 10_u32.to_le_bytes().to_vec(),
+                });
+            }
+            WritableRecord {
+                signature: Signature(*b"MESG"),
+                flags: RecordFlags::empty(),
+                form_id: FormId(0x1111),
+                form_version: 0,
+                subrecords,
+            }
+        };
+        let invoke = |record: &WritableRecord| {
+            SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+                &binding,
+                source,
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+
+        let message_box_with_time = record(Some(1), true);
+        assert!(matches!(
+            invoke(&message_box_with_time)?,
+            HandlerOutput::Mutations(mutations)
+                if mutations
+                    == [HandlerMutation::Remove {
+                        path: "MESG/6:Display Time".to_owned(),
+                        occurrence: 0,
+                    }]
+        ));
+
+        let ordinary_without_time = record(Some(2), false);
+        assert!(matches!(
+            invoke(&ordinary_without_time)?,
+            HandlerOutput::Mutations(mutations)
+                if mutations
+                    == [HandlerMutation::Set {
+                        path: "MESG/5:Flags".to_owned(),
+                        occurrence: 0,
+                        value: OwnedFieldValue::UInt(3),
+                    }]
+        ));
+
+        let missing_both = record(None, false);
+        assert!(matches!(
+            invoke(&missing_both)?,
+            HandlerOutput::Mutations(mutations)
+                if mutations
+                    == [HandlerMutation::Insert {
+                        path: "MESG/5:Flags".to_owned(),
+                        value: OwnedFieldValue::UInt(1),
+                    }]
+        ));
+
+        assert!(matches!(
+            invoke(&record(Some(1), false))?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(&record(Some(0), true))?,
+            HandlerOutput::None
+        ));
         Ok(())
     }
 

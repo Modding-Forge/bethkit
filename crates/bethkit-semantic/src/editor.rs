@@ -5006,6 +5006,128 @@ mod tests {
         Ok(())
     }
 
+    /// Applies all mutating branches of xEdit's MESG after-load reconciliation.
+    #[test]
+    fn editor_applies_message_after_load_mutations() -> Result<()> {
+        let flags_path = "MESG/5:Flags";
+        let display_time_path = "MESG/6:Display Time";
+        let subrecord = |id, path: &str, name: &str, signature| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 1),
+                    path: format!("{path}/payload"),
+                    name: name.to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Integer {
+                            integer: IntegerType {
+                                width: 4,
+                                signed: false,
+                                byte_order: ByteOrder::LittleEndian,
+                            },
+                        },
+                    },
+                }),
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::SkyrimSe;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.message_display_time".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"MESG"),
+                name: "Message".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "MESG".to_owned(),
+                    name: "Message".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(1, flags_path, "Flags", *b"DNAM"),
+                            subrecord(3, display_time_path, "Display Time", *b"TNAM"),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "MESG".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "99".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.message_display_time".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "flags_path": flags_path,
+                            "display_time_path": display_time_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let record = |flags: Option<u32>, display_time: bool| {
+            let mut subrecords = Vec::new();
+            if let Some(flags) = flags {
+                subrecords.push(WritableSubRecord {
+                    signature: Signature(*b"DNAM"),
+                    data: flags.to_le_bytes().to_vec(),
+                });
+            }
+            if display_time {
+                subrecords.push(WritableSubRecord {
+                    signature: Signature(*b"TNAM"),
+                    data: 10_u32.to_le_bytes().to_vec(),
+                });
+            }
+            Record::from_writable(&WritableRecord {
+                signature: Signature(*b"MESG"),
+                flags: bethkit_core::RecordFlags::empty(),
+                form_id: bethkit_core::FormId(0x1111),
+                form_version: 0,
+                subrecords,
+            })
+        };
+
+        let message_box = record(Some(1), true);
+        let migrated = context.edit(&message_box, false)?.into_writable_record();
+        assert_eq!(message_box.subrecords()?.len(), 2);
+        assert_eq!(migrated.subrecords.len(), 1);
+        assert_eq!(migrated.subrecords[0].data, 1_u32.to_le_bytes());
+
+        let ordinary = context
+            .edit(&record(Some(2), false), false)?
+            .into_writable_record();
+        assert_eq!(ordinary.subrecords[0].data, 3_u32.to_le_bytes());
+
+        let missing = context
+            .edit(&record(None, false), false)?
+            .into_writable_record();
+        assert_eq!(missing.subrecords.len(), 1);
+        assert_eq!(missing.subrecords[0].signature, Signature(*b"DNAM"));
+        assert_eq!(missing.subrecords[0].data, 1_u32.to_le_bytes());
+        Ok(())
+    }
+
     /// Dispatches a container-level load callback through its explicit SCHR anchor.
     #[test]
     fn editor_applies_embedded_script_after_load_migration() -> Result<()> {
