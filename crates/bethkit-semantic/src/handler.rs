@@ -291,6 +291,15 @@ pub enum SemanticLink {
         /// Zero-based enclosing array positions from outermost to innermost.
         array_indices: Vec<usize>,
     },
+    /// One nested element inside another resolved main record.
+    ExternalElement {
+        /// File-local FormID of the containing record.
+        record_form_id: FormId,
+        /// Stable schema path of the linked element.
+        path: String,
+        /// Zero-based enclosing array positions from outermost to innermost.
+        array_indices: Vec<usize>,
+    },
 }
 
 /// Input supplied to a semantic callback handler.
@@ -400,6 +409,60 @@ pub enum RecordIndexKeyValue {
 pub struct IndexedRecordInfo {
     form_id: FormId,
     link: FormLinkInfo,
+}
+
+/// Resolved nested element inside another main record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedElementInfo {
+    record_form_id: FormId,
+    path: String,
+    array_indices: Vec<usize>,
+    summary: String,
+    containing_record_name: String,
+}
+
+impl ResolvedElementInfo {
+    /// Creates resolved external-element metadata.
+    pub fn new(
+        record_form_id: FormId,
+        path: impl Into<String>,
+        array_indices: Vec<usize>,
+        summary: impl Into<String>,
+        containing_record_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            record_form_id,
+            path: path.into(),
+            array_indices,
+            summary: summary.into(),
+            containing_record_name: containing_record_name.into(),
+        }
+    }
+
+    /// Returns the file-local FormID of the containing record.
+    pub const fn record_form_id(&self) -> FormId {
+        self.record_form_id
+    }
+
+    /// Returns the stable schema path of the nested target.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns the target's enclosing array positions.
+    pub fn array_indices(&self) -> &[usize] {
+        &self.array_indices
+    }
+
+    /// Returns the nested element summary.
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Returns the xEdit name of the containing main record.
+    pub fn containing_record_name(&self) -> &str {
+        &self.containing_record_name
+    }
 }
 
 impl IndexedRecordInfo {
@@ -670,6 +733,19 @@ pub trait FormLinkResolver: Send + Sync {
         None
     }
 
+    /// Resolves one Starfield snap-template node for a source or linked reference.
+    ///
+    /// `reference_form_id` is `None` when xEdit starts from the source main record.
+    /// The default returns `None` for resolvers without snap-template metadata.
+    fn resolve_snap_node(
+        &self,
+        _source: HandlerRecordContext,
+        _reference_form_id: Option<FormId>,
+        _node_id: i64,
+    ) -> Option<ResolvedElementInfo> {
+        None
+    }
+
     /// Resolves the effective quest context inherited by an INFO condition.
     ///
     /// The default returns `None` because resolving INFO parent groups requires
@@ -910,6 +986,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ResolveIndexedRecord { resolver: None }));
         registry.register(Arc::new(FormatAvmdEntryReference { resolver: None }));
         registry.register(Arc::new(ResolveAvmdEntryReference { resolver: None }));
+        registry.register(Arc::new(FormatSnapNodeSummary { resolver: None }));
+        registry.register(Arc::new(ResolveSnapNode { resolver: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -1012,6 +1090,12 @@ impl SemanticHandlerRegistry {
             resolver: self.form_link_resolver.clone(),
         }));
         self.register(Arc::new(ResolveAvmdEntryReference {
+            resolver: self.form_link_resolver.clone(),
+        }));
+        self.register(Arc::new(FormatSnapNodeSummary {
+            resolver: self.form_link_resolver.clone(),
+        }));
+        self.register(Arc::new(ResolveSnapNode {
             resolver: self.form_link_resolver.clone(),
         }));
     }
@@ -5427,6 +5511,14 @@ struct ResolveAvmdEntryReference {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatSnapNodeSummary {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+struct ResolveSnapNode {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 impl SemanticHandler for FormatIndexedRecordName {
     fn id(&self) -> &'static str {
         "format.indexed_record_name"
@@ -5528,6 +5620,119 @@ impl SemanticHandler for ResolveAvmdEntryReference {
         Ok(HandlerOutput::Link(SemanticLink::Record {
             form_id: record.form_id(),
         }))
+    }
+}
+
+impl SemanticHandler for FormatSnapNodeSummary {
+    fn id(&self) -> &'static str {
+        "format.snap_node_summary"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::Display {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(node) = resolve_snap_node(&invocation, self.resolver.as_deref())? else {
+            return Ok(HandlerOutput::None);
+        };
+        if node.summary().is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let text = if node.containing_record_name().is_empty() {
+            node.summary().to_owned()
+        } else {
+            format!("{} on {}", node.summary(), node.containing_record_name())
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+impl SemanticHandler for ResolveSnapNode {
+    fn id(&self) -> &'static str {
+        "resolve.snap_node"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ReferenceResolution {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(node) = resolve_snap_node(&invocation, self.resolver.as_deref())? else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Link(SemanticLink::ExternalElement {
+            record_form_id: node.record_form_id(),
+            path: node.path().to_owned(),
+            array_indices: node.array_indices().to_vec(),
+        }))
+    }
+}
+
+fn resolve_snap_node(
+    invocation: &HandlerInvocation<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+) -> Result<Option<ResolvedElementInfo>> {
+    let handler = if invocation.phase == HandlerPhase::ReferenceResolution {
+        "resolve.snap_node"
+    } else {
+        "format.snap_node_summary"
+    };
+    let node_id = i64::try_from(callback_integer(
+        invocation
+            .value
+            .ok_or_else(|| indexed_record_error(handler, "snap node requires an integer"))?,
+        handler,
+    )?)
+    .map_err(|_| indexed_record_error(handler, "snap node identifier exceeds i64"))?;
+    let reference = match snap_node_reference_path(handler, &invocation.context)? {
+        Some(path) => {
+            let scope = invocation.value_scope.ok_or_else(|| {
+                indexed_record_error(handler, "linked snap node requires sibling scope")
+            })?;
+            let active = scoped_named_value_by_name(scope, "Bethkit Active Repeat Occurrence")
+                .map_or(scope, |field| &field.value);
+            let Some((form_id, _)) = scoped_form_id(active, path) else {
+                return Ok(None);
+            };
+            Some(form_id)
+        }
+        None => None,
+    };
+    Ok(resolver.and_then(|resolver| {
+        resolver.resolve_snap_node(
+            handler_record_context(&invocation.context),
+            reference,
+            node_id,
+        )
+    }))
+}
+
+fn snap_node_reference_path(
+    handler: &str,
+    context: &HandlerContext<'_>,
+) -> Result<Option<&'static str>> {
+    match context.binding.path.as_str() {
+        "CELL/17:Ship Blueprint Snap Links/payload/element/2:Parent Node" => Ok(Some(
+            "CELL/17:Ship Blueprint Snap Links/payload/element/0:Parent Reference",
+        )),
+        "CELL/17:Ship Blueprint Snap Links/payload/element/3:Linked Node" => Ok(Some(
+            "CELL/17:Ship Blueprint Snap Links/payload/element/1:Linked Reference",
+        )),
+        "REFR/25:Snap Links/payload/element/1:Links/element/0:Parent Node" => Ok(None),
+        "REFR/25:Snap Links/payload/element/1:Links/element/1:Linked Node" => Ok(Some(
+            "REFR/25:Snap Links/payload/element/0:Linked Reference",
+        )),
+        path => Err(indexed_record_error(
+            handler,
+            format!("unsupported snap node binding path {path:?}"),
+        )),
     }
 }
 
@@ -8740,6 +8945,23 @@ mod tests {
             }
         }
 
+        fn resolve_snap_node(
+            &self,
+            _source: HandlerRecordContext,
+            reference_form_id: Option<FormId>,
+            node_id: i64,
+        ) -> Option<ResolvedElementInfo> {
+            (node_id == 7 && matches!(reference_form_id, None | Some(FormId(0x2468)))).then(|| {
+                ResolvedElementInfo::new(
+                    FormId(0x5678),
+                    "STMP/2:Nodes/payload/element",
+                    vec![3],
+                    "[7] Example Node",
+                    "Example Template [STMP:00005678]",
+                )
+            })
+        }
+
         fn resolve_condition_quest_form_id(
             &self,
             _source: HandlerRecordContext,
@@ -9669,6 +9891,144 @@ mod tests {
             })
         ));
         Ok(())
+    }
+
+    /// Resolves Starfield snap node IDs and formats their linked element summaries.
+    #[test]
+    fn snap_node_handlers_match_xedit() -> TestResult {
+        // given
+        let path = "REFR/25:Snap Links/payload/element/1:Links/element/1:Linked Node";
+        let reference_path = "REFR/25:Snap Links/payload/element/0:Linked Reference";
+        let mut format_binding = test_metadata_binding(
+            "def.value_transform",
+            "format.snap_node_summary",
+            serde_json::json!({}),
+        );
+        format_binding.path = path.to_owned();
+        let scope = FieldValue::Struct(vec![
+            crate::NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(u32::MAX),
+                path: String::new(),
+                effective_path: None,
+                name: "Bethkit Active Repeat Occurrence".to_owned(),
+                span: crate::ByteSpan { start: 0, end: 0 },
+                value: FieldValue::Struct(vec![
+                    crate::NamedValue {
+                        node_id: bethkit_schema::SchemaNodeId(1),
+                        path: reference_path.to_owned(),
+                        effective_path: None,
+                        name: "Linked Reference".to_owned(),
+                        span: crate::ByteSpan { start: 0, end: 4 },
+                        value: FieldValue::FormId {
+                            value: FormId(0x2468),
+                            targets: vec![Signature(*b"REFR")],
+                        },
+                    },
+                    snap_reference_value(
+                        2,
+                        "CELL/17:Ship Blueprint Snap Links/payload/element/0:Parent Reference",
+                    ),
+                    snap_reference_value(
+                        3,
+                        "CELL/17:Ship Blueprint Snap Links/payload/element/1:Linked Reference",
+                    ),
+                ]),
+            },
+            crate::NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(u32::MAX),
+                path: String::new(),
+                effective_path: None,
+                name: "Bethkit Structural Record Scope".to_owned(),
+                span: crate::ByteSpan { start: 0, end: 0 },
+                value: FieldValue::Struct(vec![crate::NamedValue {
+                    node_id: bethkit_schema::SchemaNodeId(2),
+                    path: reference_path.to_owned(),
+                    effective_path: None,
+                    name: "Linked Reference".to_owned(),
+                    span: crate::ByteSpan { start: 4, end: 8 },
+                    value: FieldValue::FormId {
+                        value: FormId(0x9999),
+                        targets: vec![Signature(*b"REFR")],
+                    },
+                }]),
+            },
+        ]);
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source = HandlerRecordContext::new(
+            Signature(*b"REFR"),
+            FormId(0x1111),
+            0,
+            SchemaGame::Starfield,
+        );
+        let node = FieldValue::UInt(7);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &format_binding,
+                source,
+                HandlerPhase::Display,
+                Some(&node),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text)
+                if text
+                    == "[7] Example Node on Example Template [STMP:00005678]"
+        ));
+        for (path, needs_scope) in [
+            (
+                "CELL/17:Ship Blueprint Snap Links/payload/element/2:Parent Node",
+                true,
+            ),
+            (
+                "CELL/17:Ship Blueprint Snap Links/payload/element/3:Linked Node",
+                true,
+            ),
+            (
+                "REFR/25:Snap Links/payload/element/1:Links/element/0:Parent Node",
+                false,
+            ),
+            (
+                "REFR/25:Snap Links/payload/element/1:Links/element/1:Linked Node",
+                true,
+            ),
+        ] {
+            let mut link_binding =
+                test_metadata_binding("value.links_to", "resolve.snap_node", serde_json::json!({}));
+            link_binding.path = path.to_owned();
+            assert!(matches!(
+                handlers.invoke_with_value_scope(
+                    &link_binding,
+                    source,
+                    HandlerPhase::ReferenceResolution,
+                    Some(&node),
+                    None,
+                    needs_scope.then_some(&scope),
+                )?,
+                HandlerOutput::Link(SemanticLink::ExternalElement {
+                    record_form_id: FormId(0x5678),
+                    path,
+                    array_indices,
+                }) if path == "STMP/2:Nodes/payload/element" && array_indices == vec![3]
+            ));
+        }
+        Ok(())
+    }
+
+    fn snap_reference_value(node_id: u32, path: &str) -> crate::NamedValue<'static> {
+        crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(node_id),
+            path: path.to_owned(),
+            effective_path: None,
+            name: "Reference".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 4 },
+            value: FieldValue::FormId {
+                value: FormId(0x2468),
+                targets: vec![Signature(*b"REFR")],
+            },
+        }
     }
 
     /// Resolves VMAD object aliases through their sibling quest FormID.

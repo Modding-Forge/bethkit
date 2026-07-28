@@ -2135,6 +2135,36 @@ mod tests {
         }
     }
 
+    struct TestSnapNodeResolver;
+
+    impl crate::FormLinkResolver for TestSnapNodeResolver {
+        fn resolve_form_id(
+            &self,
+            _source: crate::HandlerRecordContext,
+            _form_id: bethkit_core::FormId,
+            _targets: &[bethkit_core::Signature],
+        ) -> Option<crate::FormLinkInfo> {
+            None
+        }
+
+        fn resolve_snap_node(
+            &self,
+            _source: crate::HandlerRecordContext,
+            reference_form_id: Option<bethkit_core::FormId>,
+            node_id: i64,
+        ) -> Option<crate::ResolvedElementInfo> {
+            (reference_form_id == Some(bethkit_core::FormId(0x2468)) && node_id == 7).then(|| {
+                crate::ResolvedElementInfo::new(
+                    bethkit_core::FormId(0x5678),
+                    "STMP/2:Nodes/payload/element",
+                    vec![3],
+                    "[7] Second Node",
+                    "Second Template [STMP:00005678]",
+                )
+            })
+        }
+    }
+
     struct SourceRecordUnionSelector;
 
     impl crate::SemanticHandler for SourceRecordUnionSelector {
@@ -3758,6 +3788,188 @@ mod tests {
             )?,
             None
         );
+        Ok(())
+    }
+
+    /// Resolves a snap node through the sibling reference in the selected repeat occurrence.
+    #[test]
+    fn snap_node_callbacks_use_active_repeat_reference(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let structure_path = "REFR/25:Snap Links/payload/element";
+        let reference_path = "REFR/25:Snap Links/payload/element/0:Linked Reference";
+        let links_path = "REFR/25:Snap Links/payload/element/1:Links";
+        let parent_path = "REFR/25:Snap Links/payload/element/1:Links/element/0:Parent Node";
+        let linked_path = "REFR/25:Snap Links/payload/element/1:Links/element/1:Linked Node";
+        let integer = PrimitiveType::Integer {
+            integer: IntegerType {
+                width: 4,
+                signed: false,
+                byte_order: ByteOrder::LittleEndian,
+            },
+        };
+        let primitive = |id: u32, path: &str, name: &str, primitive: PrimitiveType| SchemaNode {
+            id: bethkit_schema::SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive { primitive },
+        };
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "REFR".to_owned(),
+            name: "Placed Object".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(1),
+                    path: "REFR/25:Snap Links".to_owned(),
+                    name: "Snap Links".to_owned(),
+                    required: false,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Repeat {
+                        minimum: 0,
+                        maximum: None,
+                        child: Box::new(SchemaNode {
+                            id: bethkit_schema::SchemaNodeId(2),
+                            path: structure_path.to_owned(),
+                            name: "Snap Link".to_owned(),
+                            required: true,
+                            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"XSL1"),
+                                payload: Box::new(SchemaNode {
+                                    id: bethkit_schema::SchemaNodeId(3),
+                                    path: format!("{structure_path}/payload"),
+                                    name: "Snap Link".to_owned(),
+                                    required: true,
+                                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Struct {
+                                        fields: vec![
+                                            primitive(
+                                                4,
+                                                reference_path,
+                                                "Linked Reference",
+                                                PrimitiveType::FormId {
+                                                    targets: vec![SchemaSignature(*b"REFR")],
+                                                },
+                                            ),
+                                            SchemaNode {
+                                                id: bethkit_schema::SchemaNodeId(5),
+                                                path: links_path.to_owned(),
+                                                name: "Links".to_owned(),
+                                                required: true,
+                                                conflict_priority:
+                                                    bethkit_schema::ConflictPriority::Normal,
+                                                condition: None,
+                                                kind: SchemaNodeKind::Struct {
+                                                    fields: vec![
+                                                        primitive(
+                                                            6,
+                                                            parent_path,
+                                                            "Parent Node",
+                                                            integer.clone(),
+                                                        ),
+                                                        primitive(
+                                                            7,
+                                                            linked_path,
+                                                            "Linked Node",
+                                                            integer,
+                                                        ),
+                                                    ],
+                                                },
+                                            },
+                                        ],
+                                    },
+                                }),
+                            },
+                        }),
+                    },
+                }],
+            },
+        };
+        let bindings = [
+            ("def.value_transform", "format.snap_node_summary"),
+            ("value.links_to", "resolve.snap_node"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (callback_id, handler))| CallbackBinding {
+            path: linked_path.to_owned(),
+            callback_id: callback_id.to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: format!("{index:064x}"),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: BuiltInOperation {
+                    id: handler.to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        })
+        .collect();
+        let mut manifest = test_manifest();
+        manifest.game = bethkit_schema::SchemaGame::Starfield;
+        manifest.callbacks_total = 2;
+        manifest.callbacks_classified = 2;
+        manifest.required_handlers = vec![
+            HandlerRequirement {
+                id: "format.snap_node_summary".to_owned(),
+                minimum_version: 1,
+            },
+            HandlerRequirement {
+                id: "resolve.snap_node".to_owned(),
+                minimum_version: 1,
+            },
+        ];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"REFR"),
+                name: "Placed Object".to_owned(),
+                root,
+            }],
+            bindings,
+        )?;
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestSnapNodeResolver));
+        let context = SemanticContext::new_with_handlers(
+            Arc::new(package),
+            crate::DecoderRegistry::builtin(),
+            handlers,
+        )?;
+        let first = [0x11, 0x11, 0, 0, 7, 0, 0, 0, 7, 0, 0, 0];
+        let second = [0x68, 0x24, 0, 0, 7, 0, 0, 0, 7, 0, 0, 0];
+        let record_bytes =
+            test_record_with_subrecords(b"REFR", &[(b"XSL1", &first), (b"XSL1", &second)]);
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::starfield())?;
+        let view = context.view(&record, false)?;
+
+        // when / then
+        assert_eq!(
+            view.format_repeated_field_as(structure_path, 0, linked_path, ValueFormat::Display,)?,
+            None
+        );
+        assert_eq!(
+            view.format_repeated_field_as(structure_path, 1, linked_path, ValueFormat::Display,)?,
+            Some("[7] Second Node on Second Template [STMP:00005678]".to_owned())
+        );
+        assert!(matches!(
+            view.resolve_repeated_field_link(structure_path, 1, linked_path)?,
+            Some(SemanticLink::ExternalElement {
+                record_form_id: bethkit_core::FormId(0x5678),
+                path,
+                array_indices,
+            }) if path == "STMP/2:Nodes/payload/element" && array_indices == vec![3]
+        ));
         Ok(())
     }
 
