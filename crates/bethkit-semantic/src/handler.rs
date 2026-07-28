@@ -809,6 +809,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatLandscapePosition));
         registry.register(Arc::new(FormatClimateMoons));
         registry.register(Arc::new(FormatClimateTime));
+        registry.register(Arc::new(FormatAlocTime));
         registry.register(Arc::new(FormatIdleAnimationGroup));
         registry.register(Arc::new(FormatWeatherClassification));
         registry.register(Arc::new(FixedHexIntegerFormatter));
@@ -3482,6 +3483,45 @@ impl SemanticHandler for FormatClimateTime {
         .map_err(|_| climate_time_error("climate time value exceeds i64"))?;
         let text = match invocation.phase {
             HandlerPhase::Display | HandlerPhase::Summary => format_climate_time(value),
+            HandlerPhase::SortKey => format!("{value:04X}"),
+            HandlerPhase::EditValue | HandlerPhase::NativeValue | HandlerPhase::Validation => {
+                String::new()
+            }
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct FormatAlocTime;
+
+impl SemanticHandler for FormatAlocTime {
+    fn id(&self) -> &'static str {
+        "format.aloc_time"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            return parse_integer_handler_value(
+                invocation.value,
+                self.id(),
+                "media location time edit parsing requires text",
+            );
+        }
+
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                aloc_time_error("media location time formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| aloc_time_error("media location time value exceeds i64"))?;
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary => format_aloc_time(value),
             HandlerPhase::SortKey => format!("{value:04X}"),
             HandlerPhase::EditValue | HandlerPhase::NativeValue | HandlerPhase::Validation => {
                 String::new()
@@ -6930,6 +6970,21 @@ fn climate_time_error(message: impl Into<String>) -> SemanticError {
     }
 }
 
+fn format_aloc_time(value: i64) -> String {
+    let seconds = value.rem_euclid(256) * 86_400 / 256;
+    let hours = seconds / 3_600;
+    let minutes = seconds % 3_600 / 60;
+    let seconds = seconds % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn aloc_time_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.aloc_time".to_owned(),
+        message: message.into(),
+    }
+}
+
 fn parse_integer_handler_value(
     value: Option<&FieldValue<'static>>,
     handler: &str,
@@ -9458,6 +9513,51 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Text(text) if text == "0027"
+        ));
+        Ok(())
+    }
+
+    /// Matches xEdit's 1/256-day media location time formatter.
+    #[test]
+    fn aloc_time_formatter_matches_xedit_units_and_sorting() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.aloc_time",
+            serde_json::json!({}),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"ALOC"), FormId::NULL, 0, SchemaGame::FalloutNv);
+
+        // when / then
+        for (value, expected) in [
+            (0, "00:00:00"),
+            (64, "06:00:00"),
+            (128, "12:00:00"),
+            (192, "18:00:00"),
+            (256, "00:00:00"),
+        ] {
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    context,
+                    HandlerPhase::Display,
+                    Some(&FieldValue::UInt(value)),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::SortKey,
+                Some(&FieldValue::UInt(255)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "00FF"
         ));
         Ok(())
     }
