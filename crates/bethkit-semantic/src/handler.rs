@@ -1148,6 +1148,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(RemoveOrphanedKeywordArrayAfterLoad));
         registry.register(Arc::new(VerifyInertBodyTemplateAfterLoad));
         registry.register(Arc::new(MessageAfterLoad));
+        registry.register(Arc::new(DefaultObjectArrayAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
@@ -8056,6 +8057,87 @@ impl SemanticHandler for MessageAfterLoad {
             }
         };
         Ok(HandlerOutput::Mutations(vec![mutation]))
+    }
+}
+
+struct DefaultObjectArrayAfterLoad;
+
+impl SemanticHandler for DefaultObjectArrayAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.remove_empty_default_objects"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"DOBJ")
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+                    | SchemaGame::Starfield
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "default-object cleanup is not valid for this record and game".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "default-object cleanup requires a writable record".to_owned(),
+            })?;
+        let index = invocation
+            .source_subrecord_index
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "default-object cleanup requires a source subrecord".to_owned(),
+            })?;
+        let objects = record
+            .subrecords
+            .get(index)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("source subrecord index {index} is out of bounds"),
+            })?;
+        if objects.signature != Signature(*b"DNAM") || objects.data.len() % 8 != 0 {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "default-object cleanup requires an 8-byte DNAM entry array, got {} \
+                     bytes of {}",
+                    objects.data.len(),
+                    objects.signature
+                ),
+            });
+        }
+        let mut data = Vec::with_capacity(objects.data.len());
+        for entry in objects.data.chunks_exact(8) {
+            let use_code = u32::from_le_bytes(
+                entry[..4]
+                    .try_into()
+                    .expect("four-byte use code must convert"),
+            );
+            if use_code != 0 {
+                data.extend_from_slice(entry);
+            }
+        }
+        if data.len() == objects.data.len() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::SubrecordPayload(data))
+        }
     }
 }
 
@@ -15551,6 +15633,60 @@ mod tests {
         assert!(matches!(
             invoke(&record(Some(0), true))?,
             HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Removes only zero-use DOBJ entries while retaining every byte of other entries.
+    #[test]
+    fn default_object_after_load_removes_empty_entries() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "DOBJ/1:Objects/payload".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-default-object-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.remove_empty_default_objects".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let source =
+            HandlerRecordContext::new(Signature(*b"DOBJ"), FormId(0x1111), 0, SchemaGame::SkyrimSe);
+        let retained_one = [1_u32.to_le_bytes(), 0x1234_u32.to_le_bytes()].concat();
+        let removed = [0_u32.to_le_bytes(), 0x5678_u32.to_le_bytes()].concat();
+        let retained_two = [2_u32.to_le_bytes(), 0x9abc_u32.to_le_bytes()].concat();
+        let record = WritableRecord {
+            signature: Signature(*b"DOBJ"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"DNAM"),
+                data: [
+                    retained_one.as_slice(),
+                    removed.as_slice(),
+                    retained_two.as_slice(),
+                ]
+                .concat(),
+            }],
+        };
+
+        let output = SemanticHandlerRegistry::builtin().invoke_with_records(
+            &binding,
+            source,
+            HandlerInvocationAccess::writable_subrecord_with_scope(&record, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::SubrecordPayload(data)
+                if data == [retained_one.as_slice(), retained_two.as_slice()].concat()
         ));
         Ok(())
     }

@@ -390,10 +390,10 @@ impl RecordEditor {
                     .get("anchor_path_suffix")
                     .and_then(serde_json::Value::as_str)
                     .map_or_else(
-                        || binding.path.clone(),
-                        |suffix| format!("{}{suffix}", binding.path),
-                    ),
-                _ => binding.path.clone(),
+                        || self.after_load_anchor_path(&binding.path),
+                        |suffix| Ok(format!("{}{suffix}", binding.path)),
+                    )?,
+                _ => self.after_load_anchor_path(&binding.path)?,
             };
             let targets = if binding.path == record_path {
                 vec![None]
@@ -489,6 +489,22 @@ impl RecordEditor {
             .ok_or_else(|| SemanticError::MissingRecordSchema(self.record.signature.to_string()))?;
         find_node_by_path(&schema.root, path)
             .ok_or_else(|| SemanticError::MissingPath(path.to_owned()))
+    }
+
+    fn after_load_anchor_path(&self, path: &str) -> Result<String> {
+        let mut candidate = path;
+        loop {
+            if self
+                .find_node(candidate)
+                .is_ok_and(|node| matches!(&node.kind, SchemaNodeKind::Subrecord { .. }))
+            {
+                return Ok(candidate.to_owned());
+            }
+            let Some((parent, _)) = candidate.rsplit_once('/') else {
+                return Ok(path.to_owned());
+            };
+            candidate = parent;
+        }
     }
 
     fn grammar_for(&self, record: &WritableRecord) -> Result<crate::grammar::GrammarMatch<'_>> {
@@ -5125,6 +5141,93 @@ mod tests {
         assert_eq!(missing.subrecords.len(), 1);
         assert_eq!(missing.subrecords[0].signature, Signature(*b"DNAM"));
         assert_eq!(missing.subrecords[0].data, 1_u32.to_le_bytes());
+        Ok(())
+    }
+
+    /// Anchors a nested payload callback to its containing source subrecord.
+    #[test]
+    fn editor_applies_nested_payload_after_load_callback() -> Result<()> {
+        let objects_path = "DOBJ/1:Objects";
+        let payload_path = "DOBJ/1:Objects/payload";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::SkyrimSe;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.remove_empty_default_objects".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"DOBJ"),
+                name: "Default Object Manager".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "DOBJ".to_owned(),
+                    name: "Default Object Manager".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: objects_path.to_owned(),
+                            name: "Objects".to_owned(),
+                            required: true,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"DNAM"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: payload_path.to_owned(),
+                                    name: "Objects".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Bytes { length: None },
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: payload_path.to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "aa".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.remove_empty_default_objects".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let retained = [1_u32.to_le_bytes(), 0x1234_u32.to_le_bytes()].concat();
+        let removed = [0_u32.to_le_bytes(), 0x5678_u32.to_le_bytes()].concat();
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"DOBJ"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"DNAM"),
+                data: [retained.as_slice(), removed.as_slice()].concat(),
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(source.subrecords()?[0].as_bytes().len(), 16);
+        assert_eq!(editor.after_load_migration_count(), 1);
+        assert_eq!(editor.into_writable_record().subrecords[0].data, retained);
         Ok(())
     }
 
