@@ -1189,6 +1189,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacyWaterAfterLoad));
         registry.register(Arc::new(OblivionReferenceAfterLoad));
         registry.register(Arc::new(OblivionLeveledListAfterLoad));
+        registry.register(Arc::new(LegacyNpcAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -9118,6 +9119,93 @@ impl SemanticHandler for OblivionLeveledListAfterLoad {
         } else {
             Ok(HandlerOutput::Mutations(mutations))
         }
+    }
+}
+
+struct LegacyNpcAfterLoad;
+
+impl SemanticHandler for LegacyNpcAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.legacy_npc_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"NPC_")
+            || invocation.context.binding.path != "NPC_"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout3 | SchemaGame::FalloutNv
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy NPC migration requires a guarded NPC_ root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy NPC migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy NPC migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let value_path = invocation
+            .context
+            .configuration
+            .get("value_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy NPC migration requires value_path".to_owned(),
+            })?;
+        if value_path != "NPC_/30:Unknown" {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy NPC migration requires the materialized NAM5 path".to_owned(),
+            });
+        }
+        let Some(value) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"NAM5"))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(bytes) = value.data.get(..2) else {
+            return Ok(HandlerOutput::None);
+        };
+        let native = u16::from_le_bytes(
+            bytes
+                .try_into()
+                .expect("two-byte NPC value slice was checked above"),
+        );
+        if native <= 255 {
+            return Ok(HandlerOutput::None);
+        }
+        let mut data = value.data.clone();
+        data[..2].copy_from_slice(&255_u16.to_le_bytes());
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::ReplacePayload {
+                path: value_path.to_owned(),
+                occurrence: 0,
+                data,
+            },
+        ]))
     }
 }
 
@@ -17898,6 +17986,75 @@ mod tests {
             invoke(
                 &binding("LVSP"),
                 &record(*b"LVSP", RecordFlags::DELETED, vec![(*b"LVLD", vec![0x80])],),
+            )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Clamps legacy NPC NAM5 to 255 while preserving malformed trailing bytes.
+    #[test]
+    fn legacy_npc_after_load_matches_xedit_clamp() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "NPC_".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-legacy-npc-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.legacy_npc_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "value_path": "NPC_/30:Unknown",
+                    }),
+                },
+            },
+        };
+        let record = |flags, data: Vec<u8>| WritableRecord {
+            signature: Signature(*b"NPC_"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"NAM5"),
+                data,
+            }],
+        };
+        let registry = SemanticHandlerRegistry::builtin();
+        let invoke = |game, record: &WritableRecord| {
+            registry.invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(Signature(*b"NPC_"), FormId(0x1111), 0, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+
+        assert!(matches!(
+            invoke(
+                SchemaGame::Fallout3,
+                &record(RecordFlags::empty(), vec![0x34, 0x12, 0xaa]),
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::ReplacePayload {
+                    path: "NPC_/30:Unknown".to_owned(),
+                    occurrence: 0,
+                    data: vec![0xff, 0x00, 0xaa],
+                }]
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::FalloutNv,
+                &record(RecordFlags::empty(), 255_u16.to_le_bytes().to_vec()),
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::FalloutNv,
+                &record(RecordFlags::DELETED, 256_u16.to_le_bytes().to_vec()),
             )?,
             HandlerOutput::None
         ));

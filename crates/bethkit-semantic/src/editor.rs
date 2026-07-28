@@ -6459,6 +6459,102 @@ mod tests {
         Ok(())
     }
 
+    /// Clamps legacy NPC NAM5 transactionally before decoding.
+    #[test]
+    fn editor_applies_legacy_npc_after_load_migration() -> Result<()> {
+        let value_path = "NPC_/30:Unknown";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::FalloutNv;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.legacy_npc_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"NPC_"),
+                name: "NPC".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "NPC_".to_owned(),
+                    name: "NPC".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: value_path.to_owned(),
+                            name: "Unknown".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"NAM5"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: format!("{value_path}/payload"),
+                                    name: "Unknown".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Integer {
+                                            integer: IntegerType {
+                                                width: 2,
+                                                signed: false,
+                                                byte_order: ByteOrder::LittleEndian,
+                                            },
+                                        },
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "NPC_".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "d5".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.legacy_npc_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "value_path": value_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"NPC_"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 15,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"NAM5"),
+                data: 0x1234_u16.to_le_bytes().to_vec(),
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords[0].data, 255_u16.to_le_bytes());
+        assert_eq!(
+            source.subrecords()?[0].as_bytes(),
+            &0x1234_u16.to_le_bytes()
+        );
+        Ok(())
+    }
+
     /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
     fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {
