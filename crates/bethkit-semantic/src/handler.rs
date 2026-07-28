@@ -1191,6 +1191,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(OblivionLeveledListAfterLoad));
         registry.register(Arc::new(LegacyNpcAfterLoad));
         registry.register(Arc::new(LegacyInfoAfterLoad));
+        registry.register(Arc::new(LegacyMagicEffectAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -9326,6 +9327,124 @@ impl SemanticHandler for LegacyInfoAfterLoad {
         } else {
             Ok(HandlerOutput::Mutations(mutations))
         }
+    }
+}
+
+struct LegacyMagicEffectAfterLoad;
+
+impl SemanticHandler for LegacyMagicEffectAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.legacy_magic_effect_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"MGEF")
+            || invocation.context.binding.path != "MGEF"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout3 | SchemaGame::FalloutNv
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy MGEF migration requires a guarded MGEF root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy MGEF migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy MGEF migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        for (key, expected) in [
+            ("data_path", "MGEF/5:Data"),
+            ("archetype_path", "MGEF/5:Data/payload/17:Archtype"),
+            ("actor_value_path", "MGEF/5:Data/payload/18:Actor Value"),
+        ] {
+            let actual = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("legacy MGEF migration requires {key}"),
+                })?;
+            if actual != expected {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "legacy MGEF migration requires materialized {key} {expected}"
+                    ),
+                });
+            }
+        }
+        let Some(data) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"DATA"))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let (Some(archetype_bytes), Some(actor_value_bytes)) =
+            (data.data.get(64..68), data.data.get(68..72))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let archetype = u32::from_le_bytes(
+            archetype_bytes
+                .try_into()
+                .expect("four-byte MGEF archetype slice was checked above"),
+        );
+        let actor_value = i32::from_le_bytes(
+            actor_value_bytes
+                .try_into()
+                .expect("four-byte MGEF actor-value slice was checked above"),
+        );
+        let Some(expected) = legacy_magic_effect_actor_value(invocation.context.game, archetype)
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        if actor_value == expected {
+            return Ok(HandlerOutput::None);
+        }
+        let mut payload = data.data.clone();
+        payload[68..72].copy_from_slice(&expected.to_le_bytes());
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::ReplacePayload {
+                path: "MGEF/5:Data".to_owned(),
+                occurrence: 0,
+                data: payload,
+            },
+        ]))
+    }
+}
+
+fn legacy_magic_effect_actor_value(game: SchemaGame, archetype: u32) -> Option<i32> {
+    match archetype {
+        1 | 2 | 3 | 13 | 16 | 17 | 18 | 19 | 30 | 31 | 32 | 33 => Some(-1),
+        11 => Some(48),
+        12 => Some(49),
+        24 => Some(47),
+        35 if game == SchemaGame::FalloutNv => Some(-1),
+        36 if game == SchemaGame::FalloutNv => Some(51),
+        _ => None,
     }
 }
 
@@ -18293,6 +18412,126 @@ mod tests {
         );
         assert!(matches!(
             invoke(SchemaGame::FalloutNv, &fallout_nv_binding, &deleted)?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Normalizes legacy MGEF actor values for every xEdit archetype branch.
+    #[test]
+    fn legacy_magic_effect_after_load_matches_xedit_mapping() -> Result<()> {
+        for archetype in [1, 2, 3, 13, 16, 17, 18, 19, 30, 31, 32, 33] {
+            assert_eq!(
+                legacy_magic_effect_actor_value(SchemaGame::Fallout3, archetype),
+                Some(-1)
+            );
+            assert_eq!(
+                legacy_magic_effect_actor_value(SchemaGame::FalloutNv, archetype),
+                Some(-1)
+            );
+        }
+        for (archetype, actor_value) in [(11, 48), (12, 49), (24, 47)] {
+            assert_eq!(
+                legacy_magic_effect_actor_value(SchemaGame::Fallout3, archetype),
+                Some(actor_value)
+            );
+            assert_eq!(
+                legacy_magic_effect_actor_value(SchemaGame::FalloutNv, archetype),
+                Some(actor_value)
+            );
+        }
+        assert_eq!(
+            legacy_magic_effect_actor_value(SchemaGame::Fallout3, 35),
+            None
+        );
+        assert_eq!(
+            legacy_magic_effect_actor_value(SchemaGame::Fallout3, 36),
+            None
+        );
+        assert_eq!(
+            legacy_magic_effect_actor_value(SchemaGame::FalloutNv, 35),
+            Some(-1)
+        );
+        assert_eq!(
+            legacy_magic_effect_actor_value(SchemaGame::FalloutNv, 36),
+            Some(51)
+        );
+        assert_eq!(
+            legacy_magic_effect_actor_value(SchemaGame::FalloutNv, 34),
+            None
+        );
+
+        let binding = CallbackBinding {
+            path: "MGEF".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-legacy-mgef-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.legacy_magic_effect_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "data_path": "MGEF/5:Data",
+                        "archetype_path": "MGEF/5:Data/payload/17:Archtype",
+                        "actor_value_path": "MGEF/5:Data/payload/18:Actor Value",
+                    }),
+                },
+            },
+        };
+        let mut data = vec![0xaa; 76];
+        data[64..68].copy_from_slice(&36_u32.to_le_bytes());
+        data[68..72].copy_from_slice(&(-9_i32).to_le_bytes());
+        let record = |data| WritableRecord {
+            signature: Signature(*b"MGEF"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data,
+            }],
+        };
+        let registry = SemanticHandlerRegistry::builtin();
+        let invoke = |game, record: &WritableRecord| {
+            registry.invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(Signature(*b"MGEF"), FormId(0x1111), 0, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+
+        let output = invoke(SchemaGame::FalloutNv, &record(data.clone()))?;
+        let HandlerOutput::Mutations(mutations) = output else {
+            return Err(SemanticError::Handler {
+                handler: "test".to_owned(),
+                message: "legacy MGEF callback did not return its replacement".to_owned(),
+            });
+        };
+        let [HandlerMutation::ReplacePayload {
+            path,
+            occurrence,
+            data: migrated,
+        }] = mutations.as_slice()
+        else {
+            return Err(SemanticError::Handler {
+                handler: "test".to_owned(),
+                message: "legacy MGEF callback returned unexpected mutations".to_owned(),
+            });
+        };
+        assert_eq!(path, "MGEF/5:Data");
+        assert_eq!(*occurrence, 0);
+        assert_eq!(&migrated[..68], &data[..68]);
+        assert_eq!(&migrated[68..72], &51_i32.to_le_bytes());
+        assert_eq!(&migrated[72..], &data[72..]);
+        assert!(matches!(
+            invoke(SchemaGame::Fallout3, &record(data))?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(SchemaGame::FalloutNv, &record(vec![0xaa; 71]))?,
             HandlerOutput::None
         ));
         Ok(())

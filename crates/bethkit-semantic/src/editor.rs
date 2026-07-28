@@ -6670,6 +6670,100 @@ mod tests {
         Ok(())
     }
 
+    /// Rewrites only the legacy MGEF actor-value bytes before decoding.
+    #[test]
+    fn editor_applies_legacy_magic_effect_after_load_migration() -> Result<()> {
+        let data_path = "MGEF/5:Data";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout3;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.legacy_magic_effect_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"MGEF"),
+                name: "Base Effect".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "MGEF".to_owned(),
+                    name: "Base Effect".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: data_path.to_owned(),
+                            name: "Data".to_owned(),
+                            required: true,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"DATA"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: format!("{data_path}/payload"),
+                                    name: "Data".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Bytes { length: None },
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "MGEF".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "d7".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.legacy_magic_effect_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "data_path": data_path,
+                            "archetype_path": "MGEF/5:Data/payload/17:Archtype",
+                            "actor_value_path": "MGEF/5:Data/payload/18:Actor Value",
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut original = vec![0xaa; 76];
+        original[64..68].copy_from_slice(&11_u32.to_le_bytes());
+        original[68..72].copy_from_slice(&(-9_i32).to_le_bytes());
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"MGEF"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 15,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: original.clone(),
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(&writable.subrecords[0].data[..68], &original[..68]);
+        assert_eq!(&writable.subrecords[0].data[68..72], &48_i32.to_le_bytes());
+        assert_eq!(&writable.subrecords[0].data[72..], &original[72..]);
+        assert_eq!(source.subrecords()?[0].as_bytes(), original);
+        Ok(())
+    }
+
     /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
     fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {
