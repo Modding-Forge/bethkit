@@ -1188,6 +1188,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacyFactionAfterLoad));
         registry.register(Arc::new(LegacyWaterAfterLoad));
         registry.register(Arc::new(OblivionReferenceAfterLoad));
+        registry.register(Arc::new(OblivionLeveledListAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -8994,6 +8995,129 @@ impl SemanticHandler for OblivionReferenceAfterLoad {
                 signature: Signature(*b"XPCI"),
             },
         ]))
+    }
+}
+
+struct OblivionLeveledListAfterLoad;
+
+impl SemanticHandler for OblivionLeveledListAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.oblivion_leveled_list_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        let root = invocation.context.record_signature.to_string();
+        if invocation.context.game != SchemaGame::Oblivion
+            || !matches!(root.as_str(), "LVLC" | "LVLI" | "LVSP")
+            || invocation.context.binding.path != root
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion leveled-list migration requires a guarded root binding"
+                    .to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion leveled-list migration requires a record-level binding"
+                    .to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion leveled-list migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let configured_path = |key: &str, suffix: &str| -> Result<&str> {
+            let path = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("Oblivion leveled-list migration requires {key}"),
+                })?;
+            if path != format!("{root}/{suffix}") {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "Oblivion leveled-list {key} does not match the guarded record"
+                    ),
+                });
+            }
+            Ok(path)
+        };
+        let chance_path = configured_path("chance_path", "1:Chance none")?;
+        let flags_path = configured_path("flags_path", "2:Flags")?;
+        let mut mutations = Vec::new();
+        if record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"DATA"))
+        {
+            mutations.push(HandlerMutation::RemoveFirstBySignature {
+                path: root,
+                signature: Signature(*b"DATA"),
+            });
+        }
+        let chance = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"LVLD"));
+        if let Some(chance) = chance.filter(|subrecord| {
+            subrecord
+                .data
+                .first()
+                .is_some_and(|value| value & 0x80 != 0)
+        }) {
+            let mut data = chance.data.clone();
+            data[0] &= 0x7f;
+            mutations.push(HandlerMutation::ReplacePayload {
+                path: chance_path.to_owned(),
+                occurrence: 0,
+                data,
+            });
+            if let Some(flags) = record
+                .subrecords
+                .iter()
+                .find(|subrecord| subrecord.signature == Signature(*b"LVLF"))
+            {
+                let mut data = flags.data.clone();
+                if data.is_empty() {
+                    data.push(1);
+                } else {
+                    data[0] |= 1;
+                }
+                mutations.push(HandlerMutation::ReplacePayload {
+                    path: flags_path.to_owned(),
+                    occurrence: 0,
+                    data,
+                });
+            } else {
+                mutations.push(HandlerMutation::InsertPayload {
+                    path: flags_path.to_owned(),
+                    data: vec![1],
+                });
+            }
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
     }
 }
 
@@ -17659,6 +17783,121 @@ mod tests {
                     RecordFlags::empty(),
                     vec![(*b"EDID", b"Reference\0".to_vec())],
                 ),
+            )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Migrates Oblivion leveled-list chance flags and removes one legacy DATA.
+    #[test]
+    fn oblivion_leveled_list_after_load_matches_xedit_migration() -> Result<()> {
+        let binding = |root: &str| CallbackBinding {
+            path: root.to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-oblivion-lvl-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.oblivion_leveled_list_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "chance_path": format!("{root}/1:Chance none"),
+                        "flags_path": format!("{root}/2:Flags"),
+                    }),
+                },
+            },
+        };
+        let record = |signature, flags, subrecords: Vec<([u8; 4], Vec<u8>)>| WritableRecord {
+            signature: Signature(signature),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: subrecords
+                .into_iter()
+                .map(|(signature, data)| bethkit_core::WritableSubRecord {
+                    signature: Signature(signature),
+                    data,
+                })
+                .collect(),
+        };
+        let registry = SemanticHandlerRegistry::builtin();
+        let invoke = |binding: &CallbackBinding, record: &WritableRecord| {
+            registry.invoke_with_writable_record(
+                binding,
+                HandlerRecordContext::new(
+                    record.signature,
+                    FormId(0x1111),
+                    0,
+                    SchemaGame::Oblivion,
+                ),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+
+        let lvli = binding("LVLI");
+        assert!(matches!(
+            invoke(
+                &lvli,
+                &record(
+                    *b"LVLI",
+                    RecordFlags::empty(),
+                    vec![
+                        (*b"LVLD", vec![0x92, 0xaa]),
+                        (*b"LVLF", vec![0x02, 0xbb]),
+                        (*b"DATA", vec![0xcc]),
+                        (*b"DATA", vec![0xdd]),
+                    ],
+                ),
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::RemoveFirstBySignature {
+                        path: "LVLI".to_owned(),
+                        signature: Signature(*b"DATA"),
+                    },
+                    HandlerMutation::ReplacePayload {
+                        path: "LVLI/1:Chance none".to_owned(),
+                        occurrence: 0,
+                        data: vec![0x12, 0xaa],
+                    },
+                    HandlerMutation::ReplacePayload {
+                        path: "LVLI/2:Flags".to_owned(),
+                        occurrence: 0,
+                        data: vec![0x03, 0xbb],
+                    },
+                ]
+        ));
+        let lvlc = binding("LVLC");
+        assert!(matches!(
+            invoke(
+                &lvlc,
+                &record(
+                    *b"LVLC",
+                    RecordFlags::empty(),
+                    vec![(*b"LVLD", vec![0x80])],
+                ),
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::ReplacePayload {
+                        path: "LVLC/1:Chance none".to_owned(),
+                        occurrence: 0,
+                        data: vec![0],
+                    },
+                    HandlerMutation::InsertPayload {
+                        path: "LVLC/2:Flags".to_owned(),
+                        data: vec![1],
+                    },
+                ]
+        ));
+        assert!(matches!(
+            invoke(
+                &binding("LVSP"),
+                &record(*b"LVSP", RecordFlags::DELETED, vec![(*b"LVLD", vec![0x80])],),
             )?,
             HandlerOutput::None
         ));

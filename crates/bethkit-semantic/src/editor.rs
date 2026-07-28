@@ -6342,6 +6342,123 @@ mod tests {
         Ok(())
     }
 
+    /// Migrates Oblivion LVLI chance flags and removes only one legacy DATA.
+    #[test]
+    fn editor_applies_oblivion_leveled_list_after_load_migration() -> Result<()> {
+        let chance_path = "LVLI/1:Chance none";
+        let flags_path = "LVLI/2:Flags";
+        let old_data_path = "LVLI/4:Unused";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Oblivion;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.oblivion_leveled_list_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let byte_subrecord = |id, path: &str, signature| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 1),
+                    path: format!("{path}/payload"),
+                    name: path.to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Integer {
+                            integer: IntegerType {
+                                width: 1,
+                                signed: false,
+                                byte_order: ByteOrder::LittleEndian,
+                            },
+                        },
+                    },
+                }),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"LVLI"),
+                name: "Leveled Item".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "LVLI".to_owned(),
+                    name: "Leveled Item".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            byte_subrecord(1, chance_path, *b"LVLD"),
+                            byte_subrecord(3, flags_path, *b"LVLF"),
+                            byte_subrecord(5, old_data_path, *b"DATA"),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "LVLI".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "d4".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.oblivion_leveled_list_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "chance_path": chance_path,
+                            "flags_path": flags_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"LVLI"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"LVLD"),
+                    data: vec![0x92],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"DATA"),
+                    data: vec![0xaa],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"DATA"),
+                    data: vec![0xbb],
+                },
+            ],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 3);
+        assert_eq!(writable.subrecords[0].signature, Signature(*b"LVLD"));
+        assert_eq!(writable.subrecords[0].data, vec![0x12]);
+        assert_eq!(writable.subrecords[1].signature, Signature(*b"LVLF"));
+        assert_eq!(writable.subrecords[1].data, vec![1]);
+        assert_eq!(writable.subrecords[2].signature, Signature(*b"DATA"));
+        assert_eq!(writable.subrecords[2].data, vec![0xbb]);
+        assert_eq!(source.subrecords()?.len(), 3);
+        Ok(())
+    }
+
     /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
     fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {
