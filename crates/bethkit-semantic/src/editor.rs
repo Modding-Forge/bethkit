@@ -9647,7 +9647,10 @@ mod tests {
                         operation: BuiltInOperation {
                             id: "edit.game_setting_editor_id".to_owned(),
                             minimum_version: 1,
-                            configuration: serde_json::json!({ "data_path": value_path }),
+                            configuration: serde_json::json!({
+                                "editor_id_path": editor_id_path,
+                                "data_path": value_path
+                            }),
                         },
                     },
                 },

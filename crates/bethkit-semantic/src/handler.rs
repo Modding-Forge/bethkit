@@ -12108,38 +12108,13 @@ impl SemanticHandler for GameSettingEditorIdAfterSet {
         if invocation.phase != HandlerPhase::AfterSet {
             return Ok(HandlerOutput::None);
         }
-        if invocation.context.record_signature != Signature(*b"GMST")
-            || invocation.context.binding.path != "GMST/0:Editor ID"
-            || !matches!(
-                invocation.context.game,
-                SchemaGame::SkyrimLe
-                    | SchemaGame::SkyrimSe
-                    | SchemaGame::SkyrimVr
-                    | SchemaGame::Fallout3
-                    | SchemaGame::FalloutNv
-                    | SchemaGame::Fallout4
-                    | SchemaGame::Fallout4Vr
-                    | SchemaGame::Fallout76
-                    | SchemaGame::Starfield
-            )
-        {
+        let configuration = invocation.context.configuration;
+        let editor_id_path = configured_text(self.id(), configuration, "editor_id_path")?;
+        if editor_id_path != invocation.context.binding.path {
             return Err(SemanticError::Handler {
                 handler: self.id().to_owned(),
-                message: "game-setting editor-ID updates require a guarded GMST binding".to_owned(),
-            });
-        }
-        let expected_path = if invocation.context.game == SchemaGame::Starfield {
-            "GMST/2:Value"
-        } else {
-            "GMST/1:Value"
-        };
-        let data_path = configured_text(self.id(), invocation.context.configuration, "data_path")?;
-        if data_path != expected_path {
-            return Err(SemanticError::Handler {
-                handler: self.id().to_owned(),
-                message: format!(
-                    "game-setting editor-ID updates require materialized data_path {expected_path}"
-                ),
+                message: "game-setting editor-ID configuration does not match its binding"
+                    .to_owned(),
             });
         }
         let Some(FieldValue::String(new_value)) = invocation.value else {
@@ -12158,19 +12133,14 @@ impl SemanticHandler for GameSettingEditorIdAfterSet {
         if old_value == new_value || old_value.chars().next() == new_value.chars().next() {
             return Ok(HandlerOutput::None);
         }
-        let default = match new_value.as_bytes().first() {
-            Some(b's') if invocation.context.plugin_localized => OwnedFieldValue::UInt(0),
-            Some(b's') => OwnedFieldValue::String(String::new()),
-            Some(b'f') => OwnedFieldValue::Float(0.0),
-            Some(b'b') => OwnedFieldValue::Int(0),
-            Some(b'u') => OwnedFieldValue::UInt(0),
-            _ => OwnedFieldValue::Int(0),
-        };
-        Ok(HandlerOutput::Mutations(vec![HandlerMutation::Set {
-            path: data_path.to_owned(),
-            occurrence: 0,
-            value: default,
-        }]))
+        let data_path = configured_text(self.id(), configuration, "data_path")?.to_owned();
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::Remove {
+                path: data_path.clone(),
+                occurrence: 0,
+            },
+            HandlerMutation::InsertDefault { path: data_path },
+        ]))
     }
 }
 
@@ -23842,27 +23812,25 @@ mod tests {
                 operation: bethkit_schema::BuiltInOperation {
                     id: "edit.game_setting_editor_id".to_owned(),
                     minimum_version: 1,
-                    configuration: serde_json::json!({ "data_path": data_path }),
+                    configuration: serde_json::json!({
+                        "editor_id_path": "GMST/0:Editor ID",
+                        "data_path": data_path
+                    }),
                 },
             },
         };
         let handlers = SemanticHandlerRegistry::builtin();
         let old = FieldValue::String(std::borrow::Cow::Borrowed("fExample"));
         let changed = FieldValue::String(std::borrow::Cow::Borrowed("iExample"));
-        for (game, data_path) in [
-            (SchemaGame::SkyrimLe, "GMST/1:Value"),
-            (SchemaGame::SkyrimSe, "GMST/1:Value"),
-            (SchemaGame::SkyrimVr, "GMST/1:Value"),
-            (SchemaGame::Fallout3, "GMST/1:Value"),
-            (SchemaGame::FalloutNv, "GMST/1:Value"),
-            (SchemaGame::Fallout4, "GMST/1:Value"),
-            (SchemaGame::Fallout4Vr, "GMST/1:Value"),
-            (SchemaGame::Fallout76, "GMST/1:Value"),
-            (SchemaGame::Starfield, "GMST/2:Value"),
-        ] {
+        for data_path in ["GMST/1:Value", "GMST/2:Value"] {
             let output = handlers.invoke(
                 &binding(data_path),
-                HandlerRecordContext::new(Signature(*b"GMST"), FormId::NULL, 0, game),
+                HandlerRecordContext::new(
+                    Signature(*b"TEST"),
+                    FormId::NULL,
+                    0,
+                    SchemaGame::Morrowind,
+                ),
                 HandlerPhase::AfterSet,
                 Some(&changed),
                 Some(&old),
@@ -23870,21 +23838,25 @@ mod tests {
             assert!(matches!(
                 output,
                 HandlerOutput::Mutations(mutations)
-                    if mutations == [HandlerMutation::Set {
-                        path: data_path.to_owned(),
-                        occurrence: 0,
-                        value: OwnedFieldValue::Int(0),
-                    }]
+                    if mutations == [
+                        HandlerMutation::Remove {
+                            path: data_path.to_owned(),
+                            occurrence: 0,
+                        },
+                        HandlerMutation::InsertDefault {
+                            path: data_path.to_owned(),
+                        }
+                    ]
             ));
         }
         assert!(matches!(
             handlers.invoke(
                 &binding("GMST/1:Value"),
                 HandlerRecordContext::new(
-                    Signature(*b"GMST"),
+                    Signature(*b"TEST"),
                     FormId::NULL,
                     0,
-                    SchemaGame::Fallout4,
+                    SchemaGame::Morrowind,
                 ),
                 HandlerPhase::AfterSet,
                 Some(&FieldValue::String(std::borrow::Cow::Borrowed("fChanged"))),
