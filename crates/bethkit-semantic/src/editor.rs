@@ -6919,6 +6919,167 @@ mod tests {
         Ok(())
     }
 
+    /// Inserts Patrol locations and flags in their PACK schema positions.
+    #[test]
+    fn editor_applies_legacy_package_after_load_migration() -> Result<()> {
+        let general_path = "PACK/1:General";
+        let locations_path = "PACK/2:Locations";
+        let location_path = "PACK/2:Locations/0:Location 1";
+        let schedule_path = "PACK/3:Schedule";
+        let target_path = "PACK/4:Target 1";
+        let eat_path = "PACK/8:Eat Marker";
+        let follow_path = "PACK/10:Follow - Start Location - Trigger Radius";
+        let patrol_path = "PACK/11:Patrol Flags";
+        let subrecord = |id, path: &str, name: &str, signature, length| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 1),
+                    path: format!("{path}/payload"),
+                    name: name.to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes {
+                            length: Some(length),
+                        },
+                    },
+                }),
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::FalloutNv;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.legacy_package_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"PACK"),
+                name: "Package".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "PACK".to_owned(),
+                    name: "Package".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(1, general_path, "General", *b"PKDT", 12),
+                            SchemaNode {
+                                id: SchemaNodeId(3),
+                                path: locations_path.to_owned(),
+                                name: "Locations".to_owned(),
+                                required: false,
+                                conflict_priority: ConflictPriority::Normal,
+                                condition: None,
+                                kind: SchemaNodeKind::Sequence {
+                                    children: vec![subrecord(
+                                        4,
+                                        location_path,
+                                        "Location 1",
+                                        *b"PLDT",
+                                        12,
+                                    )],
+                                },
+                            },
+                            subrecord(6, schedule_path, "Schedule", *b"PSDT", 8),
+                            subrecord(8, target_path, "Target 1", *b"PTDT", 16),
+                            subrecord(10, eat_path, "Eat Marker", *b"PKED", 0),
+                            subrecord(
+                                12,
+                                follow_path,
+                                "Follow - Start Location - Trigger Radius",
+                                *b"PKFD",
+                                4,
+                            ),
+                            subrecord(14, patrol_path, "Patrol Flags", *b"PKPT", 2),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "PACK".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "dd".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.legacy_package_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "general_path": general_path,
+                            "type_path": "PACK/1:General/payload/1:Type",
+                            "locations_path": locations_path,
+                            "location_path": location_path,
+                            "location_type_path":
+                                "PACK/2:Locations/0:Location 1/payload/0:Type",
+                            "target_path": target_path,
+                            "eat_marker_path": eat_path,
+                            "follow_radius_path": follow_path,
+                            "patrol_flags_path": patrol_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut general = vec![0; 12];
+        general[4] = 13;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"PACK"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"PKDT"),
+                    data: general.clone(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"PSDT"),
+                    data: vec![0xaa; 8],
+                },
+            ],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(
+            writable
+                .subrecords
+                .iter()
+                .map(|subrecord| subrecord.signature)
+                .collect::<Vec<_>>(),
+            [
+                Signature(*b"PKDT"),
+                Signature(*b"PLDT"),
+                Signature(*b"PSDT"),
+                Signature(*b"PKPT"),
+            ]
+        );
+        assert_eq!(writable.subrecords[0].data, general);
+        assert_eq!(&writable.subrecords[1].data[..4], &6_i32.to_le_bytes());
+        assert_eq!(&writable.subrecords[1].data[4..], &[0; 8]);
+        assert_eq!(writable.subrecords[2].data, vec![0xaa; 8]);
+        assert_eq!(writable.subrecords[3].data, vec![0; 2]);
+        assert_eq!(source.subrecords()?.len(), 2);
+        Ok(())
+    }
+
     /// Rewrites only the legacy MGEF actor-value bytes before decoding.
     #[test]
     fn editor_applies_legacy_magic_effect_after_load_migration() -> Result<()> {

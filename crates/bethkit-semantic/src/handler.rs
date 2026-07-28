@@ -1193,6 +1193,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacyInfoAfterLoad));
         registry.register(Arc::new(LegacySoundAfterLoad));
         registry.register(Arc::new(LegacyWeaponAfterLoad));
+        registry.register(Arc::new(LegacyPackageAfterLoad));
         registry.register(Arc::new(LegacyMagicEffectAfterLoad));
         registry.register(Arc::new(SkyrimReferenceAfterLoad));
         registry.register(Arc::new(FalloutSceneBehaviorAfterLoad));
@@ -9636,6 +9637,196 @@ impl SemanticHandler for LegacyWeaponAfterLoad {
                 data: normalized,
             },
         ]))
+    }
+}
+
+struct LegacyPackageAfterLoad;
+
+impl SemanticHandler for LegacyPackageAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.legacy_package_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"PACK")
+            || invocation.context.binding.path != "PACK"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout3 | SchemaGame::FalloutNv
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy package migration requires a guarded PACK root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy package migration requires a record-level binding".to_owned(),
+            });
+        }
+        let expected_paths = [
+            ("general_path", "PACK/1:General"),
+            ("type_path", "PACK/1:General/payload/1:Type"),
+            ("locations_path", "PACK/2:Locations"),
+            ("location_path", "PACK/2:Locations/0:Location 1"),
+            (
+                "location_type_path",
+                "PACK/2:Locations/0:Location 1/payload/0:Type",
+            ),
+            ("target_path", "PACK/4:Target 1"),
+            ("eat_marker_path", "PACK/8:Eat Marker"),
+            (
+                "follow_radius_path",
+                "PACK/10:Follow - Start Location - Trigger Radius",
+            ),
+            ("patrol_flags_path", "PACK/11:Patrol Flags"),
+        ];
+        for (key, expected) in expected_paths {
+            let actual = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("legacy package migration requires {key}"),
+                })?;
+            if actual != expected {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "legacy package migration requires materialized {key} {expected}"
+                    ),
+                });
+            }
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy package migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(general) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"PKDT"))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(package_type) = general.data.get(4).copied() else {
+            return Ok(HandlerOutput::None);
+        };
+        let has_signature = |signature| {
+            record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == Signature(signature))
+        };
+        let schedule_index = record
+            .subrecords
+            .iter()
+            .position(|subrecord| subrecord.signature == Signature(*b"PSDT"));
+        let has_locations = has_signature(*b"PLDT")
+            || schedule_index.is_some_and(|schedule| {
+                record.subrecords[..schedule]
+                    .iter()
+                    .any(|subrecord| subrecord.signature == Signature(*b"PLD2"))
+            });
+        let mut mutations = Vec::new();
+        match package_type {
+            0 => push_package_insert(
+                &mut mutations,
+                record,
+                "PACK/4:Target 1",
+                *b"PTDT",
+                vec![0; 16],
+            ),
+            1 => push_package_insert(
+                &mut mutations,
+                record,
+                "PACK/10:Follow - Start Location - Trigger Radius",
+                *b"PKFD",
+                vec![0; 4],
+            ),
+            3 => {
+                push_package_insert(
+                    &mut mutations,
+                    record,
+                    "PACK/4:Target 1",
+                    *b"PTDT",
+                    vec![0; 16],
+                );
+                push_package_insert(
+                    &mut mutations,
+                    record,
+                    "PACK/8:Eat Marker",
+                    *b"PKED",
+                    Vec::new(),
+                );
+            }
+            4 if !has_locations => {
+                let mut data = vec![0; 12];
+                data[..4].copy_from_slice(&3_i32.to_le_bytes());
+                mutations.push(HandlerMutation::InsertPayload {
+                    path: "PACK/2:Locations/0:Location 1".to_owned(),
+                    data,
+                });
+            }
+            13 => {
+                if !has_locations {
+                    let mut data = vec![0; 12];
+                    data[..4].copy_from_slice(&6_i32.to_le_bytes());
+                    mutations.push(HandlerMutation::InsertPayload {
+                        path: "PACK/2:Locations/0:Location 1".to_owned(),
+                        data,
+                    });
+                }
+                push_package_insert(
+                    &mut mutations,
+                    record,
+                    "PACK/11:Patrol Flags",
+                    *b"PKPT",
+                    vec![0; 2],
+                );
+            }
+            _ => {}
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
+    }
+}
+
+fn push_package_insert(
+    mutations: &mut Vec<HandlerMutation>,
+    record: &WritableRecord,
+    path: &str,
+    signature: [u8; 4],
+    data: Vec<u8>,
+) {
+    if record
+        .subrecords
+        .iter()
+        .all(|subrecord| subrecord.signature != Signature(signature))
+    {
+        mutations.push(HandlerMutation::InsertPayload {
+            path: path.to_owned(),
+            data,
+        });
     }
 }
 
@@ -19220,6 +19411,155 @@ mod tests {
             )?,
             HandlerOutput::None
         ));
+        Ok(())
+    }
+
+    /// Adds the exact type-specific legacy PACK members created by xEdit.
+    #[test]
+    fn legacy_package_after_load_matches_xedit_type_defaults() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "PACK".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-legacy-package-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.legacy_package_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "general_path": "PACK/1:General",
+                        "type_path": "PACK/1:General/payload/1:Type",
+                        "locations_path": "PACK/2:Locations",
+                        "location_path": "PACK/2:Locations/0:Location 1",
+                        "location_type_path":
+                            "PACK/2:Locations/0:Location 1/payload/0:Type",
+                        "target_path": "PACK/4:Target 1",
+                        "eat_marker_path": "PACK/8:Eat Marker",
+                        "follow_radius_path":
+                            "PACK/10:Follow - Start Location - Trigger Radius",
+                        "patrol_flags_path": "PACK/11:Patrol Flags",
+                    }),
+                },
+            },
+        };
+        let subrecord = |signature, data| bethkit_core::WritableSubRecord {
+            signature: Signature(signature),
+            data,
+        };
+        let record = |package_type, before_schedule: Vec<_>, after_schedule: Vec<_>| {
+            let mut general = vec![0; 12];
+            general[4] = package_type;
+            let mut subrecords = vec![subrecord(*b"PKDT", general)];
+            subrecords.extend(before_schedule);
+            subrecords.push(subrecord(*b"PSDT", vec![0; 8]));
+            subrecords.extend(after_schedule);
+            WritableRecord {
+                signature: Signature(*b"PACK"),
+                flags: RecordFlags::empty(),
+                form_id: FormId(0x1111),
+                form_version: 0,
+                subrecords,
+            }
+        };
+        let registry = SemanticHandlerRegistry::builtin();
+        let invoke = |game, record: &WritableRecord| {
+            registry.invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(Signature(*b"PACK"), FormId(0x1111), 0, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+        let inserts = |output| -> Result<Vec<(String, Vec<u8>)>> {
+            let HandlerOutput::Mutations(mutations) = output else {
+                return Err(SemanticError::Handler {
+                    handler: "test".to_owned(),
+                    message: "legacy package migration did not return insertions".to_owned(),
+                });
+            };
+            mutations
+                .into_iter()
+                .map(|mutation| match mutation {
+                    HandlerMutation::InsertPayload { path, data } => Ok((path, data)),
+                    _ => Err(SemanticError::Handler {
+                        handler: "test".to_owned(),
+                        message: "legacy package migration returned a non-insertion".to_owned(),
+                    }),
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            inserts(invoke(
+                SchemaGame::Fallout3,
+                &record(0, Vec::new(), Vec::new())
+            )?)?,
+            vec![("PACK/4:Target 1".to_owned(), vec![0; 16])]
+        );
+        assert_eq!(
+            inserts(invoke(
+                SchemaGame::FalloutNv,
+                &record(1, Vec::new(), Vec::new())
+            )?)?,
+            vec![(
+                "PACK/10:Follow - Start Location - Trigger Radius".to_owned(),
+                vec![0; 4],
+            )]
+        );
+        assert_eq!(
+            inserts(invoke(
+                SchemaGame::Fallout3,
+                &record(3, Vec::new(), Vec::new())
+            )?)?,
+            vec![
+                ("PACK/4:Target 1".to_owned(), vec![0; 16]),
+                ("PACK/8:Eat Marker".to_owned(), Vec::new()),
+            ]
+        );
+        let sleep = inserts(invoke(
+            SchemaGame::FalloutNv,
+            &record(4, Vec::new(), Vec::new()),
+        )?)?;
+        assert_eq!(sleep.len(), 1);
+        assert_eq!(sleep[0].0, "PACK/2:Locations/0:Location 1");
+        assert_eq!(&sleep[0].1[..4], &3_i32.to_le_bytes());
+        assert_eq!(&sleep[0].1[4..], &[0; 8]);
+
+        let patrol = inserts(invoke(
+            SchemaGame::Fallout3,
+            &record(13, Vec::new(), Vec::new()),
+        )?)?;
+        assert_eq!(patrol.len(), 2);
+        assert_eq!(patrol[0].0, "PACK/2:Locations/0:Location 1");
+        assert_eq!(&patrol[0].1[..4], &6_i32.to_le_bytes());
+        assert_eq!(&patrol[0].1[4..], &[0; 8]);
+        assert_eq!(patrol[1], ("PACK/11:Patrol Flags".to_owned(), vec![0; 2]));
+
+        assert!(matches!(
+            invoke(SchemaGame::Fallout3, &record(12, Vec::new(), Vec::new()),)?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::Fallout3,
+                &record(0, vec![subrecord(*b"PTDT", vec![0xaa; 16])], Vec::new(),),
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::FalloutNv,
+                &record(4, vec![subrecord(*b"PLD2", vec![0xaa; 12])], Vec::new(),),
+            )?,
+            HandlerOutput::None
+        ));
+        let late_location = inserts(invoke(
+            SchemaGame::FalloutNv,
+            &record(4, Vec::new(), vec![subrecord(*b"PLD2", vec![0xaa; 12])]),
+        )?)?;
+        assert_eq!(late_location[0].0, "PACK/2:Locations/0:Location 1");
         Ok(())
     }
 
