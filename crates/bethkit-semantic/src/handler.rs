@@ -1276,6 +1276,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(MagicEffectSecondAvWeightAfterSet));
         registry.register(Arc::new(MagicEffectArchetypeAfterSet));
         registry.register(Arc::new(ResetSiblingDefault));
+        registry.register(Arc::new(MapSiblingIntegerAfterSet));
+        registry.register(Arc::new(SelectOptionalSiblingDefaultAfterSet));
         registry.register(Arc::new(RefreshSiblingUnions));
         registry.register(Arc::new(InvalidateConflicts));
         registry.register(Arc::new(CtdaTypeFormatter));
@@ -2238,6 +2240,41 @@ fn configured_u8_matrix(
                         })
                 })
                 .collect()
+        })
+        .collect()
+}
+
+fn configured_u64_pairs(
+    handler: &str,
+    configuration: &serde_json::Value,
+    key: &str,
+) -> Result<Vec<[u64; 2]>> {
+    let rows = configuration
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("callback configuration `{key}` must be an array"),
+        })?;
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let values = row
+                .as_array()
+                .filter(|values| values.len() == 2)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: handler.to_owned(),
+                    message: format!("callback configuration `{key}[{index}]` must be a pair"),
+                })?;
+            let source = values[0].as_u64().ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!("callback configuration `{key}[{index}][0]` must be unsigned"),
+            })?;
+            let target = values[1].as_u64().ok_or_else(|| SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: format!("callback configuration `{key}[{index}][1]` must be unsigned"),
+            })?;
+            Ok([source, target])
         })
         .collect()
 }
@@ -13244,6 +13281,130 @@ impl SemanticHandler for ResetSiblingDefault {
                 occurrence: 0,
             },
         ]))
+    }
+}
+
+struct MapSiblingIntegerAfterSet;
+
+impl SemanticHandler for MapSiblingIntegerAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.map_sibling_integer"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let source = invocation
+            .value
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "mapped sibling edit requires a new integer value".to_owned(),
+            })
+            .and_then(|value| {
+                u64::try_from(callback_integer(value, self.id())?).map_err(|_| {
+                    SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: "mapped sibling source must be unsigned".to_owned(),
+                    }
+                })
+            })?;
+        let mappings =
+            configured_u64_pairs(self.id(), invocation.context.configuration, "mappings")?;
+        let target = mappings
+            .iter()
+            .find_map(|mapping| (mapping[0] == source).then_some(mapping[1]))
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("mapped sibling source {source} has no target"),
+            })?;
+        let path = configured_text(self.id(), invocation.context.configuration, "target_path")?;
+        Ok(HandlerOutput::Mutations(vec![HandlerMutation::Set {
+            path: path.to_owned(),
+            occurrence: 0,
+            value: OwnedFieldValue::UInt(target),
+        }]))
+    }
+}
+
+struct SelectOptionalSiblingDefaultAfterSet;
+
+impl SemanticHandler for SelectOptionalSiblingDefaultAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.select_optional_sibling_default"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation
+            .value
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "optional sibling edit requires a new integer value".to_owned(),
+            })
+            .and_then(|value| {
+                u64::try_from(callback_integer(value, self.id())?).map_err(|_| {
+                    SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: "optional sibling selector must be unsigned".to_owned(),
+                    }
+                })
+            })?;
+        let path =
+            configured_text(self.id(), invocation.context.configuration, "target_path")?.to_owned();
+        let defaults = invocation
+            .context
+            .configuration
+            .get("defaults")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "callback configuration `defaults` must be an array".to_owned(),
+            })?;
+        let mut default_path = None;
+        for (index, default) in defaults.iter().enumerate() {
+            let selector = default
+                .get("selector")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "callback configuration `defaults[{index}].selector` must be unsigned"
+                    ),
+                })?;
+            let candidate = default
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "callback configuration `defaults[{index}].path` must be text"
+                    ),
+                })?;
+            if selector == value && default_path.replace(candidate).is_some() {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("optional sibling selector {value} is duplicated"),
+                });
+            }
+        }
+        let mut mutations = vec![HandlerMutation::RemoveContainer { path }];
+        if let Some(default_path) = default_path {
+            mutations.push(HandlerMutation::InsertDefault {
+                path: default_path.to_owned(),
+            });
+        }
+        Ok(HandlerOutput::Mutations(mutations))
     }
 }
 
@@ -25185,6 +25346,117 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Text(text) if text == "GetIsID:65535"
+        ));
+        Ok(())
+    }
+
+    /// Maps one materialized integer domain into a sibling field.
+    #[test]
+    fn mapped_sibling_integer_uses_materialized_values() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/1:Source".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-map-sibling".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.map_sibling_integer".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "target_path": "TEST/0:Target",
+                        "mappings": [[7, 42]]
+                    }),
+                },
+            },
+        };
+        let context =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Morrowind);
+
+        let output = SemanticHandlerRegistry::builtin().invoke(
+            &binding,
+            context,
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::UInt(7)),
+            None,
+        )?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::Set {
+                    path: "TEST/0:Target".to_owned(),
+                    occurrence: 0,
+                    value: OwnedFieldValue::UInt(42),
+                }]
+        ));
+        assert!(SemanticHandlerRegistry::builtin()
+            .invoke(
+                &binding,
+                context,
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::UInt(8)),
+                None,
+            )
+            .is_err());
+        Ok(())
+    }
+
+    /// Rebuilds or removes a sibling from materialized selector values.
+    #[test]
+    fn optional_sibling_default_uses_materialized_presence() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/1:Source".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-optional-sibling".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.select_optional_sibling_default".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "target_path": "TEST/0:Target",
+                        "defaults": [
+                            {"selector": 0, "path": "TEST/0:Text"},
+                            {"selector": 1, "path": "TEST/0:Submenu"}
+                        ]
+                    }),
+                },
+            },
+        };
+        let context =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Morrowind);
+        let handlers = SemanticHandlerRegistry::builtin();
+
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::UInt(1)),
+                None,
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::RemoveContainer {
+                        path: "TEST/0:Target".to_owned(),
+                    },
+                    HandlerMutation::InsertDefault {
+                        path: "TEST/0:Submenu".to_owned(),
+                    },
+                ]
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::UInt(4)),
+                None,
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::RemoveContainer {
+                    path: "TEST/0:Target".to_owned(),
+                }]
         ));
         Ok(())
     }

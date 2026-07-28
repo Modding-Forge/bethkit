@@ -4565,6 +4565,314 @@ mod tests {
         Ok(())
     }
 
+    /// Maps a changed subrecord enumeration into a field of a sibling subrecord.
+    #[test]
+    fn mapped_sibling_integer_updates_record_bytes_transactionally(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let data_path = "DIAL/0:Data";
+        let subtype_path = "DIAL/0:Data/payload/1:Subtype";
+        let name_path = "DIAL/1:Subtype Name";
+        let integer = |width| IntegerType {
+            width,
+            signed: false,
+            byte_order: ByteOrder::LittleEndian,
+        };
+        let primitive = |id, path: &str, name: &str, width| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::Integer {
+                    integer: integer(width),
+                },
+            },
+        };
+        let subrecord = |id, path: &str, name: &str, signature, payload| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(payload),
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "edit.map_sibling_integer".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"DIAL"),
+                name: "Dialog Topic".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "DIAL".to_owned(),
+                    name: "Dialog Topic".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(
+                                1,
+                                data_path,
+                                "Data",
+                                *b"DATA",
+                                SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: format!("{data_path}/payload"),
+                                    name: "Data".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Struct {
+                                        fields: vec![
+                                            primitive(
+                                                3,
+                                                &format!("{data_path}/payload/0:Category"),
+                                                "Category",
+                                                1,
+                                            ),
+                                            primitive(4, subtype_path, "Subtype", 2),
+                                        ],
+                                    },
+                                },
+                            ),
+                            subrecord(
+                                5,
+                                name_path,
+                                "Subtype Name",
+                                *b"SNAM",
+                                primitive(6, &format!("{name_path}/payload"), "Subtype Name", 4),
+                            ),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: name_path.to_owned(),
+                callback_id: "def.after_set".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "42".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "edit.map_sibling_integer".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "target_path": subtype_path,
+                            "mappings": [[0x5453_5543_u64, 0], [0x5546_4552_u64, 17]]
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let source_data = vec![7, 0, 0];
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"DIAL"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId::NULL,
+            form_version: 44,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"DATA"),
+                    data: source_data.clone(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"SNAM"),
+                    data: 0x5453_5543_u32.to_le_bytes().to_vec(),
+                },
+            ],
+        });
+        let mut editor = context.edit(&source, false)?;
+
+        // when
+        editor.set(name_path, 0, &OwnedFieldValue::UInt(0x5546_4552))?;
+
+        // then
+        assert_eq!(editor.record.subrecords[0].data, vec![7, 17, 0]);
+        assert_eq!(
+            editor.record.subrecords[1].data,
+            0x5546_4552_u32.to_le_bytes()
+        );
+        assert_eq!(source.subrecords()?[0].as_bytes(), source_data);
+        Ok(())
+    }
+
+    /// Replaces a repeat-local optional choice with its selected default subrecord.
+    #[test]
+    fn optional_sibling_default_rebuilds_repeat_local_choice(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let items_path = "TMLM/0:Items";
+        let item_path = "TMLM/0:Items/repeat/0:Item";
+        let type_path = "TMLM/0:Items/repeat/0:Item/0:Type";
+        let choice_path = "TMLM/0:Items/repeat/0:Item/1:Text/Submenu";
+        let text_path = format!("{choice_path}/0:Display Text");
+        let submenu_path = format!("{choice_path}/1:Submenu - Terminal");
+        let integer = |width| PrimitiveType::Integer {
+            integer: IntegerType {
+                width,
+                signed: false,
+                byte_order: ByteOrder::LittleEndian,
+            },
+        };
+        let subrecord = |id, path: &str, name: &str, signature, primitive| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 10),
+                    path: format!("{path}/payload"),
+                    name: name.to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive { primitive },
+                }),
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "edit.select_optional_sibling_default".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TMLM"),
+                name: "Terminal Menu".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "TMLM".to_owned(),
+                    name: "Terminal Menu".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: items_path.to_owned(),
+                            name: "Items".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Repeat {
+                                minimum: 0,
+                                maximum: None,
+                                child: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: item_path.to_owned(),
+                                    name: "Item".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Sequence {
+                                        children: vec![
+                                            subrecord(3, type_path, "Type", *b"ISET", integer(2)),
+                                            SchemaNode {
+                                                id: SchemaNodeId(4),
+                                                path: choice_path.to_owned(),
+                                                name: "Text/Submenu".to_owned(),
+                                                required: false,
+                                                conflict_priority: ConflictPriority::Normal,
+                                                condition: None,
+                                                kind: SchemaNodeKind::Choice {
+                                                    alternatives: vec![
+                                                        subrecord(
+                                                            5,
+                                                            &text_path,
+                                                            "Display Text",
+                                                            *b"UNAM",
+                                                            integer(4),
+                                                        ),
+                                                        subrecord(
+                                                            6,
+                                                            &submenu_path,
+                                                            "Submenu - Terminal",
+                                                            *b"TNAM",
+                                                            integer(4),
+                                                        ),
+                                                    ],
+                                                },
+                                            },
+                                        ],
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: type_path.to_owned(),
+                callback_id: "def.after_set".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "43".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "edit.select_optional_sibling_default".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "target_path": choice_path,
+                            "defaults": [
+                                {"selector": 0, "path": text_path},
+                                {"selector": 1, "path": submenu_path}
+                            ]
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"TMLM"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId::NULL,
+            form_version: 44,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"ISET"),
+                    data: 0_u16.to_le_bytes().to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"UNAM"),
+                    data: 99_u32.to_le_bytes().to_vec(),
+                },
+            ],
+        });
+        let mut editor = context.edit(&source, false)?;
+
+        // when
+        editor.set(type_path, 0, &OwnedFieldValue::UInt(1))?;
+
+        // then
+        assert_eq!(editor.record.subrecords.len(), 2);
+        assert_eq!(editor.record.subrecords[0].data, 1_u16.to_le_bytes());
+        assert_eq!(editor.record.subrecords[1].signature, Signature(*b"TNAM"));
+        assert_eq!(editor.record.subrecords[1].data, 0_u32.to_le_bytes());
+        assert_eq!(source.subrecords()?[1].as_bytes(), 99_u32.to_le_bytes());
+        Ok(())
+    }
+
     /// Writes a separator after an xEdit array count prefix.
     #[test]
     fn array_count_encoding_appends_prefix_terminator() -> Result<()> {
