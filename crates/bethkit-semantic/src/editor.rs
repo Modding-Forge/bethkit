@@ -384,6 +384,17 @@ impl RecordEditor {
                     message: "after-load callback is not executable".to_owned(),
                 });
             }
+            let anchor_path = match &binding.implementation {
+                CallbackImplementation::BuiltIn { operation } => operation
+                    .configuration
+                    .get("anchor_path_suffix")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(
+                        || binding.path.clone(),
+                        |suffix| format!("{}{suffix}", binding.path),
+                    ),
+                _ => binding.path.clone(),
+            };
             let indices = {
                 let grammar = self.grammar_for(&self.record)?;
                 grammar
@@ -392,7 +403,7 @@ impl RecordEditor {
                     .enumerate()
                     .filter_map(|(index, assignment)| {
                         assignment
-                            .is_some_and(|node| node.path == binding.path)
+                            .is_some_and(|node| node.path == anchor_path)
                             .then_some(index)
                     })
                     .collect::<Vec<_>>()
@@ -4748,6 +4759,110 @@ mod tests {
         let writable = editor.into_writable_record();
         assert_eq!(&writable.subrecords[1].data[..16], &efit[..16]);
         assert_eq!(&writable.subrecords[1].data[16..20], &48_i32.to_le_bytes());
+        Ok(())
+    }
+
+    /// Dispatches a container-level load callback through its explicit SCHR anchor.
+    #[test]
+    fn editor_applies_embedded_script_after_load_migration() -> Result<()> {
+        let script_path = "TEST/0:Embedded Script";
+        let header_path = "TEST/0:Embedded Script/0:Basic Script Data";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout3;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.embedded_script_type".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "TEST".to_owned(),
+                    name: "Test".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: script_path.to_owned(),
+                            name: "Embedded Script".to_owned(),
+                            required: true,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Sequence {
+                                children: vec![SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: header_path.to_owned(),
+                                    name: "Basic Script Data".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Subrecord {
+                                        signature: SchemaSignature(*b"SCHR"),
+                                        payload: Box::new(SchemaNode {
+                                            id: SchemaNodeId(3),
+                                            path: format!("{header_path}/payload"),
+                                            name: "Basic Script Data".to_owned(),
+                                            required: true,
+                                            conflict_priority: ConflictPriority::Normal,
+                                            condition: None,
+                                            kind: SchemaNodeKind::Primitive {
+                                                primitive: PrimitiveType::Bytes {
+                                                    length: Some(20),
+                                                },
+                                            },
+                                        }),
+                                    },
+                                }],
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: script_path.to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "77".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.embedded_script_type".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "anchor_path_suffix": "/0:Basic Script Data",
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut script_header = (0_u8..20).collect::<Vec<_>>();
+        script_header[16..18].copy_from_slice(&1_u16.to_le_bytes());
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"TEST"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId::NULL,
+            form_version: 0,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"SCHR"),
+                data: script_header.clone(),
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(source.subrecords()?[0].as_bytes(), script_header);
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(&writable.subrecords[0].data[..16], &script_header[..16]);
+        assert_eq!(&writable.subrecords[0].data[16..18], &0_u16.to_le_bytes());
+        assert_eq!(&writable.subrecords[0].data[18..], &script_header[18..]);
         Ok(())
     }
 

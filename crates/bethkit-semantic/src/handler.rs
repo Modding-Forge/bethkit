@@ -1110,6 +1110,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacyCtdaAfterLoad));
         registry.register(Arc::new(LegacyEfitAfterLoad { resolver: None }));
         registry.register(Arc::new(VerifyModernEfitAfterLoad));
+        registry.register(Arc::new(EmbeddedScriptAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
@@ -7563,6 +7564,71 @@ impl SemanticHandler for VerifyModernEfitAfterLoad {
             }
         }
         Ok(HandlerOutput::None)
+    }
+}
+
+struct EmbeddedScriptAfterLoad;
+
+impl SemanticHandler for EmbeddedScriptAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.embedded_script_type"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if !matches!(
+            invocation.context.game,
+            SchemaGame::Fallout3 | SchemaGame::FalloutNv
+        ) {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message:
+                    "embedded-script load migration is only valid for Fallout 3 and Fallout NV"
+                        .to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "embedded-script load migration requires a writable record".to_owned(),
+            })?;
+        let index = invocation
+            .source_subrecord_index
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "embedded-script load migration requires a source subrecord".to_owned(),
+            })?;
+        let schr = record
+            .subrecords
+            .get(index)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("source subrecord index {index} is out of bounds"),
+            })?;
+        if schr.signature != Signature(*b"SCHR") || schr.data.len() != 20 {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "embedded-script load migration requires a 20-byte SCHR payload, got {} \
+                     bytes of {}",
+                    schr.data.len(),
+                    schr.signature
+                ),
+            });
+        }
+        if u16::from_le_bytes([schr.data[16], schr.data[17]]) != 1 {
+            return Ok(HandlerOutput::None);
+        }
+        let mut data = schr.data.clone();
+        data[16..18].copy_from_slice(&0_u16.to_le_bytes());
+        Ok(HandlerOutput::SubrecordPayload(data))
     }
 }
 
@@ -14777,6 +14843,69 @@ mod tests {
             None,
         )?;
         assert!(matches!(output, HandlerOutput::None));
+        Ok(())
+    }
+
+    /// Converts embedded Quest scripts to Object scripts without touching other SCHR bytes.
+    #[test]
+    fn embedded_script_after_load_migrates_only_type() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/0:Embedded Script".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-embedded-script-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.embedded_script_type".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "anchor_path_suffix": "/0:Basic Script Data",
+                    }),
+                },
+            },
+        };
+        let mut data = (0_u8..20).collect::<Vec<_>>();
+        data[16..18].copy_from_slice(&1_u16.to_le_bytes());
+        let record = WritableRecord {
+            signature: Signature(*b"TEST"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"SCHR"),
+                data: data.clone(),
+            }],
+        };
+        let output = SemanticHandlerRegistry::builtin().invoke_with_records(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Fallout3),
+            HandlerInvocationAccess::writable_subrecord_with_scope(&record, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+
+        let HandlerOutput::SubrecordPayload(migrated) = output else {
+            return Err(SemanticError::Handler {
+                handler: "migrate.embedded_script_type".to_owned(),
+                message: "embedded-script migration did not return a payload".to_owned(),
+            });
+        };
+        assert_eq!(&migrated[..16], &data[..16]);
+        assert_eq!(&migrated[16..18], &0_u16.to_le_bytes());
+        assert_eq!(&migrated[18..], &data[18..]);
+
+        let mut object_record = record;
+        object_record.subrecords[0].data[16..18].copy_from_slice(&0_u16.to_le_bytes());
+        let unchanged = SemanticHandlerRegistry::builtin().invoke_with_records(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Fallout3),
+            HandlerInvocationAccess::writable_subrecord_with_scope(&object_record, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        assert!(matches!(unchanged, HandlerOutput::None));
         Ok(())
     }
 
