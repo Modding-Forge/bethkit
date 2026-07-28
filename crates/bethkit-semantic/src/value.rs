@@ -61,6 +61,8 @@ pub struct NamedValue<'a> {
     pub node_id: SchemaNodeId,
     /// Stable schema path.
     pub path: String,
+    /// Effective selected-node path when `path` is a dynamic union.
+    pub effective_path: Option<String>,
     /// Human-readable name.
     pub name: String,
     /// Byte span inside the containing payload.
@@ -137,6 +139,7 @@ impl FieldValue<'_> {
                     .map(|value| NamedValue {
                         node_id: value.node_id,
                         path: value.path.clone(),
+                        effective_path: value.effective_path.clone(),
                         name: value.name.clone(),
                         span: value.span,
                         value: value.value.to_handler_value(),
@@ -168,6 +171,7 @@ impl FieldValue<'static> {
                     .map(|value| NamedValue {
                         node_id: value.node_id,
                         path: value.path,
+                        effective_path: value.effective_path,
                         name: value.name,
                         span: value.span,
                         value: value.value.into_record_value(),

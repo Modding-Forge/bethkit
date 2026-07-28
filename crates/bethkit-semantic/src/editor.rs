@@ -509,6 +509,7 @@ impl RecordEditor {
                     scope_values.push(crate::NamedValue {
                         node_id: field.id,
                         path: field.path.clone(),
+                        effective_path: None,
                         name: field.name.clone(),
                         span: crate::ByteSpan {
                             start: output.len(),
@@ -1580,6 +1581,7 @@ impl RecordEditor {
                         Ok(crate::NamedValue {
                             node_id: field.id,
                             path: field.path.clone(),
+                            effective_path: None,
                             name: field.name.clone(),
                             span: crate::ByteSpan { start: 0, end: 0 },
                             value: self.owned_to_handler_value_with_fields(
@@ -5246,6 +5248,7 @@ mod tests {
         let owned_shape = FieldValue::Struct(vec![crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: "TEST/0:Mode".to_owned(),
+            effective_path: None,
             name: "Mode".to_owned(),
             span: crate::ByteSpan { start: 0, end: 4 },
             value: FieldValue::Int(2),
@@ -5253,6 +5256,7 @@ mod tests {
         let decoded_shape = FieldValue::Struct(vec![crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: "TEST/0:Mode".to_owned(),
+            effective_path: None,
             name: "Mode".to_owned(),
             span: crate::ByteSpan { start: 0, end: 4 },
             value: FieldValue::Enumeration {

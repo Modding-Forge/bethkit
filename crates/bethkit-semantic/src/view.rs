@@ -250,7 +250,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         sibling_values: &[],
                         array_indices: &[],
                     };
-                    let (value, consumed): (FieldValue<'record>, usize) =
+                    let (value, consumed, _): (FieldValue<'record>, usize, Option<String>) =
                         self.decode_node(payload, data, data, frame, &mut field_values)?;
                     if consumed != data.len() {
                         return Err(SemanticError::Decode {
@@ -347,6 +347,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 .push(NamedValue {
                     node_id: field.node_id,
                     path: field.path,
+                    effective_path: None,
                     name: field.name,
                     span: field.span,
                     value: field.value,
@@ -612,12 +613,12 @@ impl<'context, 'record> RecordView<'context, 'record> {
         current: &'a [u8],
         frame: DecodeFrame<'_, 'a>,
         field_values: &mut BTreeMap<String, i64>,
-    ) -> Result<(FieldValue<'a>, usize)> {
+    ) -> Result<(FieldValue<'a>, usize, Option<String>)> {
         if !self.node_applies(node, payload, field_values)? {
-            return Ok((FieldValue::Absent, 0));
+            return Ok((FieldValue::Absent, 0, None));
         }
 
-        let (decoded, consumed) = match &node.kind {
+        let (decoded, consumed, effective_path) = match &node.kind {
             SchemaNodeKind::Primitive { primitive } => {
                 let consumed = node_data_size(node, current, self.localized)?;
                 let data = current
@@ -630,7 +631,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         ),
                     })?;
                 decode_primitive(primitive, data, self.localized, &node.path)
-                    .map(|value| (value, consumed))
+                    .map(|value| (value, consumed, None))
             }
             SchemaNodeKind::Struct { fields } => {
                 let mut values: Vec<NamedValue<'a>> = Vec::with_capacity(fields.len());
@@ -640,6 +641,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         values.push(NamedValue {
                             node_id: field.id,
                             path: field.path.clone(),
+                            effective_path: None,
                             name: field.name.clone(),
                             span: ByteSpan {
                                 start: frame.offset + cursor,
@@ -660,11 +662,12 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         sibling_values: &values,
                         array_indices: frame.array_indices,
                     };
-                    let (value, consumed): (FieldValue<'a>, usize) =
+                    let (value, consumed, effective_path): (FieldValue<'a>, usize, Option<String>) =
                         self.decode_node(field, payload, remaining, child_frame, field_values)?;
                     values.push(NamedValue {
                         node_id: field.id,
                         path: field.path.clone(),
+                        effective_path,
                         name: field.name.clone(),
                         span: ByteSpan {
                             start: frame.offset + cursor,
@@ -679,7 +682,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             message: "struct cursor overflowed".to_owned(),
                         })?;
                 }
-                Ok((FieldValue::Struct(values), cursor))
+                Ok((FieldValue::Struct(values), cursor, None))
             }
             SchemaNodeKind::Array { element, count } => {
                 let (prefix_size, element_count): (usize, Option<usize>) = match count {
@@ -771,7 +774,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         sibling_values: frame.sibling_values,
                         array_indices: &child_array_indices,
                     };
-                    let (value, consumed) =
+                    let (value, consumed, _) =
                         self.decode_node(element, payload, remaining, child_frame, field_values)?;
                     if consumed == 0 && element_count.is_none() {
                         return Err(SemanticError::Decode {
@@ -798,7 +801,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     values.push(value);
                     cursor = end;
                 }
-                Ok((FieldValue::Array(values), cursor))
+                Ok((FieldValue::Array(values), cursor, None))
             }
             SchemaNodeKind::Union { selector, variants } => {
                 let index =
@@ -808,7 +811,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         path: node.path.clone(),
                         message: format!("union variant {index} does not exist"),
                     })?;
-                self.decode_node(variant, payload, current, frame, field_values)
+                let (value, consumed, selected) =
+                    self.decode_node(variant, payload, current, frame, field_values)?;
+                Ok((
+                    value,
+                    consumed,
+                    Some(selected.unwrap_or_else(|| variant.path.clone())),
+                ))
             }
             SchemaNodeKind::Custom { decoder, .. } => {
                 let decoded = self
@@ -827,10 +836,10 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         ),
                     });
                 }
-                Ok((decoded.value, decoded.consumed))
+                Ok((decoded.value, decoded.consumed, None))
             }
             SchemaNodeKind::Terminated { terminator, child } => {
-                let (value, body_size) =
+                let (value, body_size, effective_path) =
                     self.decode_node(child, payload, current, frame, field_values)?;
                 let actual = current
                     .get(body_size)
@@ -852,7 +861,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         path: node.path.clone(),
                         message: "terminated value size overflowed".to_owned(),
                     })?;
-                Ok((value, consumed))
+                Ok((value, consumed, effective_path))
             }
             SchemaNodeKind::Compressed { .. } => Err(SemanticError::Decode {
                 path: node.path.clone(),
@@ -889,7 +898,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
             }
             _ => {}
         }
-        Ok((value, consumed))
+        Ok((value, consumed, effective_path))
     }
 
     fn select_union_index(
@@ -2588,9 +2597,9 @@ mod tests {
         )?;
         let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
 
-        for (payload, expected_name, expected_bytes) in [
-            (&[0_u8][..], "", &[][..]),
-            (&[1_u8, b'Q', 7][..], "Q", &[7_u8][..]),
+        for (payload, expected_name, expected_bytes, expected_variant) in [
+            (&[0_u8][..], "", &[][..], "variants/1:Empty"),
+            (&[1_u8, b'Q', 7][..], "Q", &[7_u8][..], "variants/0:Data"),
         ] {
             let record_bytes = test_record_bytes(b"TEST", b"DATA", payload);
             let mut cursor = SliceCursor::new(&record_bytes);
@@ -2607,6 +2616,10 @@ mod tests {
                 &values[1].value,
                 FieldValue::Bytes(value) if value.as_ref() == expected_bytes
             ));
+            assert_eq!(
+                values[1].effective_path.as_deref(),
+                Some(format!("{union_path}/{expected_variant}").as_str())
+            );
         }
         Ok(())
     }

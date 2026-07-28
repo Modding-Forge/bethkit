@@ -8369,6 +8369,7 @@ mod tests {
         let component = |name: &str, value: FieldValue<'static>| crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: format!("TEST/{name}"),
+            effective_path: None,
             name: name.to_owned(),
             span: crate::ByteSpan { start: 0, end: 1 },
             value,
@@ -8434,6 +8435,7 @@ mod tests {
         let component = |name: &str, value: FieldValue<'static>| crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: format!("TEST/{name}"),
+            effective_path: None,
             name: name.to_owned(),
             span: crate::ByteSpan { start: 0, end: 4 },
             value,
@@ -8518,6 +8520,7 @@ mod tests {
         let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: format!("TEST/{name}"),
+            effective_path: None,
             name: name.to_owned(),
             span: crate::ByteSpan { start: 0, end: 0 },
             value,
@@ -8562,6 +8565,7 @@ mod tests {
         let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: format!("TEST/{name}"),
+            effective_path: None,
             name: name.to_owned(),
             span: crate::ByteSpan { start: 0, end: 0 },
             value,
@@ -8603,6 +8607,7 @@ mod tests {
         let scope = FieldValue::Struct(vec![crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: form_id_path.to_owned(),
+            effective_path: None,
             name: "FormID".to_owned(),
             span: crate::ByteSpan { start: 0, end: 4 },
             value: FieldValue::FormId {
@@ -8790,6 +8795,7 @@ mod tests {
         let scope = FieldValue::Struct(vec![crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: quest_path.to_owned(),
+            effective_path: None,
             name: "Parameter #1".to_owned(),
             span: crate::ByteSpan { start: 0, end: 4 },
             value: FieldValue::FormId {
@@ -8880,6 +8886,7 @@ mod tests {
         let scope = FieldValue::Struct(vec![crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: parameter_path.to_owned(),
+            effective_path: None,
             name: "Parameter #1".to_owned(),
             span: crate::ByteSpan { start: 0, end: 4 },
             value: FieldValue::FormId {
@@ -8956,6 +8963,7 @@ mod tests {
         let scope = FieldValue::Struct(vec![crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: parameter_path.to_owned(),
+            effective_path: None,
             name: "Parameter #1".to_owned(),
             span: crate::ByteSpan { start: 0, end: 4 },
             value: FieldValue::FormId {
@@ -9161,6 +9169,7 @@ mod tests {
         let scope = FieldValue::Struct(vec![crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: string_path.to_owned(),
+            effective_path: None,
             name: "Parameter #1".to_owned(),
             span: crate::ByteSpan { start: 0, end: 5 },
             value: FieldValue::String(Cow::Borrowed("Hello")),
@@ -9212,6 +9221,7 @@ mod tests {
         let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: format!("TEST/{name}"),
+            effective_path: None,
             name: name.to_owned(),
             span: crate::ByteSpan { start: 0, end: 0 },
             value,
@@ -9262,6 +9272,7 @@ mod tests {
         let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: format!("TEST/{name}"),
+            effective_path: None,
             name: name.to_owned(),
             span: crate::ByteSpan { start: 0, end: 0 },
             value,
@@ -9293,6 +9304,7 @@ mod tests {
         let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: format!("TEST/{name}"),
+            effective_path: None,
             name: name.to_owned(),
             span: crate::ByteSpan { start: 0, end: 0 },
             value,
@@ -10123,6 +10135,7 @@ mod tests {
         let field = |name: &str, value: FieldValue<'static>| crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: format!("TEST/{name}"),
+            effective_path: None,
             name: name.to_owned(),
             span: crate::ByteSpan { start: 0, end: 0 },
             value,
@@ -10170,6 +10183,7 @@ mod tests {
         let field = |name: &str| crate::NamedValue {
             node_id: bethkit_schema::SchemaNodeId(1),
             path: format!("TEST/{name}"),
+            effective_path: None,
             name: name.to_owned(),
             span: crate::ByteSpan { start: 0, end: 0 },
             value: FieldValue::Array(Vec::new()),
@@ -10908,6 +10922,7 @@ mod tests {
             let scope = FieldValue::Struct(vec![crate::NamedValue {
                 node_id: bethkit_schema::SchemaNodeId(1),
                 path: path.to_owned(),
+                effective_path: None,
                 name: "Type".to_owned(),
                 span: crate::ByteSpan { start: 0, end: 0 },
                 value: FieldValue::String(Cow::Borrowed(type_name)),
@@ -10947,6 +10962,7 @@ mod tests {
             FieldValue::Struct(vec![crate::NamedValue {
                 node_id: bethkit_schema::SchemaNodeId(1),
                 path: path.to_owned(),
+                effective_path: None,
                 name: "ScriptName".to_owned(),
                 span: crate::ByteSpan { start: 0, end: 0 },
                 value: FieldValue::String(Cow::Borrowed(value)),
