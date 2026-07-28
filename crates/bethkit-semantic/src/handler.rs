@@ -187,6 +187,15 @@ pub enum HandlerMutation {
         /// Replacement value.
         value: OwnedFieldValue,
     },
+    /// Replace one existing subrecord payload with handler-produced bytes.
+    ReplacePayload {
+        /// Stable subrecord schema path.
+        path: String,
+        /// Zero-based occurrence.
+        occurrence: usize,
+        /// Complete replacement payload.
+        data: Vec<u8>,
+    },
     /// Reset a field occurrence to the schema-native default selected in the current edit context.
     ResetToDefault {
         /// Stable schema path.
@@ -1150,6 +1159,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(MessageAfterLoad));
         registry.register(Arc::new(DefaultObjectArrayAfterLoad));
         registry.register(Arc::new(SkyrimWeaponAfterLoad));
+        registry.register(Arc::new(LightAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
@@ -8222,6 +8232,147 @@ impl SemanticHandler for SkyrimWeaponAfterLoad {
     }
 }
 
+struct LightAfterLoad;
+
+impl SemanticHandler for LightAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.light_defaults"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        let game = invocation.context.game;
+        if invocation.context.record_signature != Signature(*b"LIGH")
+            || !matches!(
+                game,
+                SchemaGame::Oblivion
+                    | SchemaGame::Fallout3
+                    | SchemaGame::FalloutNv
+                    | SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "light default migration is not valid for this record and game".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "light default migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "light default migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) {
+            return Ok(HandlerOutput::None);
+        }
+        let data_path = configured_text(self.id(), invocation.context.configuration, "data_path")?;
+        if !data_path.starts_with("LIGH/") {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "light DATA path must be inside LIGH".to_owned(),
+            });
+        }
+        let mut mutations = Vec::with_capacity(2);
+        if let Some(data) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"DATA"))
+        {
+            let valid_length = match game {
+                SchemaGame::Oblivion | SchemaGame::Fallout3 | SchemaGame::FalloutNv => {
+                    data.data.len() == 32
+                }
+                SchemaGame::SkyrimLe | SchemaGame::SkyrimSe | SchemaGame::SkyrimVr => {
+                    data.data.len() == 48
+                }
+                SchemaGame::Fallout4 | SchemaGame::Fallout4Vr => data.data.len() == 64,
+                SchemaGame::Fallout76 => data.data.len() >= 64,
+                _ => false,
+            };
+            if !valid_length {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "light DATA has invalid length {} for {game:?}",
+                        data.data.len()
+                    ),
+                });
+            }
+            let falloff = f32::from_le_bytes(
+                data.data[16..20]
+                    .try_into()
+                    .expect("four-byte light falloff must convert"),
+            );
+            let fov = f32::from_le_bytes(
+                data.data[20..24]
+                    .try_into()
+                    .expect("four-byte light FOV must convert"),
+            );
+            let normalize_falloff = extended_same_value_zero(falloff);
+            let normalize_fov = extended_same_value_zero(fov);
+            if normalize_falloff || normalize_fov {
+                let mut normalized = data.data.clone();
+                if normalize_falloff {
+                    normalized[16..20].copy_from_slice(&1.0_f32.to_le_bytes());
+                }
+                if normalize_fov {
+                    normalized[20..24].copy_from_slice(&90.0_f32.to_le_bytes());
+                }
+                mutations.push(HandlerMutation::ReplacePayload {
+                    path: data_path.to_owned(),
+                    occurrence: 0,
+                    data: normalized,
+                });
+            }
+        }
+        if let Some(fade_path) = invocation
+            .context
+            .configuration
+            .get("fade_path")
+            .and_then(serde_json::Value::as_str)
+        {
+            if !fade_path.starts_with("LIGH/") {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "light fade path must be inside LIGH".to_owned(),
+                });
+            }
+            if !record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == Signature(*b"FNAM"))
+            {
+                mutations.push(HandlerMutation::Insert {
+                    path: fade_path.to_owned(),
+                    value: OwnedFieldValue::Float(1.0),
+                });
+            }
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
+    }
+}
+
 struct CtdaRunOnAfterSet;
 
 impl SemanticHandler for CtdaRunOnAfterSet {
@@ -10641,6 +10792,11 @@ fn single_same_value(left: f64, right: f64) -> bool {
     let left = left as f32;
     let right = right as f32;
     (left - right).abs() <= (left.abs().min(right.abs()) * SINGLE_RESOLUTION).max(SINGLE_RESOLUTION)
+}
+
+fn extended_same_value_zero(value: f32) -> bool {
+    const EXTENDED_RESOLUTION: f64 = 1.0e-16;
+    f64::from(value).abs() <= EXTENDED_RESOLUTION
 }
 
 #[cfg(test)]
@@ -15823,6 +15979,135 @@ mod tests {
         expected[12..14].copy_from_slice(&0x0081_u16.to_le_bytes());
         expected[40..44].copy_from_slice(&0x1234_0081_u32.to_le_bytes());
         assert_eq!(normalized, expected);
+        Ok(())
+    }
+
+    /// Restores xEdit's DATA and FNAM defaults for modern light records.
+    #[test]
+    fn light_after_load_normalizes_data_and_inserts_fade() -> Result<()> {
+        assert!(extended_same_value_zero(1.0e-17_f32));
+        assert!(!extended_same_value_zero(1.0e-15_f32));
+        assert!(!extended_same_value_zero(f32::NAN));
+        let binding = CallbackBinding {
+            path: "LIGH".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-light-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.light_defaults".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "data_path": "LIGH/7:DATA",
+                        "fade_path": "LIGH/8:Fade value",
+                    }),
+                },
+            },
+        };
+        let mut data = (0_u8..48).collect::<Vec<_>>();
+        data[16..20].copy_from_slice(&0.0_f32.to_le_bytes());
+        data[20..24].copy_from_slice(&(-0.0_f32).to_le_bytes());
+        let record = WritableRecord {
+            signature: Signature(*b"LIGH"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: data.clone(),
+            }],
+        };
+
+        let output = SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"LIGH"), FormId(0x1111), 0, SchemaGame::SkyrimSe),
+            &record,
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+
+        let mut normalized = data;
+        normalized[16..20].copy_from_slice(&1.0_f32.to_le_bytes());
+        normalized[20..24].copy_from_slice(&90.0_f32.to_le_bytes());
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if mutations
+                    == [
+                        HandlerMutation::ReplacePayload {
+                            path: "LIGH/7:DATA".to_owned(),
+                            occurrence: 0,
+                            data: normalized,
+                        },
+                        HandlerMutation::Insert {
+                            path: "LIGH/8:Fade value".to_owned(),
+                            value: OwnedFieldValue::Float(1.0),
+                        },
+                    ]
+        ));
+        Ok(())
+    }
+
+    /// Leaves FO76's stale FNAM branch inert and preserves its unknown DATA tail.
+    #[test]
+    fn light_after_load_preserves_fo76_tail_without_fnam() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "LIGH".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-fo76-light-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.light_defaults".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "data_path": "LIGH/14:DATA",
+                    }),
+                },
+            },
+        };
+        let mut data = (0_u8..72).collect::<Vec<_>>();
+        data[16..20].copy_from_slice(&0.0_f32.to_le_bytes());
+        data[20..24].copy_from_slice(&45.0_f32.to_le_bytes());
+        let record = WritableRecord {
+            signature: Signature(*b"LIGH"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: data.clone(),
+            }],
+        };
+
+        let output = SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+            &binding,
+            HandlerRecordContext::new(
+                Signature(*b"LIGH"),
+                FormId(0x1111),
+                0,
+                SchemaGame::Fallout76,
+            ),
+            &record,
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+
+        let mut normalized = data.clone();
+        normalized[16..20].copy_from_slice(&1.0_f32.to_le_bytes());
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if mutations
+                    == [HandlerMutation::ReplacePayload {
+                        path: "LIGH/14:DATA".to_owned(),
+                        occurrence: 0,
+                        data: normalized,
+                    }]
+        ));
+        assert_eq!(&data[64..], &(64_u8..72).collect::<Vec<_>>());
         Ok(())
     }
 

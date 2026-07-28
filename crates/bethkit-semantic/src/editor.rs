@@ -1850,6 +1850,30 @@ impl RecordEditor {
                         value,
                     )?;
                 }
+                HandlerMutation::ReplacePayload {
+                    path,
+                    occurrence,
+                    data,
+                } => {
+                    let node = self.find_node(&path)?;
+                    let SchemaNodeKind::Subrecord { signature, .. } = &node.kind else {
+                        return Err(SemanticError::Encode {
+                            path,
+                            message: "payload replacement path is not a subrecord".to_owned(),
+                        });
+                    };
+                    let signature = Signature::from(*signature);
+                    let index = self.assigned_subrecord_index(record, &path, occurrence)?;
+                    if record.subrecords[index].signature != signature {
+                        return Err(SemanticError::Encode {
+                            path,
+                            message: "assigned subrecord signature does not match schema"
+                                .to_owned(),
+                        });
+                    }
+                    record.subrecords[index].data = data;
+                    decoded_values.remove(&(path, occurrence));
+                }
                 HandlerMutation::ResetToDefault { path, .. } => {
                     return Err(SemanticError::Handler {
                         handler: "edit.reset_sibling_default".to_owned(),
@@ -2100,6 +2124,27 @@ impl RecordEditor {
                         occurrence,
                         expected,
                         value,
+                    }],
+                )
+            }
+            HandlerMutation::ReplacePayload {
+                path,
+                occurrence,
+                data,
+            } => {
+                let (_, occurrence) = self
+                    .scoped_assignment(record, repeat_scope, &path, occurrence)?
+                    .ok_or_else(|| SemanticError::MissingOccurrence {
+                        path: path.clone(),
+                        occurrence,
+                    })?;
+                self.apply_mutations_with_values(
+                    record,
+                    decoded_values,
+                    vec![HandlerMutation::ReplacePayload {
+                        path,
+                        occurrence,
+                        data,
                     }],
                 )
             }
@@ -2655,6 +2700,20 @@ impl RecordEditor {
                         expected,
                         value,
                     },
+                    HandlerMutation::ReplacePayload {
+                        path,
+                        occurrence,
+                        data,
+                    } => HandlerMutation::ReplacePayload {
+                        occurrence: self.global_occurrence(
+                            &grammar,
+                            repeat_scope,
+                            &path,
+                            occurrence,
+                        )?,
+                        path,
+                        data,
+                    },
                     HandlerMutation::ResetToDefault { path, .. } => {
                         return Err(SemanticError::Handler {
                             handler: "edit.reset_sibling_default".to_owned(),
@@ -2889,6 +2948,7 @@ fn mutation_path(mutation: &HandlerMutation) -> &str {
     match mutation {
         HandlerMutation::Set { path, .. }
         | HandlerMutation::SetIfEqual { path, .. }
+        | HandlerMutation::ReplacePayload { path, .. }
         | HandlerMutation::ResetToDefault { path, .. }
         | HandlerMutation::Insert { path, .. }
         | HandlerMutation::Remove { path, .. }
@@ -5320,6 +5380,135 @@ mod tests {
         assert_eq!(source.subrecords()?[0].as_bytes(), original);
         assert_eq!(editor.after_load_migration_count(), 1);
         assert_eq!(editor.into_writable_record().subrecords[0].data, expected);
+        Ok(())
+    }
+
+    /// Applies LIGH payload replacement and FNAM insertion in one transaction.
+    #[test]
+    fn editor_applies_light_after_load_defaults() -> Result<()> {
+        let data_path = "LIGH/7:DATA";
+        let fade_path = "LIGH/8:Fade value";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::SkyrimSe;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.light_defaults".to_owned(),
+            minimum_version: 1,
+        }];
+        let subrecord = |id, path: &str, name: &str, signature, payload| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(payload),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"LIGH"),
+                name: "Light".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "LIGH".to_owned(),
+                    name: "Light".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(
+                                1,
+                                data_path,
+                                "DATA",
+                                *b"DATA",
+                                SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: format!("{data_path}/payload"),
+                                    name: "DATA".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Bytes { length: Some(48) },
+                                    },
+                                },
+                            ),
+                            subrecord(
+                                3,
+                                fade_path,
+                                "Fade value",
+                                *b"FNAM",
+                                SchemaNode {
+                                    id: SchemaNodeId(4),
+                                    path: format!("{fade_path}/payload"),
+                                    name: "Fade value".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Float {
+                                            width: 4,
+                                            byte_order: ByteOrder::LittleEndian,
+                                            scale: 1.0,
+                                            digits: 6,
+                                        },
+                                    },
+                                },
+                            ),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "LIGH".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "cc".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.light_defaults".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "data_path": data_path,
+                            "fade_path": fade_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut original = (0_u8..48).collect::<Vec<_>>();
+        original[16..20].copy_from_slice(&0.0_f32.to_le_bytes());
+        original[20..24].copy_from_slice(&0.0_f32.to_le_bytes());
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"LIGH"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: original.clone(),
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        let mut expected = original.clone();
+        expected[16..20].copy_from_slice(&1.0_f32.to_le_bytes());
+        expected[20..24].copy_from_slice(&90.0_f32.to_le_bytes());
+        assert_eq!(source.subrecords()?[0].as_bytes(), original);
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 2);
+        assert_eq!(writable.subrecords[0].data, expected);
+        assert_eq!(writable.subrecords[1].signature, Signature(*b"FNAM"));
+        assert_eq!(writable.subrecords[1].data, 1.0_f32.to_le_bytes());
         Ok(())
     }
 
