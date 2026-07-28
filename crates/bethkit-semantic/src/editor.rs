@@ -3651,6 +3651,10 @@ mod tests {
         fn source_master_morph_keys(&self, _source: HandlerRecordContext) -> Option<Vec<u32>> {
             Some(vec![20, 10])
         }
+
+        fn source_file_name(&self, _source: HandlerRecordContext) -> Option<String> {
+            Some("Oblivion.esm".to_owned())
+        }
     }
 
     fn windows_1252_string(zero_terminated: bool) -> PrimitiveType {
@@ -7531,6 +7535,116 @@ mod tests {
         );
         assert_eq!(source.subrecords()?[1].as_bytes(), original_keys);
         assert_eq!(source.subrecords()?[2].as_bytes(), original_values);
+        Ok(())
+    }
+
+    /// Applies Oblivion.esm's hard-coded magic-effect flags before decoding.
+    #[test]
+    fn editor_applies_oblivion_magic_effect_after_load_migration() -> Result<()> {
+        let code_path = "MGEF/0:Magic Effect Code";
+        let data_path = "MGEF/7:Data";
+        let subrecord = |id, path: &str, signature| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 100),
+                    path: format!("{path}/payload"),
+                    name: "Raw data".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: None },
+                    },
+                }),
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Oblivion;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.oblivion_magic_effect_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"MGEF"),
+                name: "Magic Effect".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "MGEF".to_owned(),
+                    name: "Magic Effect".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(1, code_path, *b"EDID"),
+                            subrecord(2, data_path, *b"DATA"),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "MGEF".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "12".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.oblivion_magic_effect_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "code_path": code_path,
+                            "data_path": data_path,
+                            "flags_path": "MGEF/7:Data/payload/0:Flags",
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let original_data = vec![0x00, 0x00, 0x00, 0x40, 0xaa, 0xbb];
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"MGEF"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"EDID"),
+                    data: b"RSFI\0".to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"DATA"),
+                    data: original_data.clone(),
+                },
+            ],
+        });
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestMagicEffectResolver));
+        let context = SemanticContext::new_with_handlers(
+            Arc::new(package),
+            crate::DecoderRegistry::builtin(),
+            handlers,
+        )?;
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(
+            writable.subrecords[1].data,
+            vec![0x08, 0x00, 0x00, 0x40, 0xaa, 0xbb]
+        );
+        assert_eq!(source.subrecords()?[1].as_bytes(), original_data);
         Ok(())
     }
 

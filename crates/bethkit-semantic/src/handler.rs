@@ -902,6 +902,13 @@ pub trait FormLinkResolver: Send + Sync {
         None
     }
 
+    /// Returns the source plugin filename used by file-specific xEdit callbacks.
+    ///
+    /// The default returns `None` for resolvers without source-file metadata.
+    fn source_file_name(&self, _source: HandlerRecordContext) -> Option<String> {
+        None
+    }
+
     /// Resolves one navigation mesh and its effective triangle-array metadata.
     ///
     /// The default returns `None` for resolvers without navigation-mesh metadata.
@@ -1196,6 +1203,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacyWaterAfterLoad));
         registry.register(Arc::new(OblivionReferenceAfterLoad));
         registry.register(Arc::new(OblivionLeveledListAfterLoad));
+        registry.register(Arc::new(OblivionMagicEffectAfterLoad { resolver: None }));
         registry.register(Arc::new(LegacyNpcAfterLoad));
         registry.register(Arc::new(LegacyInfoAfterLoad));
         registry.register(Arc::new(LegacySoundAfterLoad));
@@ -1329,6 +1337,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FalloutNpcAfterLoad {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(OblivionMagicEffectAfterLoad {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(SelectCoedOwner {
@@ -9170,6 +9181,129 @@ impl SemanticHandler for OblivionLeveledListAfterLoad {
     }
 }
 
+struct OblivionMagicEffectAfterLoad {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for OblivionMagicEffectAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.oblivion_magic_effect_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.game != SchemaGame::Oblivion
+            || invocation.context.record_signature != Signature(*b"MGEF")
+            || invocation.context.binding.path != "MGEF"
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion magic-effect migration requires a guarded MGEF root binding"
+                    .to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion magic-effect migration requires a record-level binding"
+                    .to_owned(),
+            });
+        }
+        for (key, expected) in [
+            ("code_path", "MGEF/0:Magic Effect Code"),
+            ("data_path", "MGEF/7:Data"),
+            ("flags_path", "MGEF/7:Data/payload/0:Flags"),
+        ] {
+            let actual = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("Oblivion magic-effect migration requires {key}"),
+                })?;
+            if actual != expected {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "Oblivion magic-effect migration requires materialized {key} {expected}"
+                    ),
+                });
+            }
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Oblivion magic-effect migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let source_file = self.resolver.as_ref().and_then(|resolver| {
+            resolver.source_file_name(handler_record_context(&invocation.context))
+        });
+        if !source_file.is_some_and(|name| name.eq_ignore_ascii_case("Oblivion.esm")) {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(editor_id) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"EDID"))
+            .map(|subrecord| {
+                let end = subrecord
+                    .data
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap_or(subrecord.data.len());
+                &subrecord.data[..end]
+            })
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(data) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"DATA"))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(flags) = data.data.get(..4) else {
+            return Ok(HandlerOutput::None);
+        };
+        let mut normalized = u32::from_le_bytes(flags.try_into().expect("four-byte MGEF flags"));
+        if [b"RSFI", b"RSFR", b"RSPA", b"RSSH"]
+            .iter()
+            .any(|expected| editor_id.eq_ignore_ascii_case(*expected))
+        {
+            normalized |= 0x0000_0008;
+        } else if editor_id.eq_ignore_ascii_case(b"REAN") {
+            normalized &= !0x0002_0000;
+        } else {
+            return Ok(HandlerOutput::None);
+        }
+        if normalized.to_le_bytes() == flags {
+            return Ok(HandlerOutput::None);
+        }
+        let mut payload = data.data.clone();
+        payload[..4].copy_from_slice(&normalized.to_le_bytes());
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::ReplacePayload {
+                path: "MGEF/7:Data".to_owned(),
+                occurrence: 0,
+                data: payload,
+            },
+        ]))
+    }
+}
+
 struct LegacyNpcAfterLoad;
 
 impl SemanticHandler for LegacyNpcAfterLoad {
@@ -13685,6 +13819,10 @@ mod tests {
 
         fn source_master_morph_keys(&self, _source: HandlerRecordContext) -> Option<Vec<u32>> {
             Some(vec![20, 10])
+        }
+
+        fn source_file_name(&self, _source: HandlerRecordContext) -> Option<String> {
+            Some("Oblivion.esm".to_owned())
         }
 
         fn resolve_record_index(
@@ -20926,6 +21064,90 @@ mod tests {
                 HandlerOutput::None
             ));
         }
+        Ok(())
+    }
+
+    /// Normalizes only Oblivion.esm's hard-coded magic-effect flag exceptions.
+    #[test]
+    fn oblivion_magic_effect_after_load_matches_xedit_flags() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "MGEF".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-oblivion-mgef-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.oblivion_magic_effect_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "code_path": "MGEF/0:Magic Effect Code",
+                        "data_path": "MGEF/7:Data",
+                        "flags_path": "MGEF/7:Data/payload/0:Flags",
+                    }),
+                },
+            },
+        };
+        let record = |editor_id: &[u8], flags: u32| WritableRecord {
+            signature: Signature(*b"MGEF"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"EDID"),
+                    data: [editor_id, b"\0"].concat(),
+                },
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"DATA"),
+                    data: [flags.to_le_bytes().as_slice(), &[0xaa, 0xbb]].concat(),
+                },
+            ],
+        };
+        let mut registry = SemanticHandlerRegistry::builtin();
+        registry.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let invoke = |record: &WritableRecord| {
+            registry.invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(
+                    Signature(*b"MGEF"),
+                    FormId(0x1111),
+                    0,
+                    SchemaGame::Oblivion,
+                ),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+        for editor_id in [b"RSFI", b"RSFR", b"RSPA", b"RSSH"] {
+            assert!(matches!(
+                invoke(&record(editor_id, 0x4000_0000))?,
+                HandlerOutput::Mutations(mutations)
+                    if mutations == [HandlerMutation::ReplacePayload {
+                        path: "MGEF/7:Data".to_owned(),
+                        occurrence: 0,
+                        data: vec![0x08, 0x00, 0x00, 0x40, 0xaa, 0xbb],
+                    }]
+            ));
+        }
+        assert!(matches!(
+            invoke(&record(b"REAN", 0x4002_0008))?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::ReplacePayload {
+                    path: "MGEF/7:Data".to_owned(),
+                    occurrence: 0,
+                    data: vec![0x08, 0x00, 0x00, 0x40, 0xaa, 0xbb],
+                }]
+        ));
+        assert!(matches!(
+            invoke(&record(b"ABCD", 0x4002_0008))?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(&record(b"RSFI", 0x4000_0008))?,
+            HandlerOutput::None
+        ));
         Ok(())
     }
 
