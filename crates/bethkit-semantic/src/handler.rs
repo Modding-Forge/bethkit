@@ -1149,6 +1149,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(VerifyInertBodyTemplateAfterLoad));
         registry.register(Arc::new(MessageAfterLoad));
         registry.register(Arc::new(DefaultObjectArrayAfterLoad));
+        registry.register(Arc::new(SkyrimWeaponAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
@@ -8138,6 +8139,86 @@ impl SemanticHandler for DefaultObjectArrayAfterLoad {
         } else {
             Ok(HandlerOutput::SubrecordPayload(data))
         }
+    }
+}
+
+struct SkyrimWeaponAfterLoad;
+
+impl SemanticHandler for SkyrimWeaponAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.skyrim_weapon_flags"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"WEAP")
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::SkyrimLe | SchemaGame::SkyrimSe | SchemaGame::SkyrimVr
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "weapon flag cleanup is only valid for Skyrim WEAP records".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "weapon flag cleanup requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) {
+            return Ok(HandlerOutput::None);
+        }
+        let index = invocation
+            .source_subrecord_index
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "weapon flag cleanup requires a source subrecord".to_owned(),
+            })?;
+        let data = record
+            .subrecords
+            .get(index)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("source subrecord index {index} is out of bounds"),
+            })?;
+        if data.signature != Signature(*b"DNAM") || data.data.len() != 100 {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "Skyrim weapon cleanup requires a 100-byte DNAM payload, got {} bytes of {}",
+                    data.data.len(),
+                    data.signature
+                ),
+            });
+        }
+        let flags = u16::from_le_bytes(
+            data.data[12..14]
+                .try_into()
+                .expect("two-byte weapon flags must convert"),
+        );
+        let flags2 = u32::from_le_bytes(
+            data.data[40..44]
+                .try_into()
+                .expect("four-byte weapon flags2 must convert"),
+        );
+        let normalized_flags = flags & !0x0040;
+        let normalized_flags2 = flags2 & !0x0000_0100;
+        if normalized_flags == flags && normalized_flags2 == flags2 {
+            return Ok(HandlerOutput::None);
+        }
+        let mut normalized = data.data.clone();
+        normalized[12..14].copy_from_slice(&normalized_flags.to_le_bytes());
+        normalized[40..44].copy_from_slice(&normalized_flags2.to_le_bytes());
+        Ok(HandlerOutput::SubrecordPayload(normalized))
     }
 }
 
@@ -15688,6 +15769,60 @@ mod tests {
             HandlerOutput::SubrecordPayload(data)
                 if data == [retained_one.as_slice(), retained_two.as_slice()].concat()
         ));
+        Ok(())
+    }
+
+    /// Clears only the two Creation Kit noise bits from Skyrim weapon data.
+    #[test]
+    fn skyrim_weapon_after_load_clears_iron_sights_flags() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "WEAP".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-skyrim-weapon-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.skyrim_weapon_flags".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "anchor_path_suffix": "/29:Data",
+                    }),
+                },
+            },
+        };
+        let mut data = (0_u8..100).collect::<Vec<_>>();
+        data[12..14].copy_from_slice(&0x00c1_u16.to_le_bytes());
+        data[40..44].copy_from_slice(&0x1234_0181_u32.to_le_bytes());
+        let record = WritableRecord {
+            signature: Signature(*b"WEAP"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"DNAM"),
+                data,
+            }],
+        };
+
+        let output = SemanticHandlerRegistry::builtin().invoke_with_records(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"WEAP"), FormId(0x1111), 0, SchemaGame::SkyrimSe),
+            HandlerInvocationAccess::writable_subrecord_with_scope(&record, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+
+        let HandlerOutput::SubrecordPayload(normalized) = output else {
+            return Err(SemanticError::Handler {
+                handler: "migrate.skyrim_weapon_flags".to_owned(),
+                message: "Skyrim weapon cleanup did not return a payload".to_owned(),
+            });
+        };
+        let mut expected = record.subrecords[0].data.clone();
+        expected[12..14].copy_from_slice(&0x0081_u16.to_le_bytes());
+        expected[40..44].copy_from_slice(&0x1234_0081_u32.to_le_bytes());
+        assert_eq!(normalized, expected);
         Ok(())
     }
 
