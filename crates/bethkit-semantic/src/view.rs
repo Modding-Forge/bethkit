@@ -334,11 +334,14 @@ impl<'context, 'record> RecordView<'context, 'record> {
         let mut occurrences: BTreeMap<u32, Vec<NamedValue<'record>>> = BTreeMap::new();
 
         for (index, field) in fields.into_iter().enumerate() {
-            let Some(scope) = grammar
-                .repeat_scopes
-                .get(index)
-                .and_then(|scopes| scopes.iter().find(|scope| scope.path == path))
-            else {
+            let Some(scope) = grammar.repeat_scopes.get(index).and_then(|scopes| {
+                scopes.iter().find(|scope| {
+                    scope.path == path
+                        || path
+                            .strip_suffix("/payload")
+                            .is_some_and(|parent| parent == scope.path)
+                })
+            }) else {
                 continue;
             };
             occurrences
@@ -378,7 +381,63 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 path: path.to_owned(),
                 message: format!("repeat occurrence {occurrence} does not exist"),
             })?;
-        self.format_value_as(path, value, format)
+        let mut prepared = self.prepare_repeated_summary(value, value)?;
+        if let FieldValue::Struct(fields) = &mut prepared {
+            fields.push(repeat_position_value(occurrence, structures.len()));
+        }
+        self.format_value_as(path, &prepared, format)
+    }
+
+    fn prepare_repeated_summary(
+        &self,
+        value: &FieldValue<'_>,
+        root_scope: &FieldValue<'_>,
+    ) -> Result<FieldValue<'static>> {
+        match value {
+            FieldValue::Struct(fields) => {
+                let mut prepared = Vec::with_capacity(fields.len());
+                for field in fields {
+                    let mut child = self.prepare_repeated_summary(&field.value, root_scope)?;
+                    if !matches!(child, FieldValue::Struct(_) | FieldValue::Array(_))
+                        && field.name != "Type"
+                    {
+                        let selected_path = field.effective_path.as_deref().unwrap_or(&field.path);
+                        let mut formatted = self.format_value_as_in_scope(
+                            selected_path,
+                            &field.value,
+                            root_scope,
+                            ValueFormat::Summary,
+                        )?;
+                        if formatted.is_none() && selected_path != field.path {
+                            formatted = self.format_value_as_in_scope(
+                                &field.path,
+                                &field.value,
+                                root_scope,
+                                ValueFormat::Summary,
+                            )?;
+                        }
+                        if let Some(text) = formatted {
+                            child = FieldValue::String(Cow::Owned(text));
+                        }
+                    }
+                    prepared.push(NamedValue {
+                        node_id: field.node_id,
+                        path: field.path.clone(),
+                        effective_path: field.effective_path.clone(),
+                        name: field.name.clone(),
+                        span: field.span,
+                        value: child,
+                    });
+                }
+                Ok(FieldValue::Struct(prepared))
+            }
+            FieldValue::Array(values) => values
+                .iter()
+                .map(|value| self.prepare_repeated_summary(value, root_scope))
+                .collect::<Result<Vec<_>>>()
+                .map(FieldValue::Array),
+            _ => Ok(value.to_handler_value()),
+        }
     }
 
     /// Validates required fields, duplicate constraints, unknown subrecords,
@@ -1167,6 +1226,25 @@ fn top_level_subrecords(root: &SchemaNode) -> Vec<&SchemaNode> {
     let mut output: Vec<&SchemaNode> = Vec::new();
     collect(root, &mut output);
     output
+}
+
+fn repeat_position_value(index: usize, count: usize) -> NamedValue<'static> {
+    let scalar = |name: &str, value: usize| NamedValue {
+        node_id: bethkit_schema::SchemaNodeId(u32::MAX),
+        path: String::new(),
+        effective_path: None,
+        name: name.to_owned(),
+        span: ByteSpan { start: 0, end: 0 },
+        value: FieldValue::UInt(value as u64),
+    };
+    NamedValue {
+        node_id: bethkit_schema::SchemaNodeId(u32::MAX),
+        path: String::new(),
+        effective_path: None,
+        name: "Bethkit Repeat Position".to_owned(),
+        span: ByteSpan { start: 0, end: 0 },
+        value: FieldValue::Struct(vec![scalar("Index", index), scalar("Count", count)]),
+    }
 }
 
 fn decode_primitive<'a>(
@@ -2749,6 +2827,194 @@ mod tests {
         assert!(matches!(first[0].value, FieldValue::UInt(1)));
         assert!(matches!(first[1].value, FieldValue::UInt(2)));
         assert!(matches!(second[0].value, FieldValue::UInt(3)));
+        assert_eq!(
+            context
+                .view(&record, false)?
+                .repeated_structures(&format!("{structure_path}/payload"))?
+                .len(),
+            2
+        );
+        Ok(())
+    }
+
+    /// Formats repeated CTDA structures with child callbacks and logical connectors.
+    #[test]
+    fn repeated_condition_summary_formats_complete_structure(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let structure_path = "TEST/0:Conditions/repeat/0:Condition";
+        let ctda_path = format!("{structure_path}/0:CTDA");
+        let payload_path = format!("{ctda_path}/payload");
+        let field = |id: u32, index: usize, name: &str, primitive: PrimitiveType| SchemaNode {
+            id: bethkit_schema::SchemaNodeId(id),
+            path: format!("{payload_path}/{index}:{name}"),
+            name: name.to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive { primitive },
+        };
+        let integer = |width| PrimitiveType::Integer {
+            integer: IntegerType {
+                width,
+                signed: false,
+                byte_order: ByteOrder::LittleEndian,
+            },
+        };
+        let payload = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(4),
+            path: payload_path.clone(),
+            name: "Condition Data".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    field(5, 0, "Type", integer(1)),
+                    field(
+                        6,
+                        1,
+                        "Comparison Value",
+                        PrimitiveType::Float {
+                            width: 4,
+                            byte_order: ByteOrder::LittleEndian,
+                            scale: 1.0,
+                            digits: 6,
+                        },
+                    ),
+                    field(7, 2, "Function", integer(2)),
+                ],
+            },
+        };
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(1),
+                    path: "TEST/0:Conditions".to_owned(),
+                    name: "Conditions".to_owned(),
+                    required: false,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Repeat {
+                        minimum: 0,
+                        maximum: None,
+                        child: Box::new(SchemaNode {
+                            id: bethkit_schema::SchemaNodeId(2),
+                            path: structure_path.to_owned(),
+                            name: "Condition".to_owned(),
+                            required: false,
+                            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Sequence {
+                                children: vec![SchemaNode {
+                                    id: bethkit_schema::SchemaNodeId(3),
+                                    path: ctda_path,
+                                    name: "CTDA".to_owned(),
+                                    required: true,
+                                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Subrecord {
+                                        signature: SchemaSignature(*b"CTDA"),
+                                        payload: Box::new(payload),
+                                    },
+                                }],
+                            },
+                        }),
+                    },
+                }],
+            },
+        };
+        let function_path = format!("{payload_path}/2:Function");
+        let bindings = vec![
+            CallbackBinding {
+                path: structure_path.to_owned(),
+                callback_id: "def.value_transform".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "00".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "format.ctda_condition".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            },
+            CallbackBinding {
+                path: function_path,
+                callback_id: "integer.formatter".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "11".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "format.ctda_function".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            },
+        ];
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 2;
+        manifest.callbacks_classified = 2;
+        manifest.required_handlers = vec![
+            HandlerRequirement {
+                id: "format.ctda_condition".to_owned(),
+                minimum_version: 1,
+            },
+            HandlerRequirement {
+                id: "format.ctda_function".to_owned(),
+                minimum_version: 1,
+            },
+        ];
+        let table = bethkit_schema::ConditionFunctionTable::new(
+            None,
+            None,
+            vec![bethkit_schema::ConditionFunction::new(
+                1,
+                "GetDistance",
+                "",
+                [0, 0, 0],
+                [false, false, false],
+            )],
+        );
+        let package = SchemaPackage::new_with_semantics(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root,
+            }],
+            bindings,
+            Some(table),
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut first = vec![0_u8];
+        first.extend_from_slice(&1.25_f32.to_le_bytes());
+        first.extend_from_slice(&1_u16.to_le_bytes());
+        let mut second = vec![0_u8];
+        second.extend_from_slice(&2.0_f32.to_le_bytes());
+        second.extend_from_slice(&1_u16.to_le_bytes());
+        let record_bytes =
+            test_record_with_subrecords(b"TEST", &[(b"CTDA", &first), (b"CTDA", &second)]);
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::sse())?;
+        let view = context.view(&record, false)?;
+
+        // when / then
+        assert_eq!(
+            view.format_repeated_structure_as(structure_path, 0, ValueFormat::Summary)?,
+            Some("Subject.GetDistance = 1.25 AND".to_owned())
+        );
+        assert_eq!(
+            view.format_repeated_structure_as(structure_path, 1, ValueFormat::Summary)?,
+            Some("Subject.GetDistance = 2".to_owned())
+        );
         Ok(())
     }
 

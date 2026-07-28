@@ -681,6 +681,8 @@ pub trait WwiseGuidResolver: Send + Sync {
 #[derive(Clone, Default)]
 pub struct SemanticHandlerRegistry {
     handlers: BTreeMap<String, Arc<dyn SemanticHandler>>,
+    condition_function_table: Option<Arc<ConditionFunctionTable>>,
+    form_link_resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
 #[derive(Clone, Copy)]
@@ -846,6 +848,10 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(SelectBoneModifierType));
         registry.register(Arc::new(SelectEmptyString));
         registry.register(Arc::new(CtdaFunctionFormatter { table: None }));
+        registry.register(Arc::new(FormatCtdaCondition {
+            table: None,
+            resolver: None,
+        }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -891,6 +897,7 @@ impl SemanticHandlerRegistry {
 
     /// Installs the load-order resolver used by FormID-dependent summaries.
     pub fn set_form_link_resolver(&mut self, resolver: Arc<dyn FormLinkResolver>) {
+        self.form_link_resolver = Some(Arc::clone(&resolver));
         self.register(Arc::new(FormatItemSummary {
             resolver: Some(Arc::clone(&resolver)),
         }));
@@ -928,6 +935,10 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(SelectCoedOwner {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatCtdaCondition {
+            table: self.condition_function_table.clone(),
             resolver: Some(resolver),
         }));
     }
@@ -944,10 +955,17 @@ impl SemanticHandlerRegistry {
     /// This replaces the table-less built-in selector while preserving its
     /// stable handler identifier and installs the matching function formatter.
     pub fn set_condition_function_table(&mut self, table: Arc<ConditionFunctionTable>) {
+        self.condition_function_table = Some(Arc::clone(&table));
         self.register(Arc::new(SelectCtdaParameter {
             table: Some(Arc::clone(&table)),
         }));
-        self.register(Arc::new(CtdaFunctionFormatter { table: Some(table) }));
+        self.register(Arc::new(CtdaFunctionFormatter {
+            table: Some(Arc::clone(&table)),
+        }));
+        self.register(Arc::new(FormatCtdaCondition {
+            table: Some(table),
+            resolver: self.form_link_resolver.clone(),
+        }));
     }
 
     /// Resolves a handler satisfying a minimum implementation version.
@@ -5271,6 +5289,248 @@ fn ctda_parameter_error(message: impl Into<String>) -> SemanticError {
 fn coed_owner_error(message: impl Into<String>) -> SemanticError {
     SemanticError::Handler {
         handler: "select.coed_owner".to_owned(),
+        message: message.into(),
+    }
+}
+
+struct FormatCtdaCondition {
+    table: Option<Arc<ConditionFunctionTable>>,
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+impl SemanticHandler for FormatCtdaCondition {
+    fn id(&self) -> &'static str {
+        "format.ctda_condition"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if !matches!(
+            invocation.phase,
+            HandlerPhase::Display
+                | HandlerPhase::Summary
+                | HandlerPhase::SortKey
+                | HandlerPhase::EditValue
+        ) {
+            return Ok(HandlerOutput::None);
+        }
+        let value = invocation
+            .value
+            .ok_or_else(|| ctda_condition_error("condition formatting requires a value"))?;
+        let text = format_ctda_condition(
+            value,
+            invocation.context.game,
+            self.table.as_deref(),
+            self.resolver.as_deref(),
+            handler_record_context(&invocation.context),
+        )?;
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+fn format_ctda_condition(
+    value: &FieldValue<'_>,
+    game: SchemaGame,
+    table: Option<&ConditionFunctionTable>,
+    resolver: Option<&dyn FormLinkResolver>,
+    source: HandlerRecordContext,
+) -> Result<String> {
+    let fields = find_ctda_fields(value)
+        .ok_or_else(|| ctda_condition_error("condition value has no CTDA payload"))?;
+    let condition_type = condition_integer(fields, "Type")?;
+    let function = condition_field(fields, &["Function"])
+        .ok_or_else(|| ctda_condition_error("condition has no Function field"))?;
+    let function_index = callback_integer(&function.value, "format.ctda_condition")
+        .ok()
+        .and_then(|value| i32::try_from(value).ok());
+    let function_text = condition_function_text(&function.value, function_index, game, table)?;
+
+    let run_on = condition_field(fields, &["Run On"]);
+    let reference = condition_field(fields, &["Reference"]);
+    let mut text = String::new();
+    if let (Some(run_on), Some(reference)) = (run_on, reference) {
+        if condition_parameter_is_visible(reference) {
+            let mut run_on_value =
+                i64::try_from(callback_integer(&run_on.value, "format.ctda_condition")?)
+                    .map_err(|_| ctda_condition_error("Run On value exceeds i64"))?;
+            if game == SchemaGame::FalloutNv && matches!(function_index, Some(106 | 285)) {
+                run_on_value = 0;
+            }
+            if run_on_value == 2 {
+                text.push('(');
+                text.push_str(&condition_value_text(&reference.value, resolver, source)?);
+                text.push(')');
+            } else {
+                text.push_str(
+                    &condition_value_text(&run_on.value, resolver, source)?.replace(' ', ""),
+                );
+            }
+        }
+    }
+    if text.is_empty() {
+        text.push_str(if condition_type & 0x02 == 0 {
+            "Subject"
+        } else {
+            "Target"
+        });
+    }
+    text.push('.');
+    text.push_str(&function_text);
+
+    if let Some(parameter_1) = condition_field(fields, &["Parameter #1", "Param #1"]) {
+        if condition_parameter_is_visible(parameter_1) {
+            text.push('(');
+            text.push_str(&condition_value_text(&parameter_1.value, resolver, source)?);
+            if let Some(parameter_2) = condition_field(fields, &["Parameter #2", "Param #2"]) {
+                if condition_parameter_is_visible(parameter_2) {
+                    text.push_str(", ");
+                    text.push_str(&condition_value_text(&parameter_2.value, resolver, source)?);
+                }
+            }
+            text.push(')');
+        }
+    }
+
+    text.push_str(match condition_type & 0xE0 {
+        0x00 => " = ",
+        0x20 => " <> ",
+        0x40 => " > ",
+        0x60 => " >= ",
+        0x80 => " < ",
+        0xA0 => " <= ",
+        _ => "",
+    });
+    let comparison = condition_field(fields, &["Comparison Value"])
+        .ok_or_else(|| ctda_condition_error("condition has no Comparison Value field"))?;
+    text.push_str(&condition_value_text(&comparison.value, resolver, source)?);
+
+    if let Some((index, count)) = condition_repeat_position(value) {
+        if index + 1 < count {
+            text.push_str(if condition_type & 0x01 == 0 {
+                " AND"
+            } else {
+                " OR"
+            });
+        }
+    }
+    Ok(text)
+}
+
+fn find_ctda_fields<'a>(value: &'a FieldValue<'a>) -> Option<&'a [crate::NamedValue<'a>]> {
+    let FieldValue::Struct(fields) = value else {
+        return None;
+    };
+    if condition_field(fields, &["Type"]).is_some()
+        && condition_field(fields, &["Function"]).is_some()
+    {
+        return Some(fields);
+    }
+    fields
+        .iter()
+        .find_map(|field| find_ctda_fields(&field.value))
+}
+
+fn condition_field<'a>(
+    fields: &'a [crate::NamedValue<'a>],
+    names: &[&str],
+) -> Option<&'a crate::NamedValue<'a>> {
+    fields
+        .iter()
+        .find(|field| names.iter().any(|name| field.name == *name))
+}
+
+fn condition_integer(fields: &[crate::NamedValue<'_>], name: &str) -> Result<i64> {
+    let field = condition_field(fields, &[name])
+        .ok_or_else(|| ctda_condition_error(format!("condition has no {name} field")))?;
+    i64::try_from(callback_integer(&field.value, "format.ctda_condition")?)
+        .map_err(|_| ctda_condition_error(format!("{name} value exceeds i64")))
+}
+
+fn condition_function_text(
+    value: &FieldValue<'_>,
+    index: Option<i32>,
+    game: SchemaGame,
+    table: Option<&ConditionFunctionTable>,
+) -> Result<String> {
+    if let FieldValue::String(value) = value {
+        return Ok(value.to_string());
+    }
+    let index = index.ok_or_else(|| ctda_condition_error("Function is not an integer"))?;
+    if let Some(function) = table.and_then(|table| {
+        table
+            .functions()
+            .binary_search_by_key(&index, |function| function.index())
+            .ok()
+            .and_then(|position| table.functions().get(position))
+    }) {
+        return Ok(function.name().to_owned());
+    }
+    if game == SchemaGame::FalloutNv {
+        Ok(format!("<Unknown: {index}>"))
+    } else {
+        Ok(index.to_string())
+    }
+}
+
+fn condition_parameter_is_visible(value: &crate::NamedValue<'_>) -> bool {
+    let selected = value.effective_path.as_deref().unwrap_or(&value.path);
+    let selected = selected.to_ascii_lowercase();
+    !selected.ends_with(":none")
+        && !selected.ends_with(":unused")
+        && !selected.contains("(unused)")
+        && !matches!(value.value, FieldValue::Absent)
+}
+
+fn condition_value_text(
+    value: &FieldValue<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+    source: HandlerRecordContext,
+) -> Result<String> {
+    match value {
+        FieldValue::String(value) => Ok(value.to_string()),
+        FieldValue::Int(value) => Ok(value.to_string()),
+        FieldValue::UInt(value) => Ok(value.to_string()),
+        FieldValue::Float(value) => Ok(format_delphi_general(*value, 6)),
+        FieldValue::Enumeration {
+            name: Some(name), ..
+        } => Ok(name.clone()),
+        FieldValue::Enumeration { value, name: None } => Ok(value.to_string()),
+        FieldValue::Flags { value, .. } => Ok(value.to_string()),
+        FieldValue::FormId { value, targets } => Ok(resolver
+            .and_then(|resolver| resolver.resolve_form_id(source, *value, targets))
+            .map_or_else(
+                || format!("{:08X}", value.0),
+                |record| record.value().to_owned(),
+            )),
+        _ => Err(ctda_condition_error(
+            "condition field is not a scalar summary value",
+        )),
+    }
+}
+
+fn condition_repeat_position(value: &FieldValue<'_>) -> Option<(usize, usize)> {
+    let FieldValue::Struct(fields) = value else {
+        return None;
+    };
+    let marker = condition_field(fields, &["Bethkit Repeat Position"])?;
+    let FieldValue::Struct(position) = &marker.value else {
+        return None;
+    };
+    let index = condition_field(position, &["Index"])
+        .and_then(|field| callback_integer(&field.value, "format.ctda_condition").ok())
+        .and_then(|value| usize::try_from(value).ok())?;
+    let count = condition_field(position, &["Count"])
+        .and_then(|field| callback_integer(&field.value, "format.ctda_condition").ok())
+        .and_then(|value| usize::try_from(value).ok())?;
+    Some((index, count))
+}
+
+fn ctda_condition_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.ctda_condition".to_owned(),
         message: message.into(),
     }
 }
@@ -11160,6 +11420,102 @@ mod tests {
             )?,
             HandlerOutput::Value(FieldValue::Int(16))
         ));
+        Ok(())
+    }
+
+    /// Formats complete CTDA condition summaries and repeat connectors like xEdit.
+    #[test]
+    fn ctda_condition_summary_matches_xedit() -> Result<()> {
+        // given
+        let field = |name: &str, value: FieldValue<'static>, effective_path: Option<&str>| {
+            crate::NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(1),
+                path: format!("TEST/Conditions/CTDA/{name}"),
+                effective_path: effective_path.map(str::to_owned),
+                name: name.to_owned(),
+                span: crate::ByteSpan { start: 0, end: 0 },
+                value,
+            }
+        };
+        let position = FieldValue::Struct(vec![
+            field("Index", FieldValue::UInt(0), None),
+            field("Count", FieldValue::UInt(2), None),
+        ]);
+        let ctda = FieldValue::Struct(vec![
+            field("Type", FieldValue::UInt(0x40), None),
+            field(
+                "Comparison Value",
+                FieldValue::Float(1.25),
+                Some("TEST/Comparison/variants/0:Float"),
+            ),
+            field("Function", FieldValue::UInt(1), None),
+            field(
+                "Parameter #1",
+                FieldValue::UInt(7),
+                Some("TEST/Parameter1/variants/2:Integer"),
+            ),
+            field(
+                "Parameter #2",
+                FieldValue::Bytes(Cow::Borrowed(&[0; 4])),
+                Some("TEST/Parameter2/variants/1:None"),
+            ),
+            field(
+                "Run On",
+                FieldValue::Enumeration {
+                    value: 2,
+                    name: Some("Reference".to_owned()),
+                },
+                None,
+            ),
+            field(
+                "Reference",
+                FieldValue::FormId {
+                    value: FormId(0x1234),
+                    targets: vec![Signature(*b"REFR")],
+                },
+                Some("TEST/Reference/variants/1:Reference"),
+            ),
+        ]);
+        let value = FieldValue::Struct(vec![
+            field("CTDA", ctda, None),
+            field("Bethkit Repeat Position", position, None),
+        ]);
+        let table = ConditionFunctionTable::new(
+            None,
+            None,
+            vec![bethkit_schema::ConditionFunction::new(
+                1,
+                "GetDistance",
+                "",
+                [0, 0, 0],
+                [false, false, false],
+            )],
+        );
+        let source =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+
+        // when
+        let summary = format_ctda_condition(
+            &value,
+            SchemaGame::SkyrimSe,
+            Some(&table),
+            Some(&TestFormLinkResolver),
+            source,
+        )?;
+
+        // then
+        assert_eq!(
+            summary,
+            "([00001234] Example Faction).GetDistance(7) > 1.25 AND"
+        );
+        assert!(format_ctda_condition(
+            &FieldValue::UInt(0),
+            SchemaGame::SkyrimSe,
+            Some(&table),
+            None,
+            source,
+        )
+        .is_err());
         Ok(())
     }
 
