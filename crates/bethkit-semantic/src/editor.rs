@@ -7305,6 +7305,145 @@ mod tests {
         Ok(())
     }
 
+    /// Reaches the materialized PERK embedded script through its repeat scope.
+    #[test]
+    fn editor_applies_perk_embedded_script_after_load_migration() -> Result<()> {
+        let effects_path = "PERK/6:Effects";
+        let effect_path = "PERK/6:Effects/repeat/0:Effect";
+        let parameters_path = "PERK/6:Effects/repeat/0:Effect/3:Entry Point Function Parameters";
+        let script_path =
+            "PERK/6:Effects/repeat/0:Effect/3:Entry Point Function Parameters/4:Embedded Script";
+        let header_path = format!("{script_path}/0:Basic Script Data");
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::FalloutNv;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.embedded_script_type".to_owned(),
+            minimum_version: 1,
+        }];
+        let header = SchemaNode {
+            id: SchemaNodeId(5),
+            path: header_path.clone(),
+            name: "Basic Script Data".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(*b"SCHR"),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(6),
+                    path: format!("{header_path}/payload"),
+                    name: "Basic Script Data".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: Some(20) },
+                    },
+                }),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"PERK"),
+                name: "Perk".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "PERK".to_owned(),
+                    name: "Perk".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: effects_path.to_owned(),
+                            name: "Effects".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Repeat {
+                                minimum: 0,
+                                maximum: None,
+                                child: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: effect_path.to_owned(),
+                                    name: "Effect".to_owned(),
+                                    required: false,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Sequence {
+                                        children: vec![SchemaNode {
+                                            id: SchemaNodeId(3),
+                                            path: parameters_path.to_owned(),
+                                            name: "Entry Point Function Parameters".to_owned(),
+                                            required: false,
+                                            conflict_priority: ConflictPriority::Normal,
+                                            condition: None,
+                                            kind: SchemaNodeKind::Sequence {
+                                                children: vec![SchemaNode {
+                                                    id: SchemaNodeId(4),
+                                                    path: script_path.to_owned(),
+                                                    name: "Embedded Script".to_owned(),
+                                                    required: false,
+                                                    conflict_priority: ConflictPriority::Normal,
+                                                    condition: None,
+                                                    kind: SchemaNodeKind::Sequence {
+                                                        children: vec![header],
+                                                    },
+                                                }],
+                                            },
+                                        }],
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: script_path.to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "78".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.embedded_script_type".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "anchor_path_suffix": "/0:Basic Script Data",
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut script_header = (0_u8..20).collect::<Vec<_>>();
+        script_header[16..18].copy_from_slice(&1_u16.to_le_bytes());
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"PERK"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"SCHR"),
+                data: script_header.clone(),
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(&writable.subrecords[0].data[..16], &script_header[..16]);
+        assert_eq!(&writable.subrecords[0].data[16..18], &0_u16.to_le_bytes());
+        assert_eq!(&writable.subrecords[0].data[18..], &script_header[18..]);
+        assert_eq!(source.subrecords()?[0].as_bytes(), script_header);
+        Ok(())
+    }
+
     fn test_manifest() -> SchemaManifest {
         SchemaManifest {
             format_version: PACKAGE_FORMAT_VERSION,

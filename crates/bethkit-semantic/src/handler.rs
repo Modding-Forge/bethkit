@@ -7700,6 +7700,31 @@ impl SemanticHandler for EmbeddedScriptAfterLoad {
                         .to_owned(),
             });
         }
+        if invocation.context.binding.callback_id != "def.after_load"
+            || !invocation
+                .context
+                .binding
+                .path
+                .ends_with(":Embedded Script")
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "embedded-script migration requires an Embedded Script load binding"
+                    .to_owned(),
+            });
+        }
+        let anchor_path_suffix = configured_text(
+            self.id(),
+            invocation.context.configuration,
+            "anchor_path_suffix",
+        )?;
+        if anchor_path_suffix != "/0:Basic Script Data" {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "embedded-script migration requires the materialized SCHR anchor"
+                    .to_owned(),
+            });
+        }
         let record = invocation
             .source_writable_record
             .ok_or_else(|| SemanticError::Handler {
