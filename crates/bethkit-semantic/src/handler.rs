@@ -12433,18 +12433,6 @@ fn require_legacy_perk_invocation<'a>(
     handler: &str,
     invocation: &'a HandlerInvocation<'_>,
 ) -> Result<(&'a WritableRecord, usize)> {
-    if invocation.context.record_signature != Signature(*b"PERK")
-        || !matches!(
-            invocation.context.game,
-            SchemaGame::Fallout3 | SchemaGame::FalloutNv
-        )
-    {
-        return Err(SemanticError::Handler {
-            handler: handler.to_owned(),
-            message: "legacy PERK callback requires a guarded Fallout 3 or New Vegas binding"
-                .to_owned(),
-        });
-    }
     let record = invocation
         .source_writable_record
         .ok_or_else(|| SemanticError::Handler {
@@ -12475,18 +12463,20 @@ fn legacy_perk_callback_i64(value: &FieldValue<'_>, handler: &str) -> Result<i64
 
 fn legacy_perk_effect_range(
     handler: &str,
+    configuration: &serde_json::Value,
     record: &WritableRecord,
     source_index: usize,
 ) -> Result<std::ops::Range<usize>> {
+    let header_signature = configured_signature(handler, configuration, "effect_header_signature")?;
     let start = (0..=source_index)
         .rev()
-        .find(|index| record.subrecords[*index].signature == Signature(*b"PRKE"))
+        .find(|index| record.subrecords[*index].signature == header_signature)
         .ok_or_else(|| SemanticError::Handler {
             handler: handler.to_owned(),
-            message: "legacy PERK callback has no preceding PRKE header".to_owned(),
+            message: "legacy PERK callback has no preceding effect header".to_owned(),
         })?;
     let end = (source_index.saturating_add(1)..record.subrecords.len())
-        .find(|index| record.subrecords[*index].signature == Signature(*b"PRKE"))
+        .find(|index| record.subrecords[*index].signature == header_signature)
         .unwrap_or(record.subrecords.len());
     Ok(start..end)
 }
@@ -12497,9 +12487,11 @@ fn legacy_perk_parameter_type(
     record: &WritableRecord,
     range: &std::ops::Range<usize>,
 ) -> Result<i64> {
+    let parameter_type_signature =
+        configured_signature(handler, configuration, "parameter_type_signature")?;
     let Some(subrecord) = record.subrecords[range.clone()]
         .iter()
-        .find(|subrecord| subrecord.signature == Signature(*b"EPFT"))
+        .find(|subrecord| subrecord.signature == parameter_type_signature)
     else {
         return Ok(0);
     };
@@ -12514,17 +12506,18 @@ fn legacy_perk_parameter_mutations(
     parameter_type: i64,
 ) -> Result<Vec<HandlerMutation>> {
     let mut mutations = Vec::new();
-    for (key, signature) in [
-        ("parameter_data_path", Signature(*b"EPFD")),
-        ("button_label_path", Signature(*b"EPF2")),
-        ("script_flags_path", Signature(*b"EPF3")),
+    for (path_key, signature_key) in [
+        ("parameter_data_path", "parameter_data_signature"),
+        ("button_label_path", "button_label_signature"),
+        ("script_flags_path", "script_flags_signature"),
     ] {
+        let signature = configured_signature(handler, configuration, signature_key)?;
         if record.subrecords[range.clone()]
             .iter()
             .any(|subrecord| subrecord.signature == signature)
         {
             mutations.push(HandlerMutation::Remove {
-                path: configured_text(handler, configuration, key)?.to_owned(),
+                path: configured_text(handler, configuration, path_key)?.to_owned(),
                 occurrence: 0,
             });
         }
@@ -12532,22 +12525,29 @@ fn legacy_perk_parameter_mutations(
     mutations.push(HandlerMutation::RemoveContainer {
         path: configured_text(handler, configuration, "embedded_script_path")?.to_owned(),
     });
-    match parameter_type {
-        1..=3 => mutations.push(HandlerMutation::InsertDefault {
+    let data_parameter_types = configured_u8_array(handler, configuration, "data_parameter_types")?;
+    let script_parameter_type = i64::from(configured_byte(
+        handler,
+        configuration,
+        "script_parameter_type",
+    )?);
+    if u8::try_from(parameter_type)
+        .ok()
+        .is_some_and(|value| data_parameter_types.contains(&value))
+    {
+        mutations.push(HandlerMutation::InsertDefault {
             path: configured_text(handler, configuration, "parameter_data_path")?.to_owned(),
-        }),
-        4 => {
-            for key in [
-                "button_label_path",
-                "script_flags_path",
-                "script_header_path",
-            ] {
-                mutations.push(HandlerMutation::InsertDefault {
-                    path: configured_text(handler, configuration, key)?.to_owned(),
-                });
-            }
+        });
+    } else if parameter_type == script_parameter_type {
+        for key in [
+            "button_label_path",
+            "script_flags_path",
+            "script_header_path",
+        ] {
+            mutations.push(HandlerMutation::InsertDefault {
+                path: configured_text(handler, configuration, key)?.to_owned(),
+            });
         }
-        _ => {}
     }
     Ok(mutations)
 }
@@ -12571,9 +12571,11 @@ fn legacy_perk_set_parameter_type(
     let old_parameter_type = legacy_perk_parameter_type(handler, configuration, record, range)?;
     let parameter_type_path =
         configured_text(handler, configuration, "parameter_type_path")?.to_owned();
+    let parameter_type_signature =
+        configured_signature(handler, configuration, "parameter_type_signature")?;
     let parameter_type_present = record.subrecords[range.clone()]
         .iter()
-        .any(|subrecord| subrecord.signature == Signature(*b"EPFT"));
+        .any(|subrecord| subrecord.signature == parameter_type_signature);
     let mut mutations = vec![if parameter_type_present {
         HandlerMutation::Set {
             path: parameter_type_path,
@@ -12588,7 +12590,12 @@ fn legacy_perk_set_parameter_type(
             value: OwnedFieldValue::Int(new_parameter_type),
         }
     }];
-    let force_rebuild = old_function != new_function && matches!(new_function, 4 | 5);
+    let force_rebuild_functions =
+        configured_u8_array(handler, configuration, "force_rebuild_functions")?;
+    let force_rebuild = old_function != new_function
+        && u8::try_from(new_function)
+            .ok()
+            .is_some_and(|function| force_rebuild_functions.contains(&function));
     if old_parameter_type != new_parameter_type || force_rebuild {
         mutations.extend(legacy_perk_parameter_mutations(
             handler,
@@ -12644,7 +12651,7 @@ impl SemanticHandler for LegacyPerkEntryPointAfterSet {
             return Ok(HandlerOutput::None);
         }
         let (record, source_index) = require_legacy_perk_invocation(self.id(), &invocation)?;
-        let range = legacy_perk_effect_range(self.id(), record, source_index)?;
+        let range = legacy_perk_effect_range(self.id(), configuration, record, source_index)?;
         let entry_conditions =
             configured_u8_array(self.id(), configuration, "entry_point_conditions")?;
         let entry_function_types =
@@ -12740,8 +12747,10 @@ impl SemanticHandler for LegacyPerkEntryPointAfterSet {
             })?),
         });
         let mut condition_indices = Vec::new();
+        let condition_index_signature =
+            configured_signature(self.id(), configuration, "condition_index_signature")?;
         for subrecord in &record.subrecords[range.clone()] {
-            if subrecord.signature == Signature(*b"PRKC") {
+            if subrecord.signature == condition_index_signature {
                 condition_indices.push(read_configured_integer(
                     configuration,
                     "condition_index",
@@ -12750,12 +12759,19 @@ impl SemanticHandler for LegacyPerkEntryPointAfterSet {
                 )?);
             }
         }
+        let conditional_slots =
+            configured_u8_matrix(self.id(), configuration, "conditional_condition_slots", 2)?;
         let condition_item_path = configured_text(self.id(), configuration, "condition_item_path")?;
         for (occurrence, condition_index) in condition_indices.iter().enumerate().rev() {
             let remove = usize::try_from(*condition_index).map_or(true, |index| {
                 index >= new_count
-                    || (index == 2 && old_slots[1] != new_slots[1])
-                    || (index == 3 && old_slots[2] != new_slots[2])
+                    || conditional_slots.iter().any(|mapping| {
+                        index == usize::from(mapping[0])
+                            && old_slots
+                                .get(usize::from(mapping[1]))
+                                .zip(new_slots.get(usize::from(mapping[1])))
+                                .is_none_or(|(old, new)| old != new)
+                    })
             });
             if remove {
                 mutations.push(HandlerMutation::RemoveContainerOccurrence {
@@ -12807,7 +12823,7 @@ impl SemanticHandler for LegacyPerkFunctionAfterSet {
             })
             .and_then(|value| legacy_perk_callback_i64(value, self.id()))?;
         let (record, source_index) = require_legacy_perk_invocation(self.id(), &invocation)?;
-        let range = legacy_perk_effect_range(self.id(), record, source_index)?;
+        let range = legacy_perk_effect_range(self.id(), configuration, record, source_index)?;
         let mutations = legacy_perk_set_parameter_type(
             self.id(),
             configuration,
@@ -12862,11 +12878,17 @@ impl SemanticHandler for LegacyPerkParameterTypeAfterSet {
                 message: "legacy PERK EPFT callback requires the previous value".to_owned(),
             })
             .and_then(|value| legacy_perk_callback_i64(value, self.id()))?;
-        if old_parameter_type == new_parameter_type || !(0..=4).contains(&new_parameter_type) {
+        let supported_parameter_types =
+            configured_u8_array(self.id(), configuration, "supported_parameter_types")?;
+        if old_parameter_type == new_parameter_type
+            || !u8::try_from(new_parameter_type)
+                .ok()
+                .is_some_and(|value| supported_parameter_types.contains(&value))
+        {
             return Ok(HandlerOutput::None);
         }
         let (record, source_index) = require_legacy_perk_invocation(self.id(), &invocation)?;
-        let range = legacy_perk_effect_range(self.id(), record, source_index)?;
+        let range = legacy_perk_effect_range(self.id(), configuration, record, source_index)?;
         Ok(HandlerOutput::Mutations(legacy_perk_parameter_mutations(
             self.id(),
             configuration,
@@ -23961,6 +23983,17 @@ mod tests {
                 "script_flags_path": script_flags_path,
                 "embedded_script_path": embedded_script_path,
                 "script_header_path": script_header_path,
+                "effect_header_signature": "HEAD",
+                "parameter_type_signature": "PTYP",
+                "parameter_data_signature": "PDAT",
+                "button_label_signature": "BUTN",
+                "script_flags_signature": "SFLG",
+                "condition_index_signature": "CNDX",
+                "supported_parameter_types": [0, 1, 2, 3, 4],
+                "data_parameter_types": [1, 2, 3],
+                "script_parameter_type": 4,
+                "force_rebuild_functions": [4, 5],
+                "conditional_condition_slots": [[2, 1], [3, 2]],
                 "callback_offset": 0,
                 "callback_width": 1,
                 "callback_signed": false,
@@ -24020,23 +24053,23 @@ mod tests {
             form_id: FormId::NULL,
             form_version: 0,
             subrecords: vec![
-                subrecord(Signature(*b"PRKE"), vec![2, 0, 0]),
+                subrecord(Signature(*b"HEAD"), vec![2, 0, 0]),
                 subrecord(Signature(*b"DATA"), vec![0, 1, 3]),
-                subrecord(Signature(*b"PRKC"), vec![0]),
+                subrecord(Signature(*b"CNDX"), vec![0]),
                 subrecord(Signature(*b"CTDA"), vec![0; 28]),
-                subrecord(Signature(*b"PRKC"), vec![1]),
+                subrecord(Signature(*b"CNDX"), vec![1]),
                 subrecord(Signature(*b"CTDA"), vec![0; 28]),
-                subrecord(Signature(*b"PRKC"), vec![2]),
+                subrecord(Signature(*b"CNDX"), vec![2]),
                 subrecord(Signature(*b"CTDA"), vec![0; 28]),
-                subrecord(Signature(*b"PRKC"), vec![3]),
+                subrecord(Signature(*b"CNDX"), vec![3]),
                 subrecord(Signature(*b"CTDA"), vec![0; 28]),
-                subrecord(Signature(*b"EPFT"), vec![1]),
-                subrecord(Signature(*b"EPFD"), vec![0; 4]),
+                subrecord(Signature(*b"PTYP"), vec![1]),
+                subrecord(Signature(*b"PDAT"), vec![0; 4]),
             ],
         };
         let handlers = SemanticHandlerRegistry::builtin();
         let context =
-            HandlerRecordContext::new(Signature(*b"PERK"), FormId::NULL, 0, SchemaGame::Fallout3);
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Morrowind);
         let output = handlers.invoke_with_records(
             &binding("edit.legacy_perk_entry_point", entry_path),
             context,
@@ -24177,14 +24210,14 @@ mod tests {
             form_id: FormId::NULL,
             form_version: 0,
             subrecords: vec![
-                subrecord(Signature(*b"PRKE"), vec![2, 0, 0]),
+                subrecord(Signature(*b"HEAD"), vec![2, 0, 0]),
                 subrecord(Signature(*b"DATA"), vec![21, 6, 2]),
-                subrecord(Signature(*b"EPFT"), vec![0]),
+                subrecord(Signature(*b"PTYP"), vec![0]),
             ],
         };
         let new_vegas_output = handlers.invoke_with_records(
             &new_vegas_binding,
-            HandlerRecordContext::new(Signature(*b"PERK"), FormId::NULL, 0, SchemaGame::FalloutNv),
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Morrowind),
             HandlerInvocationAccess::writable_subrecord_with_scope(&new_vegas_record, 1, None),
             HandlerPhase::AfterSet,
             Some(&FieldValue::Int(0)),
