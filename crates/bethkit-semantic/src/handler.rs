@@ -5790,6 +5790,11 @@ fn local_array_target_paths(
     handler: &str,
     context: &HandlerContext<'_>,
 ) -> Result<(String, String)> {
+    if let Some(array_path) =
+        configured_optional_text(handler, context.configuration, "target_path")?
+    {
+        return Ok((array_path.to_owned(), format!("{array_path}/element")));
+    }
     let source_container = configured_text(handler, context.configuration, "source_container")?;
     let target_segment = configured_text(handler, context.configuration, "target_segment")?;
     let components: Vec<&str> = context.binding.path.split('/').collect();
@@ -10171,6 +10176,55 @@ mod tests {
                     Some(&scope),
                 )?,
                 HandlerOutput::None
+            ));
+        }
+        for (path, configuration, array_path) in [
+            (
+                concat!(
+                    "ACTI/23:Navmesh Geometry/payload/9:Navmesh Grid/",
+                    "9:NavMesh Grid Arrays/element/element"
+                ),
+                serde_json::json!({
+                    "source_container": "Navmesh Grid",
+                    "target_segment": "3:Triangles"
+                }),
+                "ACTI/23:Navmesh Geometry/payload/3:Triangles",
+            ),
+            (
+                "NAVM/4:PreCut Map Entries/payload/element/1:Triangles/element",
+                serde_json::json!({
+                    "target_path": "NAVM/1:Navmesh Geometry/payload/3:Triangles"
+                }),
+                "NAVM/1:Navmesh Geometry/payload/3:Triangles",
+            ),
+        ] {
+            let mut binding = test_metadata_binding(
+                "value.links_to",
+                "resolve.local_array_element",
+                configuration,
+            );
+            binding.path = path.to_owned();
+            let scope = FieldValue::Struct(vec![crate::NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(2),
+                path: array_path.to_owned(),
+                effective_path: None,
+                name: "Triangles".to_owned(),
+                span: crate::ByteSpan { start: 0, end: 4 },
+                value: FieldValue::Array(vec![FieldValue::UInt(0)]),
+            }]);
+            assert!(matches!(
+                handlers.invoke_with_value_scope(
+                    &binding,
+                    source,
+                    HandlerPhase::ReferenceResolution,
+                    Some(&FieldValue::Int(0)),
+                    None,
+                    Some(&scope),
+                )?,
+                HandlerOutput::Link(SemanticLink::Element {
+                    path,
+                    array_indices,
+                }) if path == format!("{array_path}/element") && array_indices == vec![0]
             ));
         }
         Ok(())
