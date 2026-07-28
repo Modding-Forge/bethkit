@@ -5888,6 +5888,98 @@ mod tests {
         Ok(())
     }
 
+    /// Applies legacy EFSH ratio migration transactionally before decoding.
+    #[test]
+    fn editor_applies_legacy_effect_shader_after_load_migration() -> Result<()> {
+        let data_path = "EFSH/4:DATA";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::FalloutNv;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.legacy_effect_shader_birth_ratios".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"EFSH"),
+                name: "Effect Shader".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "EFSH".to_owned(),
+                    name: "Effect Shader".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: data_path.to_owned(),
+                            name: "DATA".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"DATA"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: format!("{data_path}/payload"),
+                                    name: "DATA".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Bytes { length: None },
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "EFSH".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "d0".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.legacy_effect_shader_birth_ratios".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "data_path": data_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut payload: Vec<u8> = (0_u16..140).map(|value| value as u8).collect();
+        payload[124..128].copy_from_slice(&1.0_f32.to_le_bytes());
+        payload[128..132].copy_from_slice(&2.0_f32.to_le_bytes());
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"EFSH"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 15,
+            subrecords: vec![WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: payload.clone(),
+            }],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        let mut expected = payload.clone();
+        expected[124..128].copy_from_slice(&78.0_f32.to_le_bytes());
+        assert_eq!(writable.subrecords[0].data, expected);
+        assert_eq!(source.subrecords()?[0].as_bytes(), payload);
+        Ok(())
+    }
+
     /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
     fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {

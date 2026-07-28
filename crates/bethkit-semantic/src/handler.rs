@@ -1177,6 +1177,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LightAfterLoad));
         registry.register(Arc::new(SkyrimCellAfterLoad));
         registry.register(Arc::new(FalloutCellAfterLoad));
+        registry.register(Arc::new(LegacyEffectShaderAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -8632,6 +8633,99 @@ fn required_cell_path<'a>(
         });
     }
     Ok(path)
+}
+
+struct LegacyEffectShaderAfterLoad;
+
+impl SemanticHandler for LegacyEffectShaderAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.legacy_effect_shader_birth_ratios"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"EFSH")
+            || invocation.context.binding.path != "EFSH"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout3 | SchemaGame::FalloutNv
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "effect-shader migration requires a guarded EFSH root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "effect-shader migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "effect-shader migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let data_path = invocation
+            .context
+            .configuration
+            .get("data_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "effect-shader migration requires data_path".to_owned(),
+            })?;
+        if !data_path.starts_with("EFSH/") {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "effect-shader DATA path must be inside EFSH".to_owned(),
+            });
+        }
+        let Some(data) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"DATA"))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let mut replacement = data.data.clone();
+        let mut changed = false;
+        for offset in [124_usize, 128] {
+            let Some(bytes) = replacement.get(offset..offset + 4) else {
+                continue;
+            };
+            let value = f32::from_le_bytes(
+                bytes
+                    .try_into()
+                    .expect("four-byte effect-shader slice was checked above"),
+            );
+            if value != 0.0 && value <= 1.0 {
+                replacement[offset..offset + 4].copy_from_slice(&(value * 78.0).to_le_bytes());
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(HandlerOutput::None);
+        }
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::ReplacePayload {
+                path: data_path.to_owned(),
+                occurrence: 0,
+                data: replacement,
+            },
+        ]))
+    }
 }
 
 struct RemoveOffsetDataAfterLoad {
@@ -16963,6 +17057,77 @@ mod tests {
                 SchemaGame::FalloutNv,
                 &record(RecordFlags::DELETED, vec![(*b"DATA", vec![0x02])])
             )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Scales only legacy EFSH particle birth ratios in xEdit's migration range.
+    #[test]
+    fn legacy_effect_shader_after_load_matches_xedit_ratio_migration() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "EFSH".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-legacy-efsh-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.legacy_effect_shader_birth_ratios".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "data_path": "EFSH/4:DATA",
+                    }),
+                },
+            },
+        };
+        let record = |payload: Vec<u8>| WritableRecord {
+            signature: Signature(*b"EFSH"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: payload,
+            }],
+        };
+        let invoke = |game, record: &WritableRecord| {
+            SemanticHandlerRegistry::builtin().invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(Signature(*b"EFSH"), FormId(0x1111), 0, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+        let mut payload: Vec<u8> = (0_u16..140).map(|value| value as u8).collect();
+        payload[124..128].copy_from_slice(&0.5_f32.to_le_bytes());
+        payload[128..132].copy_from_slice(&(-0.25_f32).to_le_bytes());
+
+        let output = invoke(SchemaGame::Fallout3, &record(payload.clone()))?;
+
+        let mut expected = payload;
+        expected[124..128].copy_from_slice(&39.0_f32.to_le_bytes());
+        expected[128..132].copy_from_slice(&(-19.5_f32).to_le_bytes());
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::ReplacePayload {
+                    path: "EFSH/4:DATA".to_owned(),
+                    occurrence: 0,
+                    data: expected,
+                }]
+        ));
+
+        let mut unchanged = vec![0_u8; 140];
+        unchanged[124..128].copy_from_slice(&0.0_f32.to_le_bytes());
+        unchanged[128..132].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(matches!(
+            invoke(SchemaGame::FalloutNv, &record(unchanged))?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(SchemaGame::Fallout3, &record(vec![0_u8; 128]))?,
             HandlerOutput::None
         ));
         Ok(())
