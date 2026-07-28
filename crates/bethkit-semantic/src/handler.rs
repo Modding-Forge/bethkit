@@ -2323,6 +2323,26 @@ fn configured_i64(handler: &str, configuration: &serde_json::Value, key: &str) -
         })
 }
 
+fn configured_u64(handler: &str, configuration: &serde_json::Value, key: &str) -> Result<u64> {
+    configuration
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("configuration key {key} is not an unsigned integer"),
+        })
+}
+
+fn configured_bool(handler: &str, configuration: &serde_json::Value, key: &str) -> Result<bool> {
+    configuration
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("configuration key {key} is not a boolean"),
+        })
+}
+
 fn configured_optional_digits(
     handler: &str,
     configuration: &serde_json::Value,
@@ -11860,6 +11880,14 @@ impl SemanticHandler for CtdaRunOnAfterSet {
         if invocation.phase != HandlerPhase::AfterSet {
             return Ok(HandlerOutput::None);
         }
+        let configuration = invocation.context.configuration;
+        let run_on_path = configured_text(self.id(), configuration, "run_on_path")?;
+        if run_on_path != invocation.context.binding.path {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "CTDA Run On configuration does not match its binding".to_owned(),
+            });
+        }
         let value = invocation.value.ok_or_else(|| SemanticError::Handler {
             handler: self.id().to_owned(),
             message: "CTDA Run On update requires a new integer value".to_owned(),
@@ -11869,22 +11897,22 @@ impl SemanticHandler for CtdaRunOnAfterSet {
             .old_value
             .map(|value| callback_integer(value, self.id()))
             .transpose()?;
-        if old_value == Some(new_value) || new_value == 2 {
+        let reference_run_on = i128::from(configured_u64(
+            self.id(),
+            configuration,
+            "reference_run_on",
+        )?);
+        if old_value == Some(new_value) || new_value == reference_run_on {
             return Ok(HandlerOutput::None);
         }
-        let parent = invocation
-            .context
-            .binding
-            .path
-            .strip_suffix("/7:Run On")
-            .ok_or_else(|| SemanticError::Handler {
-                handler: self.id().to_owned(),
-                message: "CTDA Run On binding has an unexpected schema path".to_owned(),
-            })?;
         Ok(HandlerOutput::Mutations(vec![HandlerMutation::Set {
-            path: format!("{parent}/8:Reference"),
+            path: configured_text(self.id(), configuration, "reference_path")?.to_owned(),
             occurrence: 0,
-            value: OwnedFieldValue::UInt(0),
+            value: OwnedFieldValue::UInt(configured_u64(
+                self.id(),
+                configuration,
+                "null_reference",
+            )?),
         }]))
     }
 }
@@ -11903,6 +11931,14 @@ impl SemanticHandler for CtdaTypeAfterSet {
     fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
         if invocation.phase != HandlerPhase::AfterSet {
             return Ok(HandlerOutput::None);
+        }
+        let configuration = invocation.context.configuration;
+        let type_path = configured_text(self.id(), configuration, "type_path")?;
+        if type_path != invocation.context.binding.path {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "CTDA Type configuration does not match its binding".to_owned(),
+            });
         }
         let new_value = u64::try_from(callback_integer(
             invocation.value.ok_or_else(|| SemanticError::Handler {
@@ -11929,37 +11965,42 @@ impl SemanticHandler for CtdaTypeAfterSet {
         if old_value == new_value {
             return Ok(HandlerOutput::None);
         }
-        let parent = invocation
-            .context
-            .binding
-            .path
-            .strip_suffix("/0:Type")
-            .ok_or_else(|| SemanticError::Handler {
-                handler: self.id().to_owned(),
-                message: "CTDA Type binding has an unexpected schema path".to_owned(),
-            })?;
         let mut mutations = Vec::new();
-        if (old_value & 0x04) != (new_value & 0x04) {
+        let global_value_mask = configured_u64(self.id(), configuration, "global_value_mask")?;
+        if (old_value & global_value_mask) != (new_value & global_value_mask) {
             mutations.push(HandlerMutation::Set {
-                path: format!("{parent}/2:Comparison Value"),
+                path: configured_text(self.id(), configuration, "comparison_path")?.to_owned(),
                 occurrence: 0,
-                value: OwnedFieldValue::UInt(0),
+                value: OwnedFieldValue::UInt(configured_u64(
+                    self.id(),
+                    configuration,
+                    "comparison_default",
+                )?),
             });
         }
-        if matches!(
-            invocation.context.game,
-            SchemaGame::Fallout3 | SchemaGame::FalloutNv
-        ) && new_value & 0x02 != 0
-        {
+        let legacy_use_global = configured_bool(self.id(), configuration, "legacy_use_global")?;
+        if legacy_use_global {
+            let legacy_mask = configured_u64(self.id(), configuration, "legacy_use_global_mask")?;
+            if new_value & legacy_mask == 0 {
+                return if mutations.is_empty() {
+                    Ok(HandlerOutput::None)
+                } else {
+                    Ok(HandlerOutput::Mutations(mutations))
+                };
+            }
             mutations.push(HandlerMutation::Set {
-                path: format!("{parent}/7:Run On"),
+                path: configured_text(self.id(), configuration, "run_on_path")?.to_owned(),
                 occurrence: 0,
-                value: OwnedFieldValue::UInt(1),
+                value: OwnedFieldValue::UInt(configured_u64(
+                    self.id(),
+                    configuration,
+                    "subject_run_on",
+                )?),
             });
             mutations.push(HandlerMutation::Set {
-                path: invocation.context.binding.path.clone(),
+                path: type_path.to_owned(),
                 occurrence: 0,
-                value: OwnedFieldValue::UInt(new_value & !0x02),
+                value: OwnedFieldValue::UInt(new_value & !legacy_mask),
             });
         }
         if mutations.is_empty() {
@@ -23502,7 +23543,12 @@ mod tests {
                 operation: bethkit_schema::BuiltInOperation {
                     id: "edit.ctda_run_on".to_owned(),
                     minimum_version: 1,
-                    configuration: serde_json::json!({}),
+                    configuration: serde_json::json!({
+                        "run_on_path": "TEST/0:CTDA/payload/7:Run On",
+                        "reference_path": "TEST/0:CTDA/payload/8:Reference",
+                        "reference_run_on": 2,
+                        "null_reference": 0
+                    }),
                 },
             },
         };
@@ -23559,7 +23605,7 @@ mod tests {
     /// Preserves the modern and legacy branches of xEdit's CTDA Type update.
     #[test]
     fn ctda_type_updates_global_and_legacy_run_on_state() -> Result<()> {
-        let binding = CallbackBinding {
+        let binding = |legacy_use_global| CallbackBinding {
             path: "TEST/0:CTDA/payload/0:Type".to_owned(),
             callback_id: "def.after_set".to_owned(),
             callback_slot: None,
@@ -23568,16 +23614,26 @@ mod tests {
                 operation: bethkit_schema::BuiltInOperation {
                     id: "edit.ctda_type".to_owned(),
                     minimum_version: 1,
-                    configuration: serde_json::json!({}),
+                    configuration: serde_json::json!({
+                        "type_path": "TEST/0:CTDA/payload/0:Type",
+                        "comparison_path": "TEST/0:CTDA/payload/2:Comparison Value",
+                        "global_value_mask": 4,
+                        "comparison_default": 0,
+                        "legacy_use_global": legacy_use_global,
+                        "run_on_path": "TEST/0:CTDA/payload/7:Run On",
+                        "legacy_use_global_mask": 2,
+                        "subject_run_on": 1
+                    }),
                 },
             },
         };
         let handlers = SemanticHandlerRegistry::builtin();
         let old = FieldValue::UInt(0);
         let modern = FieldValue::UInt(4);
+        let modern_binding = binding(false);
         let modern_output = handlers.invoke(
-            &binding,
-            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::SkyrimSe),
+            &modern_binding,
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Morrowind),
             HandlerPhase::AfterSet,
             Some(&modern),
             Some(&old),
@@ -23596,9 +23652,10 @@ mod tests {
         ));
 
         let legacy = FieldValue::UInt(6);
+        let legacy_binding = binding(true);
         let legacy_output = handlers.invoke(
-            &binding,
-            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Fallout3),
+            &legacy_binding,
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Morrowind),
             HandlerPhase::AfterSet,
             Some(&legacy),
             Some(&old),
