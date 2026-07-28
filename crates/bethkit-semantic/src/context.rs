@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use bethkit_core::{FormId, Record};
 use bethkit_schema::{
-    CallbackBinding, CallbackImplementation, ConflictPriority, PrimitiveType, SchemaNodeKind,
-    SchemaPackage, SchemaRegistry,
+    CallbackBinding, CallbackImplementation, ConflictPriority, PrimitiveType, SchemaGame,
+    SchemaNodeKind, SchemaPackage, SchemaRegistry, SchemaSignature,
 };
 
 use crate::{handler::HandlerInvocationAccess, value::handler_to_owned_value, OwnedFieldValue};
@@ -69,8 +69,8 @@ impl SemanticContext {
     /// # Errors
     ///
     /// Returns [`crate::SemanticError::MissingDecoder`] or
-    /// [`crate::SemanticError::MissingHandler`] when a package requirement
-    /// is unavailable or too old.
+    /// [`crate::SemanticError::MissingHandler`] when a package or generic xEdit runtime
+    /// requirement is unavailable or too old.
     pub fn new_with_handlers(
         package: Arc<SchemaPackage>,
         decoders: DecoderRegistry,
@@ -78,6 +78,14 @@ impl SemanticContext {
     ) -> Result<Self> {
         if let Some(table) = package.condition_function_table() {
             handlers.set_condition_function_table(Arc::new(table.clone()));
+        }
+        if package.manifest().game != SchemaGame::Morrowind
+            && package
+                .records()
+                .iter()
+                .any(|record| record.signature == SchemaSignature(*b"WRLD"))
+        {
+            handlers.require("migrate.remove_worldspace_offset_data", 1)?;
         }
         for requirement in &package.manifest().required_decoders {
             decoders.require(&requirement.id, requirement.minimum_version)?;
@@ -116,7 +124,25 @@ impl SemanticContext {
     /// Returns [`crate::SemanticError`] when the record subrecords cannot be
     /// parsed or its schema is unavailable.
     pub fn edit(&self, record: &Record, plugin_localized: bool) -> Result<RecordEditor> {
-        RecordEditor::new(self, record, plugin_localized)
+        RecordEditor::new(self, record, plugin_localized, None)
+    }
+
+    /// Creates a lossless semantic editor with the source file's zero-based load order.
+    ///
+    /// File-context callbacks such as Skyrim worldspace cleanup require this value when
+    /// their result depends on whether the source is the game master.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::SemanticError`] when the record subrecords cannot be parsed or its
+    /// schema is unavailable.
+    pub fn edit_with_source_file_load_order(
+        &self,
+        record: &Record,
+        plugin_localized: bool,
+        source_file_load_order: u32,
+    ) -> Result<RecordEditor> {
+        RecordEditor::new(self, record, plugin_localized, Some(source_file_load_order))
     }
 
     /// Returns the package registry.

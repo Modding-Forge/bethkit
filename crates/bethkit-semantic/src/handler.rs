@@ -229,6 +229,13 @@ pub enum HandlerMutation {
         /// Raw subrecord signature.
         signature: Signature,
     },
+    /// Remove the first raw subrecord with one signature before initial decoding.
+    RemoveFirstBySignature {
+        /// Stable record path that owns the raw subrecords.
+        path: String,
+        /// Raw subrecord signature.
+        signature: Signature,
+    },
     /// Make an integer counter match a decoded collection length.
     SynchronizeCount {
         /// Stable path of the counter subrecord.
@@ -969,6 +976,7 @@ pub struct SemanticHandlerRegistry {
     handlers: BTreeMap<String, Arc<dyn SemanticHandler>>,
     condition_function_table: Option<Arc<ConditionFunctionTable>>,
     form_link_resolver: Option<Arc<dyn FormLinkResolver>>,
+    remove_offset_data: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1167,7 +1175,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(DefaultObjectArrayAfterLoad));
         registry.register(Arc::new(SkyrimWeaponAfterLoad));
         registry.register(Arc::new(LightAfterLoad));
-        registry.register(Arc::new(RemoveOffsetDataAfterLoad { enabled: true }));
+        registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
@@ -1215,7 +1223,20 @@ impl SemanticHandlerRegistry {
     /// The default is `true`, matching xEdit. Setting this to `false` matches
     /// xEdit's `-dontremoveoffsetdata` command-line option.
     pub fn set_remove_offset_data(&mut self, enabled: bool) {
+        self.remove_offset_data = enabled;
         self.register(Arc::new(RemoveOffsetDataAfterLoad { enabled }));
+        self.register(Arc::new(RemoveWorldspaceOffsetDataAfterLoad { enabled }));
+        self.register(Arc::new(WorldspaceAfterLoad {
+            remove_offset_data: enabled,
+            source_file_load_order: None,
+        }));
+    }
+
+    pub(crate) fn set_worldspace_source_file_load_order(&mut self, load_order: u32) {
+        self.register(Arc::new(WorldspaceAfterLoad {
+            remove_offset_data: self.remove_offset_data,
+            source_file_load_order: Some(load_order),
+        }));
     }
 
     /// Installs the load-order resolver used by FormID-dependent summaries.
@@ -8449,11 +8470,184 @@ impl SemanticHandler for RemoveOffsetDataAfterLoad {
             return Ok(HandlerOutput::None);
         }
         Ok(HandlerOutput::Mutations(vec![
-            HandlerMutation::RemoveAllBySignature {
+            HandlerMutation::RemoveFirstBySignature {
                 path: "TES4".to_owned(),
                 signature: Signature(*b"OFST"),
             },
         ]))
+    }
+}
+
+struct RemoveWorldspaceOffsetDataAfterLoad {
+    enabled: bool,
+}
+
+impl SemanticHandler for RemoveWorldspaceOffsetDataAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.remove_worldspace_offset_data"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"WRLD")
+            || invocation.context.binding.path != "WRLD"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Oblivion
+                    | SchemaGame::Fallout3
+                    | SchemaGame::FalloutNv
+                    | SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+                    | SchemaGame::Starfield
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "worldspace offset cleanup requires a modern WRLD record".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "worldspace offset cleanup requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "worldspace offset cleanup requires a writable record".to_owned(),
+            })?;
+        if !self.enabled
+            || !record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == Signature(*b"OFST"))
+        {
+            return Ok(HandlerOutput::None);
+        }
+        Ok(HandlerOutput::Mutations(vec![
+            HandlerMutation::RemoveFirstBySignature {
+                path: "WRLD".to_owned(),
+                signature: Signature(*b"OFST"),
+            },
+        ]))
+    }
+}
+
+struct WorldspaceAfterLoad {
+    remove_offset_data: bool,
+    source_file_load_order: Option<u32>,
+}
+
+impl SemanticHandler for WorldspaceAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.worldspace_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"WRLD")
+            || invocation.context.binding.path != "WRLD"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+                    | SchemaGame::Starfield
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "worldspace migration requires a supported WRLD record".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "worldspace migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "worldspace migration requires a writable record".to_owned(),
+            })?;
+        let mut mutations = Vec::new();
+        let has_signature = |signature| {
+            record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == signature)
+        };
+        if self.remove_offset_data
+            && invocation.context.game == SchemaGame::Starfield
+            && has_signature(Signature(*b"OFST"))
+        {
+            mutations.push(HandlerMutation::RemoveFirstBySignature {
+                path: "WRLD".to_owned(),
+                signature: Signature(*b"OFST"),
+            });
+        }
+        if has_signature(Signature(*b"RNAM")) {
+            let remove_rnam = match invocation.context.game {
+                SchemaGame::SkyrimLe | SchemaGame::Fallout4 | SchemaGame::Fallout4Vr => true,
+                SchemaGame::SkyrimSe | SchemaGame::SkyrimVr => {
+                    self.source_file_load_order
+                        .ok_or_else(|| SemanticError::Handler {
+                            handler: self.id().to_owned(),
+                            message:
+                                "Skyrim large-reference cleanup requires the source-file load \
+                                  order"
+                                    .to_owned(),
+                        })?
+                        == 0
+                }
+                _ => false,
+            };
+            if remove_rnam {
+                mutations.push(HandlerMutation::RemoveFirstBySignature {
+                    path: "WRLD".to_owned(),
+                    signature: Signature(*b"RNAM"),
+                });
+            }
+        }
+        let remove_clsz = match invocation.context.game {
+            SchemaGame::Fallout4 | SchemaGame::Fallout4Vr => true,
+            SchemaGame::Starfield => self.remove_offset_data,
+            _ => false,
+        };
+        if remove_clsz && has_signature(Signature(*b"CLSZ")) {
+            mutations.push(HandlerMutation::RemoveFirstBySignature {
+                path: "WRLD".to_owned(),
+                signature: Signature(*b"CLSZ"),
+            });
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
     }
 }
 
@@ -16370,7 +16564,7 @@ mod tests {
             output,
             HandlerOutput::Mutations(mutations)
                 if mutations
-                    == [HandlerMutation::RemoveAllBySignature {
+                    == [HandlerMutation::RemoveFirstBySignature {
                         path: "TES4".to_owned(),
                         signature: Signature(*b"OFST"),
                     }]
@@ -16388,6 +16582,225 @@ mod tests {
                 None,
             )?,
             HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Removes the first generic WRLD OFST across every xEdit game that defines WRLD.
+    #[test]
+    fn worldspace_offset_data_after_load_matches_xedit_option() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "WRLD".to_owned(),
+            callback_id: "record.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-worldspace-offset-data".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.remove_worldspace_offset_data".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let record = WritableRecord {
+            signature: Signature(*b"WRLD"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"OFST"),
+                    data: vec![1],
+                },
+                bethkit_core::WritableSubRecord {
+                    signature: Signature(*b"OFST"),
+                    data: vec![2],
+                },
+            ],
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+
+        // when / then
+        for game in [
+            SchemaGame::Oblivion,
+            SchemaGame::Fallout3,
+            SchemaGame::FalloutNv,
+            SchemaGame::SkyrimLe,
+            SchemaGame::SkyrimSe,
+            SchemaGame::SkyrimVr,
+            SchemaGame::Fallout4,
+            SchemaGame::Fallout4Vr,
+            SchemaGame::Fallout76,
+            SchemaGame::Starfield,
+        ] {
+            let source = HandlerRecordContext::new(Signature(*b"WRLD"), FormId::NULL, 0, game);
+            assert!(matches!(
+                handlers.invoke_with_writable_record(
+                    &binding,
+                    source,
+                    &record,
+                    HandlerPhase::AfterLoad,
+                    None,
+                    None,
+                )?,
+                HandlerOutput::Mutations(mutations)
+                    if mutations == [HandlerMutation::RemoveFirstBySignature {
+                        path: "WRLD".to_owned(),
+                        signature: Signature(*b"OFST"),
+                    }]
+            ));
+        }
+        let mut disabled = SemanticHandlerRegistry::builtin();
+        disabled.set_remove_offset_data(false);
+        assert!(matches!(
+            disabled.invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(
+                    Signature(*b"WRLD"),
+                    FormId::NULL,
+                    0,
+                    SchemaGame::Fallout3,
+                ),
+                &record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Applies each WRLD cleanup with xEdit's game, option, and source-file conditions.
+    #[test]
+    fn worldspace_after_load_matches_xedit_cleanup() -> Result<()> {
+        fn invoke(
+            handlers: &SemanticHandlerRegistry,
+            game: SchemaGame,
+            source_file_load_order: Option<u32>,
+            signatures: &[[u8; 4]],
+        ) -> Result<HandlerOutput> {
+            let binding = CallbackBinding {
+                path: "WRLD".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "test-worldspace-after-load".to_owned(),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: bethkit_schema::BuiltInOperation {
+                        id: "migrate.worldspace_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            };
+            let record = WritableRecord {
+                signature: Signature(*b"WRLD"),
+                flags: RecordFlags::empty(),
+                form_id: FormId(0x3c),
+                form_version: 0,
+                subrecords: signatures
+                    .iter()
+                    .map(|signature| bethkit_core::WritableSubRecord {
+                        signature: Signature(*signature),
+                        data: vec![1],
+                    })
+                    .collect(),
+            };
+            let context = HandlerRecordContext::new(Signature(*b"WRLD"), FormId(0x3c), 0, game);
+            let mut handlers = handlers.clone();
+            if let Some(load_order) = source_file_load_order {
+                handlers.set_worldspace_source_file_load_order(load_order);
+            }
+            handlers.invoke_with_writable_record(
+                &binding,
+                context,
+                &record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        }
+
+        // given / when / then
+        let handlers = SemanticHandlerRegistry::builtin();
+        assert!(matches!(
+            invoke(
+                &handlers,
+                SchemaGame::Fallout4,
+                None,
+                &[*b"OFST", *b"RNAM", *b"CLSZ"]
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::RemoveFirstBySignature {
+                        path: "WRLD".to_owned(),
+                        signature: Signature(*b"RNAM"),
+                    },
+                    HandlerMutation::RemoveFirstBySignature {
+                        path: "WRLD".to_owned(),
+                        signature: Signature(*b"CLSZ"),
+                    },
+                ]
+        ));
+        assert!(matches!(
+            invoke(
+                &handlers,
+                SchemaGame::SkyrimSe,
+                Some(0),
+                &[*b"RNAM"]
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::RemoveFirstBySignature {
+                    path: "WRLD".to_owned(),
+                    signature: Signature(*b"RNAM"),
+                }]
+        ));
+        assert!(matches!(
+            invoke(&handlers, SchemaGame::SkyrimSe, Some(1), &[*b"RNAM"])?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(&handlers, SchemaGame::SkyrimSe, None, &[*b"RNAM"]),
+            Err(SemanticError::Handler { message, .. })
+                if message.contains("source-file load order")
+        ));
+        assert!(matches!(
+            invoke(
+                &handlers,
+                SchemaGame::Fallout76,
+                None,
+                &[*b"OFST", *b"RNAM", *b"CLSZ", *b"NAM0", *b"NAM9"]
+            )?,
+            HandlerOutput::None
+        ));
+        let mut disabled = SemanticHandlerRegistry::builtin();
+        disabled.set_remove_offset_data(false);
+        assert!(matches!(
+            invoke(
+                &disabled,
+                SchemaGame::Starfield,
+                None,
+                &[*b"OFST", *b"CLSZ"]
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                &handlers,
+                SchemaGame::Starfield,
+                None,
+                &[*b"OFST", *b"OFST", *b"CLSZ"]
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if mutations.len() == 2
+                    && mutations[0] == HandlerMutation::RemoveFirstBySignature {
+                        path: "WRLD".to_owned(),
+                        signature: Signature(*b"OFST"),
+                    }
+                    && mutations[1] == HandlerMutation::RemoveFirstBySignature {
+                        path: "WRLD".to_owned(),
+                        signature: Signature(*b"CLSZ"),
+                    }
         ));
         Ok(())
     }

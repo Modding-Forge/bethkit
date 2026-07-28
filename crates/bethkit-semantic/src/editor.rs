@@ -49,6 +49,7 @@ impl RecordEditor {
         context: &SemanticContext,
         record: &Record,
         plugin_localized: bool,
+        source_file_load_order: Option<u32>,
     ) -> Result<Self> {
         if context.registry().get(record.header.signature).is_none() {
             return Err(SemanticError::MissingRecordSchema(
@@ -63,10 +64,14 @@ impl RecordEditor {
                 data: subrecord.as_bytes().to_vec(),
             })
             .collect();
+        let mut handlers = context.handlers().clone();
+        if let Some(load_order) = source_file_load_order {
+            handlers.set_worldspace_source_file_load_order(load_order);
+        }
         let mut editor = Self {
             registry: context.registry().clone(),
             decoders: context.decoders().clone(),
-            handlers: context.handlers().clone(),
+            handlers,
             record: WritableRecord {
                 signature: record.header.signature,
                 flags: record.header.flags,
@@ -78,6 +83,7 @@ impl RecordEditor {
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
+        editor.apply_generic_after_load_callbacks()?;
         editor.apply_after_load_callbacks()?;
         let snapshot = Record::from_writable(&editor.record);
         editor.decoded_values = context
@@ -356,6 +362,34 @@ impl RecordEditor {
         self.after_load_migrations
     }
 
+    fn apply_generic_after_load_callbacks(&mut self) -> Result<()> {
+        if self.record.signature != Signature(*b"WRLD") {
+            return Ok(());
+        }
+        let binding = bethkit_schema::CallbackBinding {
+            path: "WRLD".to_owned(),
+            callback_id: "record.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "xedit-generic-worldspace-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.remove_worldspace_offset_data".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::Value::Null,
+                },
+            },
+        };
+        let output = self.handlers.invoke_with_records(
+            &binding,
+            self.handler_record(),
+            HandlerInvocationAccess::writable_with_scope(&self.record, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        self.apply_after_load_output(&binding, None, output)
+    }
+
     fn apply_after_load_callbacks(&mut self) -> Result<()> {
         let record_path = self.record.signature.to_string();
         let bindings = self
@@ -429,54 +463,60 @@ impl RecordEditor {
                     None,
                     None,
                 )?;
-                match output {
-                    HandlerOutput::None => {}
-                    HandlerOutput::SubrecordPayload(data) => {
-                        let Some(index) = target else {
-                            return Err(SemanticError::Handler {
-                                handler: binding.callback_id.clone(),
-                                message: "record-level after-load callback returned payload bytes"
-                                    .to_owned(),
-                            });
-                        };
-                        self.record.subrecords[index].data = data;
-                        self.after_load_migrations = self.after_load_migrations.saturating_add(1);
-                    }
-                    HandlerOutput::Mutations(mutations) => {
-                        if mutations.is_empty() {
-                            continue;
-                        }
-                        let mut updated = WritableRecord {
-                            signature: self.record.signature,
-                            flags: self.record.flags,
-                            form_id: self.record.form_id,
-                            form_version: self.record.form_version,
-                            subrecords: self
-                                .record
-                                .subrecords
-                                .iter()
-                                .map(|subrecord| WritableSubRecord {
-                                    signature: subrecord.signature,
-                                    data: subrecord.data.clone(),
-                                })
-                                .collect(),
-                        };
-                        let mut decoded_values = BTreeMap::new();
-                        self.apply_mutations_with_values(
-                            &mut updated,
-                            &mut decoded_values,
-                            mutations,
-                        )?;
-                        self.record = updated;
-                        self.after_load_migrations = self.after_load_migrations.saturating_add(1);
-                    }
-                    _ => {
-                        return Err(SemanticError::Handler {
-                            handler: binding.callback_id.clone(),
-                            message: "after-load callback returned an invalid result".to_owned(),
-                        });
-                    }
+                self.apply_after_load_output(&binding, target, output)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_after_load_output(
+        &mut self,
+        binding: &bethkit_schema::CallbackBinding,
+        target: Option<usize>,
+        output: HandlerOutput,
+    ) -> Result<()> {
+        match output {
+            HandlerOutput::None => {}
+            HandlerOutput::SubrecordPayload(data) => {
+                let Some(index) = target else {
+                    return Err(SemanticError::Handler {
+                        handler: binding.callback_id.clone(),
+                        message: "record-level after-load callback returned payload bytes"
+                            .to_owned(),
+                    });
+                };
+                self.record.subrecords[index].data = data;
+                self.after_load_migrations = self.after_load_migrations.saturating_add(1);
+            }
+            HandlerOutput::Mutations(mutations) => {
+                if mutations.is_empty() {
+                    return Ok(());
                 }
+                let mut updated = WritableRecord {
+                    signature: self.record.signature,
+                    flags: self.record.flags,
+                    form_id: self.record.form_id,
+                    form_version: self.record.form_version,
+                    subrecords: self
+                        .record
+                        .subrecords
+                        .iter()
+                        .map(|subrecord| WritableSubRecord {
+                            signature: subrecord.signature,
+                            data: subrecord.data.clone(),
+                        })
+                        .collect(),
+                };
+                let mut decoded_values = BTreeMap::new();
+                self.apply_mutations_with_values(&mut updated, &mut decoded_values, mutations)?;
+                self.record = updated;
+                self.after_load_migrations = self.after_load_migrations.saturating_add(1);
+            }
+            _ => {
+                return Err(SemanticError::Handler {
+                    handler: binding.callback_id.clone(),
+                    message: "after-load callback returned an invalid result".to_owned(),
+                });
             }
         }
         Ok(())
@@ -1962,6 +2002,23 @@ impl RecordEditor {
                         .subrecords
                         .retain(|subrecord| subrecord.signature != signature);
                 }
+                HandlerMutation::RemoveFirstBySignature { path, signature } => {
+                    if !decoded_values.is_empty() {
+                        return Err(SemanticError::Handler {
+                            handler: "def.after_load".to_owned(),
+                            message: format!(
+                                "raw signature removal for {path} must run before initial decoding"
+                            ),
+                        });
+                    }
+                    if let Some(index) = record
+                        .subrecords
+                        .iter()
+                        .position(|subrecord| subrecord.signature == signature)
+                    {
+                        record.subrecords.remove(index);
+                    }
+                }
                 HandlerMutation::SynchronizeCount {
                     path,
                     occurrence,
@@ -2187,6 +2244,10 @@ impl RecordEditor {
                 self.remove_all_in_scope(record, decoded_values, repeat_scope, &path)
             }
             HandlerMutation::RemoveAllBySignature { .. } => Err(SemanticError::Handler {
+                handler: "def.after_set".to_owned(),
+                message: "scoped callbacks cannot remove raw subrecords by signature".to_owned(),
+            }),
+            HandlerMutation::RemoveFirstBySignature { .. } => Err(SemanticError::Handler {
                 handler: "def.after_set".to_owned(),
                 message: "scoped callbacks cannot remove raw subrecords by signature".to_owned(),
             }),
@@ -2762,6 +2823,13 @@ impl RecordEditor {
                                 .to_owned(),
                         });
                     }
+                    HandlerMutation::RemoveFirstBySignature { .. } => {
+                        return Err(SemanticError::Handler {
+                            handler: "def.after_set".to_owned(),
+                            message: "scoped callbacks cannot remove raw subrecords by signature"
+                                .to_owned(),
+                        });
+                    }
                     HandlerMutation::SynchronizeCount {
                         path,
                         occurrence,
@@ -2978,6 +3046,7 @@ fn mutation_path(mutation: &HandlerMutation) -> &str {
         | HandlerMutation::Remove { path, .. }
         | HandlerMutation::RemoveAll { path }
         | HandlerMutation::RemoveAllBySignature { path, .. }
+        | HandlerMutation::RemoveFirstBySignature { path, .. }
         | HandlerMutation::SynchronizeCount { path, .. }
         | HandlerMutation::SynchronizePresence { path, .. } => path,
     }
@@ -5537,9 +5606,9 @@ mod tests {
         Ok(())
     }
 
-    /// Removes raw FO76 OFST subrecords that are intentionally absent from its schema.
+    /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
-    fn editor_removes_offset_data_by_signature_before_decoding() -> Result<()> {
+    fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {
         let mut manifest = test_manifest();
         manifest.game = SchemaGame::Fallout76;
         manifest.callbacks_total = 1;
@@ -5637,11 +5706,213 @@ mod tests {
         assert_eq!(source.subrecords()?.len(), 4);
         assert_eq!(editor.after_load_migration_count(), 1);
         let writable = editor.into_writable_record();
-        assert_eq!(writable.subrecords.len(), 2);
+        assert_eq!(writable.subrecords.len(), 3);
         assert_eq!(writable.subrecords[0].signature, Signature(*b"HEDR"));
         assert_eq!(writable.subrecords[0].data, header_data);
-        assert_eq!(writable.subrecords[1].signature, Signature(*b"CNAM"));
-        assert_eq!(writable.subrecords[1].data, author_data);
+        assert_eq!(writable.subrecords[1].signature, Signature(*b"OFST"));
+        assert_eq!(writable.subrecords[1].data, vec![4, 5]);
+        assert_eq!(writable.subrecords[2].signature, Signature(*b"CNAM"));
+        assert_eq!(writable.subrecords[2].data, author_data);
+        Ok(())
+    }
+
+    /// Supplies Skyrim WRLD cleanup with source-file context before initial decoding.
+    #[test]
+    fn editor_applies_worldspace_cleanup_with_source_file_load_order() -> Result<()> {
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::SkyrimSe;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.worldspace_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let subrecord = |id, path: &str, signature| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 10),
+                    path: format!("{path}/payload"),
+                    name: "Raw data".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: None },
+                    },
+                }),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"WRLD"),
+                name: "Worldspace".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "WRLD".to_owned(),
+                    name: "Worldspace".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(1, "WRLD/0:Editor ID", *b"EDID"),
+                            subrecord(2, "WRLD/1:Large References", *b"RNAM"),
+                            subrecord(3, "WRLD/2:Offset Data", *b"OFST"),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "WRLD".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "ee".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.worldspace_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            }],
+        )?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"WRLD"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x3c),
+            form_version: 44,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"EDID"),
+                    data: b"Tamriel\0".to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"RNAM"),
+                    data: vec![1, 2, 3, 4],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"OFST"),
+                    data: vec![5, 6, 7, 8],
+                },
+            ],
+        });
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+
+        // when / then
+        assert!(matches!(
+            context.edit(&source, false),
+            Err(SemanticError::Handler { message, .. })
+                if message.contains("source-file load order")
+        ));
+        let override_editor = context.edit_with_source_file_load_order(&source, false, 1)?;
+        let override_record = override_editor.into_writable_record();
+        assert_eq!(override_record.subrecords.len(), 2);
+        assert_eq!(override_record.subrecords[1].signature, Signature(*b"RNAM"));
+        let master_editor = context.edit_with_source_file_load_order(&source, false, 0)?;
+        assert_eq!(master_editor.after_load_migration_count(), 2);
+        let master_record = master_editor.into_writable_record();
+        assert_eq!(master_record.subrecords.len(), 1);
+        assert_eq!(master_record.subrecords[0].signature, Signature(*b"EDID"));
+        assert_eq!(source.subrecords()?.len(), 3);
+        Ok(())
+    }
+
+    /// Runs generic WRLD cleanup even when a game definition has no after-load callback.
+    #[test]
+    fn editor_applies_generic_worldspace_cleanup_without_definition_callback() -> Result<()> {
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout3;
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"WRLD"),
+                name: "Worldspace".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "WRLD".to_owned(),
+                    name: "Worldspace".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: "WRLD/0:Editor ID".to_owned(),
+                            name: "Editor ID".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"EDID"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: "WRLD/0:Editor ID/payload".to_owned(),
+                                    name: "Raw data".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Primitive {
+                                        primitive: PrimitiveType::Bytes { length: None },
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            Vec::new(),
+        )?;
+        let package = Arc::new(package);
+        assert!(matches!(
+            SemanticContext::new_with_handlers(
+                Arc::clone(&package),
+                crate::DecoderRegistry::builtin(),
+                SemanticHandlerRegistry::new(),
+            ),
+            Err(SemanticError::MissingHandler(handler))
+                if handler == "migrate.remove_worldspace_offset_data"
+        ));
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"WRLD"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x3c),
+            form_version: 0,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"EDID"),
+                    data: b"Wasteland\0".to_vec(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"OFST"),
+                    data: vec![1],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"OFST"),
+                    data: vec![2],
+                },
+            ],
+        });
+        let context = SemanticContext::new(package, crate::DecoderRegistry::builtin())?;
+
+        // when
+        let editor = context.edit(&source, false)?;
+
+        // then
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 2);
+        assert_eq!(writable.subrecords[0].signature, Signature(*b"EDID"));
+        assert_eq!(writable.subrecords[1].signature, Signature(*b"OFST"));
+        assert_eq!(writable.subrecords[1].data, vec![2]);
+        assert_eq!(source.subrecords()?.len(), 3);
         Ok(())
     }
 
