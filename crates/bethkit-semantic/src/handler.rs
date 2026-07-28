@@ -13596,7 +13596,7 @@ impl SemanticHandler for SynchronizeCountAfterSet {
         if invocation.phase != HandlerPhase::AfterSet {
             return Ok(HandlerOutput::None);
         }
-        let value = if let Some(FieldValue::Array(values)) = invocation.value {
+        let array_length = if let Some(FieldValue::Array(values)) = invocation.value {
             u64::try_from(values.len()).map_err(|_| SemanticError::Handler {
                 handler: self.id().to_owned(),
                 message: "array length exceeds u64".to_owned(),
@@ -13624,6 +13624,27 @@ impl SemanticHandler for SynchronizeCountAfterSet {
                 message: "counter synchronization requires an array value".to_owned(),
             });
         };
+        let multiplier = invocation
+            .context
+            .configuration
+            .get("multiplier")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: "counter multiplier must be a positive integer".to_owned(),
+                    })
+            })
+            .transpose()?
+            .unwrap_or(1);
+        let value = array_length
+            .checked_mul(multiplier)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "scaled array length exceeds u64".to_owned(),
+            })?;
         if invocation
             .context
             .configuration
@@ -25234,7 +25255,8 @@ mod tests {
                     configuration: serde_json::json!({
                         "counter_path": "TEST/0:IDLC/payload/0:Animation Count",
                         "counter_required": true,
-                        "counter_nested": true
+                        "counter_nested": true,
+                        "multiplier": 2
                     }),
                 },
             },
@@ -25259,7 +25281,7 @@ mod tests {
                     [HandlerMutation::Set {
                         path,
                         occurrence: 0,
-                        value: OwnedFieldValue::UInt(2),
+                        value: OwnedFieldValue::UInt(4),
                     }] if path == "TEST/0:IDLC/payload/0:Animation Count"
                 )
         ));
