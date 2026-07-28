@@ -6555,6 +6555,121 @@ mod tests {
         Ok(())
     }
 
+    /// Applies all legacy INFO cleanup mutations before initial decoding.
+    #[test]
+    fn editor_applies_legacy_info_after_load_migration() -> Result<()> {
+        let data_path = "INFO/0:DATA";
+        let unused_sound_path = "INFO/11:Unused";
+        let speech_challenge_path = "INFO/15:Speech Challenge";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout3;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.legacy_info_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let bytes_subrecord = |id, path: &str, name: &str, signature, required| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 1),
+                    path: format!("{path}/payload"),
+                    name: name.to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: None },
+                    },
+                }),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"INFO"),
+                name: "Dialog response".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "INFO".to_owned(),
+                    name: "Dialog response".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            bytes_subrecord(1, data_path, "DATA", *b"DATA", true),
+                            bytes_subrecord(3, unused_sound_path, "Unused", *b"SNDD", false),
+                            bytes_subrecord(
+                                5,
+                                speech_challenge_path,
+                                "Speech Challenge",
+                                *b"DNAM",
+                                false,
+                            ),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "INFO".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "d6".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.legacy_info_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "data_path": data_path,
+                            "unused_sound_path": unused_sound_path,
+                            "speech_challenge_path": speech_challenge_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"INFO"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 15,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"DATA"),
+                    data: vec![3, 9, 0, 7],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"SNDD"),
+                    data: vec![0xaa],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"DNAM"),
+                    data: vec![0xbb],
+                },
+            ],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 1);
+        assert_eq!(writable.subrecords[0].signature, Signature(*b"DATA"));
+        assert_eq!(writable.subrecords[0].data, vec![0, 9, 0, 7]);
+        assert_eq!(source.subrecords()?.len(), 3);
+        assert_eq!(source.subrecords()?[0].as_bytes(), &[3, 9, 0, 7]);
+        Ok(())
+    }
+
     /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
     fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {

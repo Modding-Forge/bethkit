@@ -1190,6 +1190,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(OblivionReferenceAfterLoad));
         registry.register(Arc::new(OblivionLeveledListAfterLoad));
         registry.register(Arc::new(LegacyNpcAfterLoad));
+        registry.register(Arc::new(LegacyInfoAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -9206,6 +9207,125 @@ impl SemanticHandler for LegacyNpcAfterLoad {
                 data,
             },
         ]))
+    }
+}
+
+struct LegacyInfoAfterLoad;
+
+impl SemanticHandler for LegacyInfoAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.legacy_info_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"INFO")
+            || invocation.context.binding.path != "INFO"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::Fallout3 | SchemaGame::FalloutNv
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy INFO migration requires a guarded INFO root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy INFO migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy INFO migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let (expected_unused_sound_path, expected_speech_challenge_path) =
+            match invocation.context.game {
+                SchemaGame::Fallout3 => ("INFO/11:Unused", "INFO/15:Speech Challenge"),
+                SchemaGame::FalloutNv => ("INFO/12:Unused", "INFO/16:Speech Challenge"),
+                _ => unreachable!("legacy INFO game guard was checked above"),
+            };
+        for (key, expected) in [
+            ("data_path", "INFO/0:DATA"),
+            ("unused_sound_path", expected_unused_sound_path),
+            ("speech_challenge_path", expected_speech_challenge_path),
+        ] {
+            let actual = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("legacy INFO migration requires {key}"),
+                })?;
+            if actual != expected {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "legacy INFO migration requires materialized {key} {expected}"
+                    ),
+                });
+            }
+        }
+
+        let data = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"DATA"));
+        let flags = data
+            .and_then(|subrecord| subrecord.data.get(2))
+            .copied()
+            .unwrap_or_default();
+        let mut mutations = Vec::new();
+        if flags & 0x80 == 0
+            && record
+                .subrecords
+                .iter()
+                .any(|subrecord| subrecord.signature == Signature(*b"DNAM"))
+        {
+            mutations.push(HandlerMutation::RemoveFirstBySignature {
+                path: "INFO".to_owned(),
+                signature: Signature(*b"DNAM"),
+            });
+        }
+        if record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"SNDD"))
+        {
+            mutations.push(HandlerMutation::RemoveFirstBySignature {
+                path: "INFO".to_owned(),
+                signature: Signature(*b"SNDD"),
+            });
+        }
+        if let Some(data) = data.filter(|subrecord| subrecord.data.first() == Some(&3)) {
+            let mut payload = data.data.clone();
+            payload[0] = 0;
+            mutations.push(HandlerMutation::ReplacePayload {
+                path: "INFO/0:DATA".to_owned(),
+                occurrence: 0,
+                data: payload,
+            });
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
     }
 }
 
@@ -18056,6 +18176,123 @@ mod tests {
                 SchemaGame::FalloutNv,
                 &record(RecordFlags::DELETED, 256_u16.to_le_bytes().to_vec()),
             )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Cleans legacy INFO fields and normalizes Persuasion to Topic.
+    #[test]
+    fn legacy_info_after_load_matches_xedit_cleanup() -> Result<()> {
+        let binding = |game| {
+            let (unused_sound_path, speech_challenge_path) = match game {
+                SchemaGame::Fallout3 => ("INFO/11:Unused", "INFO/15:Speech Challenge"),
+                SchemaGame::FalloutNv => ("INFO/12:Unused", "INFO/16:Speech Challenge"),
+                _ => panic!("test only supports legacy Fallout games"),
+            };
+            CallbackBinding {
+                path: "INFO".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "test-legacy-info-after-load".to_owned(),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: bethkit_schema::BuiltInOperation {
+                        id: "migrate.legacy_info_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "data_path": "INFO/0:DATA",
+                            "unused_sound_path": unused_sound_path,
+                            "speech_challenge_path": speech_challenge_path,
+                        }),
+                    },
+                },
+            }
+        };
+        let record = |flags, subrecords| WritableRecord {
+            signature: Signature(*b"INFO"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 0,
+            subrecords,
+        };
+        let subrecord = |signature, data| bethkit_core::WritableSubRecord {
+            signature: Signature(signature),
+            data,
+        };
+        let registry = SemanticHandlerRegistry::builtin();
+        let invoke = |game, binding: &CallbackBinding, record: &WritableRecord| {
+            registry.invoke_with_writable_record(
+                binding,
+                HandlerRecordContext::new(Signature(*b"INFO"), FormId(0x1111), 0, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+
+        let fallout_3_binding = binding(SchemaGame::Fallout3);
+        let fallout_3 = record(
+            RecordFlags::empty(),
+            vec![
+                subrecord(*b"DATA", vec![3, 9, 0, 7]),
+                subrecord(*b"DNAM", vec![1]),
+                subrecord(*b"DNAM", vec![2]),
+                subrecord(*b"SNDD", vec![3]),
+                subrecord(*b"SNDD", vec![4]),
+            ],
+        );
+        assert!(matches!(
+            invoke(SchemaGame::Fallout3, &fallout_3_binding, &fallout_3)?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::RemoveFirstBySignature {
+                        path: "INFO".to_owned(),
+                        signature: Signature(*b"DNAM"),
+                    },
+                    HandlerMutation::RemoveFirstBySignature {
+                        path: "INFO".to_owned(),
+                        signature: Signature(*b"SNDD"),
+                    },
+                    HandlerMutation::ReplacePayload {
+                        path: "INFO/0:DATA".to_owned(),
+                        occurrence: 0,
+                        data: vec![0, 9, 0, 7],
+                    },
+                ]
+        ));
+
+        let fallout_nv_binding = binding(SchemaGame::FalloutNv);
+        let fallout_nv = record(
+            RecordFlags::empty(),
+            vec![
+                subrecord(*b"DATA", vec![3, 9, 0x80, 7]),
+                subrecord(*b"DNAM", vec![1]),
+                subrecord(*b"SNDD", vec![2]),
+            ],
+        );
+        assert!(matches!(
+            invoke(SchemaGame::FalloutNv, &fallout_nv_binding, &fallout_nv)?,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::RemoveFirstBySignature {
+                        path: "INFO".to_owned(),
+                        signature: Signature(*b"SNDD"),
+                    },
+                    HandlerMutation::ReplacePayload {
+                        path: "INFO/0:DATA".to_owned(),
+                        occurrence: 0,
+                        data: vec![0, 9, 0x80, 7],
+                    },
+                ]
+        ));
+
+        let deleted = record(
+            RecordFlags::DELETED,
+            vec![subrecord(*b"DATA", vec![3, 0, 0, 0])],
+        );
+        assert!(matches!(
+            invoke(SchemaGame::FalloutNv, &fallout_nv_binding, &deleted)?,
             HandlerOutput::None
         ));
         Ok(())
