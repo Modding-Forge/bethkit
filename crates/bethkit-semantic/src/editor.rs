@@ -7080,6 +7080,152 @@ mod tests {
         Ok(())
     }
 
+    /// Clears every old leveled-entry Chance None byte before repeated decoding.
+    #[test]
+    fn editor_applies_fallout_leveled_list_after_load_migration() -> Result<()> {
+        let entries_path = "LVLI/7:Leveled List Entries";
+        let entry_scope_path = "LVLI/7:Leveled List Entries/repeat/0:Leveled List Entry";
+        let entry_path = concat!(
+            "LVLI/7:Leveled List Entries/repeat/0:Leveled List Entry/",
+            "0:Base Data"
+        );
+        let extra_path = concat!(
+            "LVLI/7:Leveled List Entries/repeat/0:Leveled List Entry/",
+            "1:Extra Data"
+        );
+        let subrecord = |id, path: &str, signature| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 100),
+                    path: format!("{path}/payload"),
+                    name: "Raw data".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: None },
+                    },
+                }),
+            },
+        };
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::Fallout4;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.fallout_leveled_list_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"LVLI"),
+                name: "Leveled Item".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "LVLI".to_owned(),
+                    name: "Leveled Item".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: entries_path.to_owned(),
+                            name: "Leveled List Entries".to_owned(),
+                            required: false,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Repeat {
+                                minimum: 0,
+                                maximum: None,
+                                child: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: entry_scope_path.to_owned(),
+                                    name: "Leveled List Entry".to_owned(),
+                                    required: false,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Sequence {
+                                        children: vec![
+                                            subrecord(3, entry_path, *b"LVLO"),
+                                            subrecord(4, extra_path, *b"COED"),
+                                        ],
+                                    },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "LVLI".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "de".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.fallout_leveled_list_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "entries_path": entries_path,
+                            "entry_path": entry_path,
+                            "chance_none_offset": 10,
+                            "modern_form_version": 69,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let mut first = (0_u8..14).collect::<Vec<_>>();
+        first[10] = 81;
+        let mut second = (20_u8..36).collect::<Vec<_>>();
+        second[10] = 92;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"LVLI"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 68,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"LVLO"),
+                    data: first.clone(),
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"COED"),
+                    data: vec![0xaa; 12],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"LVLO"),
+                    data: second.clone(),
+                },
+            ],
+        });
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(&writable.subrecords[0].data[..10], &first[..10]);
+        assert_eq!(writable.subrecords[0].data[10], 0);
+        assert_eq!(&writable.subrecords[0].data[11..], &first[11..]);
+        assert_eq!(writable.subrecords[1].data, vec![0xaa; 12]);
+        assert_eq!(&writable.subrecords[2].data[..10], &second[..10]);
+        assert_eq!(writable.subrecords[2].data[10], 0);
+        assert_eq!(&writable.subrecords[2].data[11..], &second[11..]);
+        assert_eq!(source.subrecords()?[0].as_bytes(), first);
+        assert_eq!(source.subrecords()?[2].as_bytes(), second);
+        Ok(())
+    }
+
     /// Rewrites only the legacy MGEF actor-value bytes before decoding.
     #[test]
     fn editor_applies_legacy_magic_effect_after_load_migration() -> Result<()> {

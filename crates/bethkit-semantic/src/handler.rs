@@ -1194,6 +1194,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacySoundAfterLoad));
         registry.register(Arc::new(LegacyWeaponAfterLoad));
         registry.register(Arc::new(LegacyPackageAfterLoad));
+        registry.register(Arc::new(FalloutLeveledListAfterLoad));
         registry.register(Arc::new(LegacyMagicEffectAfterLoad));
         registry.register(Arc::new(SkyrimReferenceAfterLoad));
         registry.register(Arc::new(FalloutSceneBehaviorAfterLoad));
@@ -9827,6 +9828,178 @@ fn push_package_insert(
             path: path.to_owned(),
             data,
         });
+    }
+}
+
+struct FalloutLeveledListAfterLoad;
+
+impl SemanticHandler for FalloutLeveledListAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.fallout_leveled_list_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        let root = invocation.context.record_signature.to_string();
+        let expected = match (invocation.context.game, invocation.context.record_signature) {
+            (SchemaGame::Fallout4 | SchemaGame::Fallout4Vr, Signature(signature))
+                if signature == *b"LVLN" =>
+            {
+                (
+                    "LVLN/7:Leveled List Entries",
+                    "LVLN/7:Leveled List Entries/repeat/0:Leveled List Entry/0:Base Data",
+                    Some(10_u64),
+                )
+            }
+            (SchemaGame::Fallout4 | SchemaGame::Fallout4Vr, Signature(signature))
+                if signature == *b"LVLI" =>
+            {
+                (
+                    "LVLI/7:Leveled List Entries",
+                    "LVLI/7:Leveled List Entries/repeat/0:Leveled List Entry/0:Base Data",
+                    Some(10_u64),
+                )
+            }
+            (SchemaGame::Fallout76, Signature(signature)) if signature == *b"LVLN" => (
+                "LVLN/12:Leveled List Entries",
+                "LVLN/12:Leveled List Entries/repeat/0:Leveled List Entry/0:LVLO",
+                Some(10_u64),
+            ),
+            (SchemaGame::Fallout76, Signature(signature)) if signature == *b"LVLI" => (
+                "LVLI/19:Leveled List Entries",
+                "LVLI/19:Leveled List Entries/repeat/0:Leveled List Entry/0:LVLO",
+                Some(10_u64),
+            ),
+            (SchemaGame::Fallout76, Signature(signature)) if signature == *b"LVLP" => (
+                "LVLP/7:Leveled List Entries",
+                "LVLP/7:Leveled List Entries/repeat/0:Leveled List Entry/0:Reference",
+                None,
+            ),
+            _ => {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "Fallout leveled-list migration requires a guarded record".to_owned(),
+                });
+            }
+        };
+        if invocation.context.binding.path != root {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout leveled-list migration requires a root binding".to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout leveled-list migration requires a record-level binding"
+                    .to_owned(),
+            });
+        }
+        let configured_path = |key: &str, expected_path: &str| -> Result<()> {
+            let actual = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("Fallout leveled-list migration requires {key}"),
+                })?;
+            if actual != expected_path {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "Fallout leveled-list migration requires materialized {key} \
+                         {expected_path}"
+                    ),
+                });
+            }
+            Ok(())
+        };
+        configured_path("entries_path", expected.0)?;
+        configured_path("entry_path", expected.1)?;
+        let modern_form_version = invocation
+            .context
+            .configuration
+            .get("modern_form_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout leveled-list migration requires modern_form_version".to_owned(),
+            })?;
+        if modern_form_version != 69 {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout leveled-list migration requires form-version boundary 69"
+                    .to_owned(),
+            });
+        }
+        let configured_offset = invocation
+            .context
+            .configuration
+            .get("chance_none_offset")
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout leveled-list migration requires chance_none_offset".to_owned(),
+            })?;
+        let offset_matches = match expected.2 {
+            Some(offset) => configured_offset.as_u64() == Some(offset),
+            None => configured_offset.is_null(),
+        };
+        if !offset_matches {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout leveled-list migration has a mismatched Chance None layout"
+                    .to_owned(),
+            });
+        }
+        if u64::from(invocation.context.form_version) >= modern_form_version {
+            return Ok(HandlerOutput::None);
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Fallout leveled-list migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(chance_none_offset) = expected.2.map(|offset| offset as usize) else {
+            return Ok(HandlerOutput::None);
+        };
+        let mut mutations = Vec::new();
+        let mut occurrence = 0;
+        for subrecord in &record.subrecords {
+            if subrecord.signature != Signature(*b"LVLO") {
+                continue;
+            }
+            let mut data = subrecord.data.clone();
+            let needs_extension = data.len() <= chance_none_offset;
+            if needs_extension {
+                data.resize(chance_none_offset + 1, 0);
+            }
+            if needs_extension || data[chance_none_offset] != 0 {
+                data[chance_none_offset] = 0;
+                mutations.push(HandlerMutation::ReplacePayload {
+                    path: expected.1.to_owned(),
+                    occurrence,
+                    data,
+                });
+            }
+            occurrence += 1;
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
     }
 }
 
@@ -19560,6 +19733,209 @@ mod tests {
             &record(4, Vec::new(), vec![subrecord(*b"PLD2", vec![0xaa; 12])]),
         )?)?;
         assert_eq!(late_location[0].0, "PACK/2:Locations/0:Location 1");
+        Ok(())
+    }
+
+    /// Clears old Fallout leveled-entry Chance None bytes below form version 69.
+    #[test]
+    fn fallout_leveled_list_after_load_matches_xedit_versioned_cleanup() -> Result<()> {
+        let cases = [
+            (
+                SchemaGame::Fallout4,
+                *b"LVLN",
+                "LVLN/7:Leveled List Entries",
+                "LVLN/7:Leveled List Entries/repeat/0:Leveled List Entry/0:Base Data",
+                Some(10_u64),
+            ),
+            (
+                SchemaGame::Fallout4Vr,
+                *b"LVLN",
+                "LVLN/7:Leveled List Entries",
+                "LVLN/7:Leveled List Entries/repeat/0:Leveled List Entry/0:Base Data",
+                Some(10_u64),
+            ),
+            (
+                SchemaGame::Fallout4,
+                *b"LVLI",
+                "LVLI/7:Leveled List Entries",
+                "LVLI/7:Leveled List Entries/repeat/0:Leveled List Entry/0:Base Data",
+                Some(10_u64),
+            ),
+            (
+                SchemaGame::Fallout4Vr,
+                *b"LVLI",
+                "LVLI/7:Leveled List Entries",
+                "LVLI/7:Leveled List Entries/repeat/0:Leveled List Entry/0:Base Data",
+                Some(10_u64),
+            ),
+            (
+                SchemaGame::Fallout76,
+                *b"LVLN",
+                "LVLN/12:Leveled List Entries",
+                "LVLN/12:Leveled List Entries/repeat/0:Leveled List Entry/0:LVLO",
+                Some(10_u64),
+            ),
+            (
+                SchemaGame::Fallout76,
+                *b"LVLI",
+                "LVLI/19:Leveled List Entries",
+                "LVLI/19:Leveled List Entries/repeat/0:Leveled List Entry/0:LVLO",
+                Some(10_u64),
+            ),
+            (
+                SchemaGame::Fallout76,
+                *b"LVLP",
+                "LVLP/7:Leveled List Entries",
+                "LVLP/7:Leveled List Entries/repeat/0:Leveled List Entry/0:Reference",
+                None,
+            ),
+        ];
+        let registry = SemanticHandlerRegistry::builtin();
+        for (game, signature, entries_path, entry_path, chance_none_offset) in cases {
+            let binding = CallbackBinding {
+                path: Signature(signature).to_string(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "test-fallout-leveled-list-after-load".to_owned(),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: bethkit_schema::BuiltInOperation {
+                        id: "migrate.fallout_leveled_list_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "entries_path": entries_path,
+                            "entry_path": entry_path,
+                            "chance_none_offset": chance_none_offset,
+                            "modern_form_version": 69,
+                        }),
+                    },
+                },
+            };
+            let mut changed = vec![0xaa; 14];
+            changed[10] = 73;
+            let unchanged = vec![0_u8; 12];
+            let record = |form_version, flags| WritableRecord {
+                signature: Signature(signature),
+                flags,
+                form_id: FormId(0x1111),
+                form_version,
+                subrecords: vec![
+                    bethkit_core::WritableSubRecord {
+                        signature: Signature(*b"LVLO"),
+                        data: changed.clone(),
+                    },
+                    bethkit_core::WritableSubRecord {
+                        signature: Signature(*b"COED"),
+                        data: vec![0xbb; 12],
+                    },
+                    bethkit_core::WritableSubRecord {
+                        signature: Signature(*b"LVLO"),
+                        data: unchanged.clone(),
+                    },
+                ],
+            };
+            let invoke = |record: &WritableRecord| {
+                registry.invoke_with_writable_record(
+                    &binding,
+                    HandlerRecordContext::new(
+                        Signature(signature),
+                        FormId(0x1111),
+                        record.form_version,
+                        game,
+                    ),
+                    record,
+                    HandlerPhase::AfterLoad,
+                    None,
+                    None,
+                )
+            };
+
+            if chance_none_offset.is_none() {
+                assert!(matches!(
+                    invoke(&record(68, RecordFlags::empty()))?,
+                    HandlerOutput::None
+                ));
+            } else {
+                let HandlerOutput::Mutations(mutations) =
+                    invoke(&record(68, RecordFlags::empty()))?
+                else {
+                    return Err(SemanticError::Handler {
+                        handler: "test".to_owned(),
+                        message: "Fallout leveled-list migration returned no mutation".to_owned(),
+                    });
+                };
+                assert!(matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::ReplacePayload {
+                        path,
+                        occurrence: 0,
+                        data,
+                    }] if path == entry_path
+                        && data.len() == changed.len()
+                        && data[..10] == changed[..10]
+                        && data[10] == 0
+                        && data[11..] == changed[11..]
+                ));
+            }
+            assert!(matches!(
+                invoke(&record(69, RecordFlags::empty()))?,
+                HandlerOutput::None
+            ));
+            assert!(matches!(
+                invoke(&record(68, RecordFlags::DELETED))?,
+                HandlerOutput::None
+            ));
+        }
+
+        let binding = CallbackBinding {
+            path: "LVLI".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-short-fallout-leveled-list".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.fallout_leveled_list_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "entries_path": "LVLI/7:Leveled List Entries",
+                        "entry_path":
+                            "LVLI/7:Leveled List Entries/repeat/0:Leveled List Entry/0:Base Data",
+                        "chance_none_offset": 10,
+                        "modern_form_version": 69,
+                    }),
+                },
+            },
+        };
+        let record = WritableRecord {
+            signature: Signature(*b"LVLI"),
+            flags: RecordFlags::empty(),
+            form_id: FormId(0x1111),
+            form_version: 68,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"LVLO"),
+                data: vec![0xcc; 8],
+            }],
+        };
+        assert!(matches!(
+            registry.invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(
+                    Signature(*b"LVLI"),
+                    FormId(0x1111),
+                    68,
+                    SchemaGame::Fallout4,
+                ),
+                &record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )?,
+            HandlerOutput::Mutations(mutations)
+                if matches!(
+                    mutations.as_slice(),
+                    [HandlerMutation::ReplacePayload { data, .. }]
+                        if data == &[0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0, 0, 0]
+                )
+        ));
         Ok(())
     }
 
