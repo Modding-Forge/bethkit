@@ -1192,6 +1192,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(LegacyNpcAfterLoad));
         registry.register(Arc::new(LegacyInfoAfterLoad));
         registry.register(Arc::new(LegacyMagicEffectAfterLoad));
+        registry.register(Arc::new(SkyrimReferenceAfterLoad));
         registry.set_remove_offset_data(true);
         registry.register(Arc::new(RegionPointOrderAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -9470,6 +9471,107 @@ fn legacy_magic_effect_actor_value(game: SchemaGame, archetype: u32) -> Option<i
         35 if game == SchemaGame::FalloutNv => Some(-1),
         36 if game == SchemaGame::FalloutNv => Some(51),
         _ => None,
+    }
+}
+
+struct SkyrimReferenceAfterLoad;
+
+impl SemanticHandler for SkyrimReferenceAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.skyrim_reference_after_load"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"REFR")
+            || invocation.context.binding.path != "REFR"
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::SkyrimLe | SchemaGame::SkyrimSe | SchemaGame::SkyrimVr
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Skyrim reference migration requires a guarded REFR root binding"
+                    .to_owned(),
+            });
+        }
+        if invocation.source_subrecord_index.is_some() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Skyrim reference migration requires a record-level binding".to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "Skyrim reference migration requires a writable record".to_owned(),
+            })?;
+        if record.flags.contains(RecordFlags::DELETED) || record.subrecords.is_empty() {
+            return Ok(HandlerOutput::None);
+        }
+        for (key, expected) in [
+            ("lock_path", "REFR/37:Lock Data"),
+            ("lock_level_path", "REFR/37:Lock Data/payload/0:Level"),
+            ("portal_path", "REFR/8:Room Portal (unused)"),
+        ] {
+            let actual = invocation
+                .context
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("Skyrim reference migration requires {key}"),
+                })?;
+            if actual != expected {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "Skyrim reference migration requires materialized {key} {expected}"
+                    ),
+                });
+            }
+        }
+        let Some(lock) = record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == Signature(*b"XLOC"))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let mut mutations = Vec::new();
+        if lock.data.first() == Some(&0) {
+            let mut payload = lock.data.clone();
+            payload[0] = 1;
+            mutations.push(HandlerMutation::ReplacePayload {
+                path: "REFR/37:Lock Data".to_owned(),
+                occurrence: 0,
+                data: payload,
+            });
+        }
+        if record
+            .subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == Signature(*b"XPTL"))
+        {
+            mutations.push(HandlerMutation::RemoveFirstBySignature {
+                path: "REFR".to_owned(),
+                signature: Signature(*b"XPTL"),
+            });
+        }
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
     }
 }
 
@@ -18557,6 +18659,111 @@ mod tests {
         ));
         assert!(matches!(
             invoke(SchemaGame::FalloutNv, &record(vec![0xaa; 71]))?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Normalizes Skyrim lock level zero and removes one obsolete room portal.
+    #[test]
+    fn skyrim_reference_after_load_matches_xedit_cleanup() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "REFR".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-skyrim-reference-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.skyrim_reference_after_load".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "lock_path": "REFR/37:Lock Data",
+                        "lock_level_path": "REFR/37:Lock Data/payload/0:Level",
+                        "portal_path": "REFR/8:Room Portal (unused)",
+                    }),
+                },
+            },
+        };
+        let subrecord = |signature, data| bethkit_core::WritableSubRecord {
+            signature: Signature(signature),
+            data,
+        };
+        let record = |flags, subrecords| WritableRecord {
+            signature: Signature(*b"REFR"),
+            flags,
+            form_id: FormId(0x1111),
+            form_version: 44,
+            subrecords,
+        };
+        let registry = SemanticHandlerRegistry::builtin();
+        let invoke = |game, record: &WritableRecord| {
+            registry.invoke_with_writable_record(
+                &binding,
+                HandlerRecordContext::new(Signature(*b"REFR"), FormId(0x1111), 44, game),
+                record,
+                HandlerPhase::AfterLoad,
+                None,
+                None,
+            )
+        };
+        let original = (0_u8..20).collect::<Vec<_>>();
+        let migrated = invoke(
+            SchemaGame::SkyrimSe,
+            &record(
+                RecordFlags::empty(),
+                vec![
+                    subrecord(*b"XPTL", vec![1]),
+                    subrecord(*b"XPTL", vec![2]),
+                    subrecord(*b"XLOC", original.clone()),
+                ],
+            ),
+        )?;
+        assert!(matches!(
+            migrated,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::ReplacePayload {
+                        path: "REFR/37:Lock Data".to_owned(),
+                        occurrence: 0,
+                        data: [vec![1], original[1..].to_vec()].concat(),
+                    },
+                    HandlerMutation::RemoveFirstBySignature {
+                        path: "REFR".to_owned(),
+                        signature: Signature(*b"XPTL"),
+                    },
+                ]
+        ));
+
+        let nonzero = invoke(
+            SchemaGame::SkyrimVr,
+            &record(
+                RecordFlags::empty(),
+                vec![subrecord(*b"XPTL", vec![1]), subrecord(*b"XLOC", vec![25])],
+            ),
+        )?;
+        assert!(matches!(
+            nonzero,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::RemoveFirstBySignature {
+                    path: "REFR".to_owned(),
+                    signature: Signature(*b"XPTL"),
+                }]
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::SkyrimLe,
+                &record(RecordFlags::empty(), vec![subrecord(*b"XPTL", vec![1])],),
+            )?,
+            HandlerOutput::None
+        ));
+        assert!(matches!(
+            invoke(
+                SchemaGame::SkyrimLe,
+                &record(
+                    RecordFlags::DELETED,
+                    vec![subrecord(*b"XPTL", vec![1]), subrecord(*b"XLOC", vec![0]),],
+                ),
+            )?,
             HandlerOutput::None
         ));
         Ok(())

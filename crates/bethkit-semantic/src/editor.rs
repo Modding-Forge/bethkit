@@ -6764,6 +6764,111 @@ mod tests {
         Ok(())
     }
 
+    /// Applies Skyrim REFR lock and portal cleanup before initial decoding.
+    #[test]
+    fn editor_applies_skyrim_reference_after_load_migration() -> Result<()> {
+        let portal_path = "REFR/8:Room Portal (unused)";
+        let lock_path = "REFR/37:Lock Data";
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::SkyrimSe;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.skyrim_reference_after_load".to_owned(),
+            minimum_version: 1,
+        }];
+        let bytes_subrecord = |id, path: &str, name: &str, signature| SchemaNode {
+            id: SchemaNodeId(id),
+            path: path.to_owned(),
+            name: name.to_owned(),
+            required: false,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: SchemaNodeId(id + 1),
+                    path: format!("{path}/payload"),
+                    name: name.to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: None },
+                    },
+                }),
+            },
+        };
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"REFR"),
+                name: "Placed Object".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "REFR".to_owned(),
+                    name: "Placed Object".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![
+                            bytes_subrecord(1, portal_path, "Room Portal (unused)", *b"XPTL"),
+                            bytes_subrecord(3, lock_path, "Lock Data", *b"XLOC"),
+                        ],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: "REFR".to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "d8".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.skyrim_reference_after_load".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({
+                            "lock_path": lock_path,
+                            "lock_level_path": "REFR/37:Lock Data/payload/0:Level",
+                            "portal_path": portal_path,
+                        }),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let lock = (0_u8..20).collect::<Vec<_>>();
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"REFR"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1111),
+            form_version: 44,
+            subrecords: vec![
+                WritableSubRecord {
+                    signature: Signature(*b"XPTL"),
+                    data: vec![0xaa],
+                },
+                WritableSubRecord {
+                    signature: Signature(*b"XLOC"),
+                    data: lock.clone(),
+                },
+            ],
+        });
+
+        let editor = context.edit(&source, false)?;
+
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords.len(), 1);
+        assert_eq!(writable.subrecords[0].signature, Signature(*b"XLOC"));
+        assert_eq!(writable.subrecords[0].data[0], 1);
+        assert_eq!(&writable.subrecords[0].data[1..], &lock[1..]);
+        assert_eq!(source.subrecords()?.len(), 2);
+        assert_eq!(source.subrecords()?[1].as_bytes(), lock);
+        Ok(())
+    }
+
     /// Removes the first raw FO76 OFST even when the signature is absent from its schema.
     #[test]
     fn editor_removes_first_offset_data_by_signature_before_decoding() -> Result<()> {
