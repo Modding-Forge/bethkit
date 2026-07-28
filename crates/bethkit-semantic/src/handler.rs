@@ -431,6 +431,15 @@ pub struct ResolvedNavmeshInfo {
     triangle_count: usize,
 }
 
+/// Starfield NPC face-entry collection selected through the effective race and gender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NpcFaceEntryKind {
+    /// Chargen face-dial entry keyed by its skin index.
+    FaceDial,
+    /// Chargen face-morph phenotype keyed by its morph index.
+    FaceMorphPhenotype,
+}
+
 impl ResolvedNavmeshInfo {
     /// Creates resolved navigation-mesh metadata.
     pub fn new(
@@ -818,6 +827,18 @@ pub trait FormLinkResolver: Send + Sync {
         None
     }
 
+    /// Resolves one Starfield NPC face entry through its effective race and gender.
+    ///
+    /// The default returns `None` for resolvers without NPC chargen metadata.
+    fn resolve_npc_face_entry(
+        &self,
+        _source: HandlerRecordContext,
+        _kind: NpcFaceEntryKind,
+        _index: i64,
+    ) -> Option<ResolvedElementInfo> {
+        None
+    }
+
     /// Resolves the effective quest context inherited by an INFO condition.
     ///
     /// The default returns `None` because resolving INFO parent groups requires
@@ -1009,6 +1030,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatCtdaStringParameter));
         registry.register(Arc::new(ResolveVmadObjectAliasLink { resolver: None }));
         registry.register(Arc::new(ResolveQuestAliasLink { resolver: None }));
+        registry.register(Arc::new(ResolveLegendaryFilterMod { resolver: None }));
+        registry.register(Arc::new(ResolveNpcFaceEntry { resolver: None }));
         registry.register(Arc::new(FormatLandscapePosition));
         registry.register(Arc::new(FormatClimateMoons));
         registry.register(Arc::new(FormatClimateTime));
@@ -1148,6 +1171,12 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(ResolveQuestAliasLink {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(ResolveLegendaryFilterMod {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(ResolveNpcFaceEntry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(SelectCoedOwner {
@@ -2439,6 +2468,14 @@ struct ResolveQuestAliasLink {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct ResolveLegendaryFilterMod {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+struct ResolveNpcFaceEntry {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 struct FormatCtdaQuestStage {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
@@ -2980,6 +3017,168 @@ impl SemanticHandler for ResolveQuestAliasLink {
             alias_index,
         }))
     }
+}
+
+impl SemanticHandler for ResolveLegendaryFilterMod {
+    fn id(&self) -> &'static str {
+        "resolve.legendary_filter_mod"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ReferenceResolution {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(filter_index) = invocation.array_indices.last().copied() else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(scope) = invocation.value_scope else {
+            return Ok(HandlerOutput::None);
+        };
+        let (filters_path, mods_path) =
+            legendary_filter_paths(self.id(), &invocation.context.binding.path)?;
+        let filter = scoped_array_element(scope, &filters_path, filter_index);
+        let Some(FieldValue::Struct(filter_fields)) = filter else {
+            return Ok(HandlerOutput::None);
+        };
+        let base_slot = condition_field(filter_fields, &["Star Slot"])
+            .map(|field| callback_integer(&field.value, self.id()))
+            .transpose()?;
+        let Some(base_slot) = base_slot else {
+            return Ok(HandlerOutput::None);
+        };
+        let mod_offset = callback_integer(
+            invocation.value.ok_or_else(|| {
+                indexed_record_error(self.id(), "legendary filter link requires an integer")
+            })?,
+            self.id(),
+        )?;
+        let Some(mod_offset) = usize::try_from(mod_offset).ok() else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(mods) = scoped_named_value(scope, &mods_path) else {
+            return Ok(HandlerOutput::None);
+        };
+        let FieldValue::Array(mod_values) = &mods.value else {
+            return Err(indexed_record_error(
+                self.id(),
+                "Legendary Mods target is not an array",
+            ));
+        };
+        let first = mod_values.iter().position(|value| {
+            let FieldValue::Struct(fields) = value else {
+                return false;
+            };
+            condition_field(fields, &["Star Slot"]).is_some_and(|field| {
+                callback_integer(&field.value, self.id()).ok() == Some(base_slot)
+            })
+        });
+        let Some(target) = first
+            .and_then(|first| first.checked_add(mod_offset))
+            .and_then(|index| mod_values.get(index))
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let FieldValue::Struct(fields) = target else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(form_id) = condition_field(fields, &["Legendary Modifier"])
+            .map(|field| callback_form_id(&field.value, self.id()))
+            .transpose()?
+        else {
+            return Ok(HandlerOutput::None);
+        };
+        let source = handler_record_context(&invocation.context);
+        if self
+            .resolver
+            .as_deref()
+            .and_then(|resolver| resolver.resolve_form_id(source, form_id, &[]))
+            .is_none()
+        {
+            return Ok(HandlerOutput::None);
+        }
+        Ok(HandlerOutput::Link(SemanticLink::Record { form_id }))
+    }
+}
+
+impl SemanticHandler for ResolveNpcFaceEntry {
+    fn id(&self) -> &'static str {
+        "resolve.npc_face_entry"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ReferenceResolution {
+            return Ok(HandlerOutput::None);
+        }
+        let index = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                indexed_record_error(self.id(), "NPC face entry requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| indexed_record_error(self.id(), "NPC face entry index exceeds i64"))?;
+        let kind = match configured_text(self.id(), invocation.context.configuration, "entry_kind")?
+        {
+            "face_dial" => NpcFaceEntryKind::FaceDial,
+            "face_morph_phenotype" => NpcFaceEntryKind::FaceMorphPhenotype,
+            value => {
+                return Err(indexed_record_error(
+                    self.id(),
+                    format!("unknown NPC face entry kind {value:?}"),
+                ));
+            }
+        };
+        let Some(entry) = self.resolver.as_deref().and_then(|resolver| {
+            resolver.resolve_npc_face_entry(
+                handler_record_context(&invocation.context),
+                kind,
+                index,
+            )
+        }) else {
+            return Ok(HandlerOutput::None);
+        };
+        Ok(HandlerOutput::Link(SemanticLink::ExternalElement {
+            record_form_id: entry.record_form_id(),
+            path: entry.path().to_owned(),
+            array_indices: entry.array_indices().to_vec(),
+        }))
+    }
+}
+
+fn legendary_filter_paths(handler: &str, path: &str) -> Result<(String, String)> {
+    let components: Vec<&str> = path.split('/').collect();
+    let Some(index) = components.iter().position(|component| {
+        component
+            .split_once(':')
+            .is_some_and(|(_, name)| matches!(name, "Include Filters" | "Exclude Filters"))
+    }) else {
+        return Err(indexed_record_error(
+            handler,
+            format!("legendary filter path has no filter array: {path:?}"),
+        ));
+    };
+    let filters = components[..=index].join("/");
+    let mut mods = components[..index].to_vec();
+    mods.push("11:Legendary Mods");
+    Ok((filters, mods.join("/")))
+}
+
+fn scoped_array_element<'a>(
+    scope: &'a FieldValue<'static>,
+    path: &str,
+    index: usize,
+) -> Option<&'a FieldValue<'static>> {
+    scoped_named_value(scope, path).and_then(|field| match &field.value {
+        FieldValue::Array(values) => values.get(index),
+        _ => None,
+    })
 }
 
 fn format_ctda_quest_stage(
@@ -9679,6 +9878,33 @@ mod tests {
             })
         }
 
+        fn resolve_npc_face_entry(
+            &self,
+            _source: HandlerRecordContext,
+            kind: NpcFaceEntryKind,
+            index: i64,
+        ) -> Option<ResolvedElementInfo> {
+            (index == 7).then(|| {
+                let (path, summary) = match kind {
+                    NpcFaceEntryKind::FaceDial => (
+                        "RACE/Chargen and Skintones/Male/Chargen/Face Dials/element",
+                        "007 Jaw Width",
+                    ),
+                    NpcFaceEntryKind::FaceMorphPhenotype => (
+                        "RACE/Chargen and Skintones/Male/Chargen/Face Morph Phenotypes/element",
+                        "007 Athletic",
+                    ),
+                };
+                ResolvedElementInfo::new(
+                    FormId(0x2468),
+                    path,
+                    vec![3],
+                    summary,
+                    "Example Race [RACE:00002468]",
+                )
+            })
+        }
+
         fn resolve_condition_quest_form_id(
             &self,
             _source: HandlerRecordContext,
@@ -11421,6 +11647,147 @@ mod tests {
             )?,
             HandlerOutput::None
         ));
+        Ok(())
+    }
+
+    /// Resolves Fallout 76 legendary-filter offsets through their base star slot.
+    #[test]
+    fn legendary_filter_link_handler_matches_xedit() -> TestResult {
+        // given
+        let filters_path = "LGDI/12:Include Filters";
+        let mods_path = "LGDI/11:Legendary Mods";
+        let named = |path: &str, name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: path.to_owned(),
+            effective_path: None,
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let filter = |slot| {
+            FieldValue::Struct(vec![named(
+                &format!("{filters_path}/element/0:Star Slot"),
+                "Star Slot",
+                FieldValue::UInt(slot),
+            )])
+        };
+        let legendary_mod = |slot, form_id| {
+            FieldValue::Struct(vec![
+                named(
+                    &format!("{mods_path}/element/0:Star Slot"),
+                    "Star Slot",
+                    FieldValue::UInt(slot),
+                ),
+                named(
+                    &format!("{mods_path}/element/1:Legendary Modifier"),
+                    "Legendary Modifier",
+                    FieldValue::FormId {
+                        value: FormId(form_id),
+                        targets: Vec::new(),
+                    },
+                ),
+            ])
+        };
+        let scope = FieldValue::Struct(vec![
+            named(
+                filters_path,
+                "Include Filters",
+                FieldValue::Array(vec![filter(1), filter(2)]),
+            ),
+            named(
+                mods_path,
+                "Legendary Mods",
+                FieldValue::Array(vec![
+                    legendary_mod(1, 0x9999),
+                    legendary_mod(2, 0x9999),
+                    legendary_mod(3, 0x1234),
+                ]),
+            ),
+        ]);
+        let mut binding = test_metadata_binding(
+            "value.links_to",
+            "resolve.legendary_filter_mod",
+            serde_json::json!({}),
+        );
+        binding.path = format!("{filters_path}/element/1:Referenced Mod");
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source = HandlerRecordContext::new(
+            Signature(*b"LGDI"),
+            FormId(0x5678),
+            0,
+            SchemaGame::Fallout76,
+        );
+        let offset = FieldValue::UInt(1);
+        let filter_index = [1];
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &binding,
+                source,
+                HandlerInvocationAccess {
+                    source: HandlerRecordSource::None,
+                    value_scope: Some(&scope),
+                    source_subrecord_index: None,
+                    array_indices: &filter_index,
+                },
+                HandlerPhase::ReferenceResolution,
+                Some(&offset),
+                None,
+            )?,
+            HandlerOutput::Link(SemanticLink::Record {
+                form_id: FormId(0x1234),
+            })
+        ));
+        Ok(())
+    }
+
+    /// Resolves Starfield NPC face indexes through effective race metadata.
+    #[test]
+    fn npc_face_entry_link_handler_matches_xedit() -> TestResult {
+        // given
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source = HandlerRecordContext::new(
+            Signature(*b"NPC_"),
+            FormId(0x5678),
+            0,
+            SchemaGame::Starfield,
+        );
+        let index = FieldValue::UInt(7);
+
+        // when / then
+        for (entry_kind, expected_path) in [
+            (
+                "face_dial",
+                "RACE/Chargen and Skintones/Male/Chargen/Face Dials/element",
+            ),
+            (
+                "face_morph_phenotype",
+                "RACE/Chargen and Skintones/Male/Chargen/Face Morph Phenotypes/element",
+            ),
+        ] {
+            let binding = test_metadata_binding(
+                "value.links_to",
+                "resolve.npc_face_entry",
+                serde_json::json!({ "entry_kind": entry_kind }),
+            );
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    source,
+                    HandlerPhase::ReferenceResolution,
+                    Some(&index),
+                    None,
+                )?,
+                HandlerOutput::Link(SemanticLink::ExternalElement {
+                    record_form_id: FormId(0x2468),
+                    path,
+                    array_indices,
+                }) if path == expected_path && array_indices == vec![3]
+            ));
+        }
         Ok(())
     }
 

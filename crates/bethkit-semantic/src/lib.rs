@@ -28,8 +28,8 @@ pub use error::{Result, SemanticError};
 pub use handler::{
     FormLinkInfo, FormLinkResolver, HandlerContext, HandlerInvocation, HandlerMutation,
     HandlerOutput, HandlerPhase, HandlerRecordContext, HandlerSubrecordSource, IndexedRecordInfo,
-    NextObjectIdResolver, QuestAliasInfo, QuestObjectiveInfo, QuestStageInfo, RecordGridCell,
-    RecordIndexKey, RecordIndexKeyValue, ResolvedElementInfo, ResolvedNavmeshInfo,
+    NextObjectIdResolver, NpcFaceEntryKind, QuestAliasInfo, QuestObjectiveInfo, QuestStageInfo,
+    RecordGridCell, RecordIndexKey, RecordIndexKeyValue, ResolvedElementInfo, ResolvedNavmeshInfo,
     ResourceHashResolver, ScriptVariableInfo, ScriptVariableMetadata, SemanticHandler,
     SemanticHandlerRegistry, SemanticLink, ValueFormat, WwiseGuidInfo, WwiseGuidResolver,
 };
