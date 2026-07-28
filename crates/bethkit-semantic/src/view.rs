@@ -432,6 +432,57 @@ impl<'context, 'record> RecordView<'context, 'record> {
         Ok(occurrences.into_values().map(FieldValue::Struct).collect())
     }
 
+    /// Formats one field inside a selected homogeneous array element.
+    ///
+    /// This supplies the selected array position and the complete decoded record context
+    /// required by callbacks such as NAVM edge presentation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the array, element, or field does not exist,
+    /// structural decoding fails, or the bound formatter rejects the value.
+    pub fn format_array_element_field_as(
+        &self,
+        array_path: &str,
+        index: usize,
+        field_path: &str,
+        format: ValueFormat,
+    ) -> Result<Option<String>> {
+        let scope = self.structural_callback_scope()?;
+        let field = array_element_field(&scope, array_path, index, field_path)?;
+        self.context.format_value_as_in_scope_with_array_indices(
+            self.record,
+            field_path,
+            &field.value,
+            &scope,
+            &[index],
+            format,
+        )
+    }
+
+    /// Resolves one linked field inside a selected homogeneous array element.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the array, element, or field does not exist,
+    /// structural decoding fails, or the bound link handler rejects the value.
+    pub fn resolve_array_element_field_link(
+        &self,
+        array_path: &str,
+        index: usize,
+        field_path: &str,
+    ) -> Result<Option<SemanticLink>> {
+        let scope = self.structural_callback_scope()?;
+        let field = array_element_field(&scope, array_path, index, field_path)?;
+        self.context.resolve_link_in_scope_with_array_indices(
+            self.record,
+            field_path,
+            &field.value,
+            &scope,
+            &[index],
+        )
+    }
+
     /// Formats one occurrence of a repeated structural callback site.
     ///
     /// `None` means that no executable value transform is bound to `path`.
@@ -1356,6 +1407,32 @@ impl<'context, 'record> RecordView<'context, 'record> {
     }
 }
 
+fn array_element_field<'value, 'record>(
+    scope: &'value FieldValue<'record>,
+    array_path: &str,
+    index: usize,
+    field_path: &str,
+) -> Result<&'value NamedValue<'record>> {
+    let array = find_named_value(scope, array_path).ok_or_else(|| SemanticError::Decode {
+        path: array_path.to_owned(),
+        message: "array does not exist in the decoded record".to_owned(),
+    })?;
+    let FieldValue::Array(elements) = &array.value else {
+        return Err(SemanticError::Decode {
+            path: array_path.to_owned(),
+            message: "selected path is not an array".to_owned(),
+        });
+    };
+    let element = elements.get(index).ok_or_else(|| SemanticError::Decode {
+        path: array_path.to_owned(),
+        message: format!("array element {index} does not exist"),
+    })?;
+    find_named_value(element, field_path).ok_or_else(|| SemanticError::Decode {
+        path: field_path.to_owned(),
+        message: "field does not exist in the selected array element".to_owned(),
+    })
+}
+
 fn top_level_subrecords(root: &SchemaNode) -> Vec<&SchemaNode> {
     fn collect<'a>(node: &'a SchemaNode, output: &mut Vec<&'a SchemaNode>) {
         match &node.kind {
@@ -2162,6 +2239,39 @@ mod tests {
                     vec![3],
                     "[7] Second Node",
                     "Second Template [STMP:00005678]",
+                )
+            })
+        }
+    }
+
+    struct TestNavmeshResolver;
+
+    impl crate::FormLinkResolver for TestNavmeshResolver {
+        fn resolve_form_id(
+            &self,
+            _source: crate::HandlerRecordContext,
+            _form_id: bethkit_core::FormId,
+            _targets: &[bethkit_core::Signature],
+        ) -> Option<crate::FormLinkInfo> {
+            None
+        }
+
+        fn source_load_order_form_id(&self, _source: crate::HandlerRecordContext) -> Option<u32> {
+            Some(0x0100_1234)
+        }
+
+        fn resolve_navmesh(
+            &self,
+            _source: crate::HandlerRecordContext,
+            form_id: bethkit_core::FormId,
+        ) -> Option<crate::ResolvedNavmeshInfo> {
+            (form_id == bethkit_core::FormId(0x2468)).then(|| {
+                crate::ResolvedNavmeshInfo::new(
+                    form_id,
+                    0x0200_2468,
+                    "Target Navmesh [NAVM:02002468]",
+                    "NAVM/0:Navigation Mesh/payload/3:Triangles",
+                    4,
                 )
             })
         }
@@ -3971,6 +4081,228 @@ mod tests {
                 path,
                 array_indices,
             }) if path == "STMP/2:Nodes/payload/element" && array_indices == vec![3]
+        ));
+        Ok(())
+    }
+
+    /// Routes selected triangle positions through navigation-mesh edge callbacks.
+    #[test]
+    fn array_element_edge_callbacks_receive_selected_triangle_index(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let payload_path = "NAVM/0:Navigation Mesh/payload";
+        let triangles_path = format!("{payload_path}/3:Triangles");
+        let edge_path = format!("{triangles_path}/element/3:Edge 0-1");
+        let edge_links_path = format!("{payload_path}/4:Edge Links");
+        let integer = |width: u8, signed: bool| PrimitiveType::Integer {
+            integer: IntegerType {
+                width,
+                signed,
+                byte_order: ByteOrder::LittleEndian,
+            },
+        };
+        let primitive = |id: u32, path: String, name: &str, value: PrimitiveType| SchemaNode {
+            id: bethkit_schema::SchemaNodeId(id),
+            path,
+            name: name.to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive { primitive: value },
+        };
+        let triangle = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(4),
+            path: format!("{triangles_path}/element"),
+            name: "Triangle".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    primitive(
+                        5,
+                        format!("{triangles_path}/element/0:Flags"),
+                        "Flags",
+                        integer(2, false),
+                    ),
+                    primitive(6, edge_path.clone(), "Edge 0-1", integer(2, true)),
+                ],
+            },
+        };
+        let edge_link = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(8),
+            path: format!("{edge_links_path}/element"),
+            name: "Edge Link".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    primitive(
+                        9,
+                        format!("{edge_links_path}/element/1:Mesh"),
+                        "Mesh",
+                        PrimitiveType::FormId {
+                            targets: vec![SchemaSignature(*b"NAVM")],
+                        },
+                    ),
+                    primitive(
+                        10,
+                        format!("{edge_links_path}/element/2:Triangle Index"),
+                        "Triangle Index",
+                        integer(2, false),
+                    ),
+                ],
+            },
+        };
+        let payload = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(2),
+            path: payload_path.to_owned(),
+            name: "Navigation Mesh".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(3),
+                        path: triangles_path.clone(),
+                        name: "Triangles".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Array {
+                            element: Box::new(triangle),
+                            count: ArrayCount::Fixed { count: 2 },
+                        },
+                    },
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(7),
+                        path: edge_links_path,
+                        name: "Edge Links".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Array {
+                            element: Box::new(edge_link),
+                            count: ArrayCount::Fixed { count: 1 },
+                        },
+                    },
+                ],
+            },
+        };
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "NAVM".to_owned(),
+            name: "Navigation Mesh".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(1),
+                    path: "NAVM/0:Navigation Mesh".to_owned(),
+                    name: "Navigation Mesh".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Subrecord {
+                        signature: SchemaSignature(*b"NVNM"),
+                        payload: Box::new(payload),
+                    },
+                }],
+            },
+        };
+        let bindings = [
+            ("integer.formatter", "format.navmesh_edge"),
+            ("value.links_to", "resolve.navmesh_edge"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (callback_id, handler))| CallbackBinding {
+            path: edge_path.clone(),
+            callback_id: callback_id.to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: format!("{index:064x}"),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: BuiltInOperation {
+                    id: handler.to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        })
+        .collect();
+        let mut manifest = test_manifest();
+        manifest.game = bethkit_schema::SchemaGame::Fallout4;
+        manifest.callbacks_total = 2;
+        manifest.callbacks_classified = 2;
+        manifest.required_handlers = vec![
+            HandlerRequirement {
+                id: "format.navmesh_edge".to_owned(),
+                minimum_version: 1,
+            },
+            HandlerRequirement {
+                id: "resolve.navmesh_edge".to_owned(),
+                minimum_version: 1,
+            },
+        ];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"NAVM"),
+                name: "Navigation Mesh".to_owned(),
+                root,
+            }],
+            bindings,
+        )?;
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestNavmeshResolver));
+        let context = SemanticContext::new_with_handlers(
+            Arc::new(package),
+            crate::DecoderRegistry::builtin(),
+            handlers,
+        )?;
+        let payload = [0, 0, 0, 0, 1, 0, 0, 0, 0x68, 0x24, 0, 0, 2, 0];
+        let record_bytes = test_record_bytes(b"NAVM", b"NVNM", &payload);
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::fallout4())?;
+        let view = context.view(&record, false)?;
+
+        // when / then
+        assert_eq!(
+            view.format_array_element_field_as(
+                &triangles_path,
+                0,
+                &edge_path,
+                ValueFormat::Display,
+            )?,
+            Some("0".to_owned())
+        );
+        assert_eq!(
+            view.format_array_element_field_as(
+                &triangles_path,
+                1,
+                &edge_path,
+                ValueFormat::Display,
+            )?,
+            Some("0 (#2 in Target Navmesh [NAVM:02002468])".to_owned())
+        );
+        assert!(matches!(
+            view.resolve_array_element_field_link(&triangles_path, 0, &edge_path)?,
+            Some(SemanticLink::Element {
+                path,
+                array_indices,
+            }) if path == format!("{triangles_path}/element") && array_indices == vec![0]
+        ));
+        assert!(matches!(
+            view.resolve_array_element_field_link(&triangles_path, 1, &edge_path)?,
+            Some(SemanticLink::ExternalElement {
+                record_form_id: bethkit_core::FormId(0x2468),
+                path,
+                array_indices,
+            }) if path == "NAVM/0:Navigation Mesh/payload/3:Triangles/element"
+                && array_indices == vec![2]
         ));
         Ok(())
     }

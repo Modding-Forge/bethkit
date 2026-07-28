@@ -421,6 +421,60 @@ pub struct ResolvedElementInfo {
     containing_record_name: String,
 }
 
+/// Resolved navigation-mesh metadata required by xEdit edge callbacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedNavmeshInfo {
+    record_form_id: FormId,
+    load_order_form_id: u32,
+    name: String,
+    triangles_path: String,
+    triangle_count: usize,
+}
+
+impl ResolvedNavmeshInfo {
+    /// Creates resolved navigation-mesh metadata.
+    pub fn new(
+        record_form_id: FormId,
+        load_order_form_id: u32,
+        name: impl Into<String>,
+        triangles_path: impl Into<String>,
+        triangle_count: usize,
+    ) -> Self {
+        Self {
+            record_form_id,
+            load_order_form_id,
+            name: name.into(),
+            triangles_path: triangles_path.into(),
+            triangle_count,
+        }
+    }
+
+    /// Returns the file-local FormID of the navigation mesh.
+    pub const fn record_form_id(&self) -> FormId {
+        self.record_form_id
+    }
+
+    /// Returns the load-order FormID used by xEdit sort keys.
+    pub const fn load_order_form_id(&self) -> u32 {
+        self.load_order_form_id
+    }
+
+    /// Returns the xEdit name of the navigation mesh.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the stable schema path of the triangle array.
+    pub fn triangles_path(&self) -> &str {
+        &self.triangles_path
+    }
+
+    /// Returns the number of triangles in the effective navigation mesh.
+    pub const fn triangle_count(&self) -> usize {
+        self.triangle_count
+    }
+}
+
 impl ResolvedElementInfo {
     /// Creates resolved external-element metadata.
     pub fn new(
@@ -746,6 +800,24 @@ pub trait FormLinkResolver: Send + Sync {
         None
     }
 
+    /// Returns the source record's load-order FormID for deterministic sort keys.
+    ///
+    /// The default returns `None` for resolvers without load-order identity metadata.
+    fn source_load_order_form_id(&self, _source: HandlerRecordContext) -> Option<u32> {
+        None
+    }
+
+    /// Resolves one navigation mesh and its effective triangle-array metadata.
+    ///
+    /// The default returns `None` for resolvers without navigation-mesh metadata.
+    fn resolve_navmesh(
+        &self,
+        _source: HandlerRecordContext,
+        _form_id: FormId,
+    ) -> Option<ResolvedNavmeshInfo> {
+        None
+    }
+
     /// Resolves the effective quest context inherited by an INFO condition.
     ///
     /// The default returns `None` because resolving INFO parent groups requires
@@ -989,6 +1061,8 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatSnapNodeSummary { resolver: None }));
         registry.register(Arc::new(ResolveSnapNode { resolver: None }));
         registry.register(Arc::new(ResolveLocalArrayElement));
+        registry.register(Arc::new(FormatNavmeshEdge { resolver: None }));
+        registry.register(Arc::new(ResolveNavmeshEdge { resolver: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
@@ -1097,6 +1171,12 @@ impl SemanticHandlerRegistry {
             resolver: self.form_link_resolver.clone(),
         }));
         self.register(Arc::new(ResolveSnapNode {
+            resolver: self.form_link_resolver.clone(),
+        }));
+        self.register(Arc::new(FormatNavmeshEdge {
+            resolver: self.form_link_resolver.clone(),
+        }));
+        self.register(Arc::new(ResolveNavmeshEdge {
             resolver: self.form_link_resolver.clone(),
         }));
     }
@@ -5739,6 +5819,291 @@ fn snap_node_reference_path(
     }
 }
 
+struct FormatNavmeshEdge {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+struct ResolveNavmeshEdge {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+struct NavmeshEdgeState {
+    external: bool,
+    triangle_index: Option<usize>,
+    triangles_path: String,
+    local_triangle_count: usize,
+    external_navmesh: Option<ResolvedNavmeshInfo>,
+}
+
+impl SemanticHandler for FormatNavmeshEdge {
+    fn id(&self) -> &'static str {
+        "format.navmesh_edge"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let input = match invocation.value {
+                Some(FieldValue::String(value)) => value.trim(),
+                _ => {
+                    return Err(indexed_record_error(
+                        self.id(),
+                        "edge edit parsing requires text",
+                    ));
+                }
+            };
+            let parsed = if input.is_empty() || input.eq_ignore_ascii_case("None") {
+                -1
+            } else {
+                parse_delphi_integer(input, self.id()).unwrap_or(0)
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Int(parsed)));
+        }
+        let raw = callback_integer(
+            invocation
+                .value
+                .ok_or_else(|| indexed_record_error(self.id(), "edge requires an integer"))?,
+            self.id(),
+        )?;
+        let state = navmesh_edge_state(&invocation, self.resolver.as_deref())?;
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary => {
+                format_navmesh_edge_display(raw, state.as_ref())
+            }
+            HandlerPhase::SortKey => format_navmesh_edge_sort_key(
+                raw,
+                state.as_ref(),
+                self.resolver.as_deref(),
+                &invocation,
+            ),
+            HandlerPhase::EditValue => {
+                if raw < 0 {
+                    String::new()
+                } else {
+                    raw.to_string()
+                }
+            }
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+impl SemanticHandler for ResolveNavmeshEdge {
+    fn id(&self) -> &'static str {
+        "resolve.navmesh_edge"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::ReferenceResolution {
+            return Ok(HandlerOutput::None);
+        }
+        if callback_integer(
+            invocation
+                .value
+                .ok_or_else(|| indexed_record_error(self.id(), "edge requires an integer"))?,
+            self.id(),
+        )? < 0
+        {
+            return Ok(HandlerOutput::None);
+        }
+        let Some(state) = navmesh_edge_state(&invocation, self.resolver.as_deref())? else {
+            return Ok(HandlerOutput::None);
+        };
+        let Some(triangle_index) = state.triangle_index else {
+            return Ok(HandlerOutput::None);
+        };
+        if state.external {
+            let Some(navmesh) = state.external_navmesh else {
+                return Ok(HandlerOutput::None);
+            };
+            if triangle_index >= navmesh.triangle_count() {
+                return Ok(HandlerOutput::None);
+            }
+            return Ok(HandlerOutput::Link(SemanticLink::ExternalElement {
+                record_form_id: navmesh.record_form_id(),
+                path: format!("{}/element", navmesh.triangles_path()),
+                array_indices: vec![triangle_index],
+            }));
+        }
+        if triangle_index >= state.local_triangle_count {
+            return Ok(HandlerOutput::None);
+        }
+        Ok(HandlerOutput::Link(SemanticLink::Element {
+            path: format!("{}/element", state.triangles_path),
+            array_indices: vec![triangle_index],
+        }))
+    }
+}
+
+fn format_navmesh_edge_display(raw: i128, state: Option<&NavmeshEdgeState>) -> String {
+    if raw < 0 {
+        return "None".to_owned();
+    }
+    let mut text = raw.to_string();
+    let Some((triangle_index, navmesh)) =
+        state.and_then(|state| Some((state.triangle_index?, state.external_navmesh.as_ref()?)))
+    else {
+        return text;
+    };
+    text.push_str(&format!(" (#{triangle_index} in {})", navmesh.name()));
+    text
+}
+
+fn format_navmesh_edge_sort_key(
+    raw: i128,
+    state: Option<&NavmeshEdgeState>,
+    resolver: Option<&dyn FormLinkResolver>,
+    invocation: &HandlerInvocation<'_>,
+) -> String {
+    let raw_hex = format!("{:04X}", raw as i32 as u32);
+    let Some(state) = state else {
+        return format!("00000000{raw_hex}");
+    };
+    if state.external {
+        let Some(navmesh) = state.external_navmesh.as_ref() else {
+            return format!("00000000{raw_hex}");
+        };
+        let Some(triangle_index) = state.triangle_index else {
+            return format!("00000000{raw_hex}");
+        };
+        return format!("{:08X}{:04X}", navmesh.load_order_form_id(), triangle_index);
+    }
+    let source = resolver
+        .and_then(|resolver| {
+            resolver.source_load_order_form_id(handler_record_context(&invocation.context))
+        })
+        .unwrap_or(0);
+    format!("{source:08X}{raw_hex}")
+}
+
+fn navmesh_edge_state(
+    invocation: &HandlerInvocation<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+) -> Result<Option<NavmeshEdgeState>> {
+    let edge = navmesh_edge_number(&invocation.context.binding.path)?;
+    let (triangles_path, edge_links_path) =
+        navmesh_edge_array_paths(&invocation.context.binding.path)?;
+    let Some(scope) = invocation.value_scope else {
+        return Ok(None);
+    };
+    let Some(active_index) = invocation.array_indices.last().copied() else {
+        return Ok(None);
+    };
+    let Some(triangles) = scoped_named_value(scope, &triangles_path) else {
+        return Ok(None);
+    };
+    let FieldValue::Array(triangle_values) = &triangles.value else {
+        return Err(indexed_record_error(
+            "format.navmesh_edge",
+            "Triangles target is not an array",
+        ));
+    };
+    let Some(FieldValue::Struct(active_triangle)) = triangle_values.get(active_index) else {
+        return Ok(None);
+    };
+    let flags = condition_field(active_triangle, &["Flags"])
+        .map(|field| callback_integer(&field.value, "format.navmesh_edge"))
+        .transpose()?
+        .unwrap_or(0);
+    let external = flags & (1_i128 << edge) != 0;
+    let raw = callback_integer(
+        invocation.value.ok_or_else(|| {
+            indexed_record_error("format.navmesh_edge", "edge requires an integer")
+        })?,
+        "format.navmesh_edge",
+    )?;
+    if !external {
+        return Ok(Some(NavmeshEdgeState {
+            external: false,
+            triangle_index: usize::try_from(raw).ok(),
+            triangles_path,
+            local_triangle_count: triangle_values.len(),
+            external_navmesh: None,
+        }));
+    }
+    let Some(edge_link_index) = usize::try_from(raw).ok() else {
+        return Ok(Some(NavmeshEdgeState {
+            external: true,
+            triangle_index: None,
+            triangles_path,
+            local_triangle_count: triangle_values.len(),
+            external_navmesh: None,
+        }));
+    };
+    let edge_link =
+        scoped_named_value(scope, &edge_links_path).and_then(|field| match &field.value {
+            FieldValue::Array(values) => values.get(edge_link_index),
+            _ => None,
+        });
+    let Some(FieldValue::Struct(fields)) = edge_link else {
+        return Ok(Some(NavmeshEdgeState {
+            external: true,
+            triangle_index: None,
+            triangles_path,
+            local_triangle_count: triangle_values.len(),
+            external_navmesh: None,
+        }));
+    };
+    let triangle_index = condition_field(fields, &["Triangle Index", "Triangle"])
+        .map(|field| callback_integer(&field.value, "format.navmesh_edge"))
+        .transpose()?
+        .and_then(|value| usize::try_from(value).ok());
+    let navmesh_form_id = condition_field(fields, &["Mesh", "Navmesh"])
+        .map(|field| callback_form_id(&field.value, "format.navmesh_edge"))
+        .transpose()?;
+    let external_navmesh = navmesh_form_id.and_then(|form_id| {
+        resolver.and_then(|resolver| {
+            resolver.resolve_navmesh(handler_record_context(&invocation.context), form_id)
+        })
+    });
+    Ok(Some(NavmeshEdgeState {
+        external: true,
+        triangle_index,
+        triangles_path,
+        local_triangle_count: triangle_values.len(),
+        external_navmesh,
+    }))
+}
+
+fn navmesh_edge_number(path: &str) -> Result<u32> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name.split_once(':').map_or(name, |(_, name)| name) {
+        "Edge 0-1" => Ok(0),
+        "Edge 1-2" => Ok(1),
+        "Edge 2-0" => Ok(2),
+        _ => Err(indexed_record_error(
+            "format.navmesh_edge",
+            format!("unsupported NAVM edge binding path {path:?}"),
+        )),
+    }
+}
+
+fn navmesh_edge_array_paths(path: &str) -> Result<(String, String)> {
+    let components: Vec<&str> = path.split('/').collect();
+    let Some(index) = components.iter().position(|component| {
+        component
+            .split_once(':')
+            .is_some_and(|(_, name)| name == "Triangles")
+    }) else {
+        return Err(indexed_record_error(
+            "format.navmesh_edge",
+            format!("NAVM edge binding path has no Triangles array: {path:?}"),
+        ));
+    };
+    let triangles_path = components[..=index].join("/");
+    let mut edge_links = components[..index].to_vec();
+    edge_links.push("4:Edge Links");
+    Ok((triangles_path, edge_links.join("/")))
+}
+
 impl SemanticHandler for ResolveLocalArrayElement {
     fn id(&self) -> &'static str {
         "resolve.local_array_element"
@@ -9046,6 +9411,26 @@ mod tests {
             })
         }
 
+        fn source_load_order_form_id(&self, _source: HandlerRecordContext) -> Option<u32> {
+            Some(0x0100_1234)
+        }
+
+        fn resolve_navmesh(
+            &self,
+            _source: HandlerRecordContext,
+            form_id: FormId,
+        ) -> Option<ResolvedNavmeshInfo> {
+            (form_id == FormId(0x2468)).then(|| {
+                ResolvedNavmeshInfo::new(
+                    FormId(0x2468),
+                    0x0200_2468,
+                    "Target Navmesh [NAVM:02002468]",
+                    "NAVM/0:Navigation Mesh/payload/3:Triangles",
+                    4,
+                )
+            })
+        }
+
         fn resolve_condition_quest_form_id(
             &self,
             _source: HandlerRecordContext,
@@ -10098,6 +10483,180 @@ mod tests {
                 }) if path == "STMP/2:Nodes/payload/element" && array_indices == vec![3]
             ));
         }
+        Ok(())
+    }
+
+    /// Matches local and external xEdit navigation-mesh edge semantics.
+    #[test]
+    fn navmesh_edge_handlers_match_xedit() -> TestResult {
+        // given
+        let triangles_path = "NAVM/0:Navigation Mesh/payload/3:Triangles";
+        let edge_path = "NAVM/0:Navigation Mesh/payload/3:Triangles/element/3:Edge 0-1";
+        let edge_links_path = "NAVM/0:Navigation Mesh/payload/4:Edge Links";
+        let field = |path: &str, name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: path.to_owned(),
+            effective_path: None,
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let triangle = |flags: u64| {
+            FieldValue::Struct(vec![field(
+                &format!("{triangles_path}/element/0:Flags"),
+                "Flags",
+                FieldValue::Flags {
+                    value: flags,
+                    active: Vec::new(),
+                },
+            )])
+        };
+        let scope = FieldValue::Struct(vec![
+            field(
+                triangles_path,
+                "Triangles",
+                FieldValue::Array(vec![triangle(0), triangle(1)]),
+            ),
+            field(
+                edge_links_path,
+                "Edge Links",
+                FieldValue::Array(vec![FieldValue::Struct(vec![
+                    field(
+                        &format!("{edge_links_path}/element/1:Mesh"),
+                        "Mesh",
+                        FieldValue::FormId {
+                            value: FormId(0x2468),
+                            targets: vec![Signature(*b"NAVM")],
+                        },
+                    ),
+                    field(
+                        &format!("{edge_links_path}/element/2:Triangle Index"),
+                        "Triangle Index",
+                        FieldValue::UInt(2),
+                    ),
+                ])]),
+            ),
+        ]);
+        let mut format_binding = test_metadata_binding(
+            "integer.formatter",
+            "format.navmesh_edge",
+            serde_json::json!({}),
+        );
+        format_binding.path = edge_path.to_owned();
+        let mut link_binding = test_metadata_binding(
+            "value.links_to",
+            "resolve.navmesh_edge",
+            serde_json::json!({}),
+        );
+        link_binding.path = edge_path.to_owned();
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source =
+            HandlerRecordContext::new(Signature(*b"NAVM"), FormId(0x1234), 0, SchemaGame::Fallout4);
+        let edge = FieldValue::UInt(0);
+        let local_index = [0];
+        let external_index = [1];
+
+        // when / then
+        for (indices, phase, expected) in [
+            (local_index.as_slice(), HandlerPhase::Display, "0"),
+            (
+                local_index.as_slice(),
+                HandlerPhase::SortKey,
+                "010012340000",
+            ),
+            (
+                external_index.as_slice(),
+                HandlerPhase::Display,
+                "0 (#2 in Target Navmesh [NAVM:02002468])",
+            ),
+            (
+                external_index.as_slice(),
+                HandlerPhase::SortKey,
+                "020024680002",
+            ),
+        ] {
+            assert!(matches!(
+                handlers.invoke_with_records(
+                    &format_binding,
+                    source,
+                    HandlerInvocationAccess {
+                        source: HandlerRecordSource::None,
+                        value_scope: Some(&scope),
+                        source_subrecord_index: None,
+                        array_indices: indices,
+                    },
+                    phase,
+                    Some(&edge),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &link_binding,
+                source,
+                HandlerInvocationAccess {
+                    source: HandlerRecordSource::None,
+                    value_scope: Some(&scope),
+                    source_subrecord_index: None,
+                    array_indices: &local_index,
+                },
+                HandlerPhase::ReferenceResolution,
+                Some(&edge),
+                None,
+            )?,
+            HandlerOutput::Link(SemanticLink::Element {
+                path,
+                array_indices,
+            }) if path == format!("{triangles_path}/element") && array_indices == vec![0]
+        ));
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &link_binding,
+                source,
+                HandlerInvocationAccess {
+                    source: HandlerRecordSource::None,
+                    value_scope: Some(&scope),
+                    source_subrecord_index: None,
+                    array_indices: &external_index,
+                },
+                HandlerPhase::ReferenceResolution,
+                Some(&edge),
+                None,
+            )?,
+            HandlerOutput::Link(SemanticLink::ExternalElement {
+                record_form_id: FormId(0x2468),
+                path,
+                array_indices,
+            }) if path == "NAVM/0:Navigation Mesh/payload/3:Triangles/element"
+                && array_indices == vec![2]
+        ));
+        for (input, expected) in [("", -1), ("None", -1), ("garbage", 0), ("17", 17)] {
+            let input = FieldValue::String(Cow::Borrowed(input));
+            assert!(matches!(
+                handlers.invoke(
+                    &format_binding,
+                    source,
+                    HandlerPhase::ParseEditValue,
+                    Some(&input),
+                    None,
+                )?,
+                HandlerOutput::Value(FieldValue::Int(value)) if value == expected
+            ));
+        }
+        let none = FieldValue::Int(-1);
+        assert!(matches!(
+            handlers.invoke(
+                &format_binding,
+                source,
+                HandlerPhase::EditValue,
+                Some(&none),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text.is_empty()
+        ));
         Ok(())
     }
 

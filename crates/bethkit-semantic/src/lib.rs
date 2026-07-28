@@ -29,9 +29,9 @@ pub use handler::{
     FormLinkInfo, FormLinkResolver, HandlerContext, HandlerInvocation, HandlerMutation,
     HandlerOutput, HandlerPhase, HandlerRecordContext, HandlerSubrecordSource, IndexedRecordInfo,
     NextObjectIdResolver, QuestAliasInfo, QuestObjectiveInfo, QuestStageInfo, RecordGridCell,
-    RecordIndexKey, RecordIndexKeyValue, ResolvedElementInfo, ResourceHashResolver,
-    ScriptVariableInfo, ScriptVariableMetadata, SemanticHandler, SemanticHandlerRegistry,
-    SemanticLink, ValueFormat, WwiseGuidInfo, WwiseGuidResolver,
+    RecordIndexKey, RecordIndexKeyValue, ResolvedElementInfo, ResolvedNavmeshInfo,
+    ResourceHashResolver, ScriptVariableInfo, ScriptVariableMetadata, SemanticHandler,
+    SemanticHandlerRegistry, SemanticLink, ValueFormat, WwiseGuidInfo, WwiseGuidResolver,
 };
 pub use validation::{Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationReport};
 pub use value::{ByteSpan, FieldOrigin, FieldValue, NamedValue, OwnedFieldValue};

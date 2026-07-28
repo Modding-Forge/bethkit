@@ -243,7 +243,7 @@ impl SemanticContext {
         value: &FieldValue<'_>,
         format: ValueFormat,
     ) -> Result<Option<String>> {
-        self.format_value_as_with_scope(record, path, value, None, format)
+        self.format_value_as_with_scope(record, path, value, None, &[], format)
     }
 
     /// Formats a typed value using its decoded sibling-value container.
@@ -263,7 +263,19 @@ impl SemanticContext {
         scope: &FieldValue<'_>,
         format: ValueFormat,
     ) -> Result<Option<String>> {
-        self.format_value_as_with_scope(record, path, value, Some(scope), format)
+        self.format_value_as_with_scope(record, path, value, Some(scope), &[], format)
+    }
+
+    pub(crate) fn format_value_as_in_scope_with_array_indices(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+        scope: &FieldValue<'_>,
+        array_indices: &[usize],
+        format: ValueFormat,
+    ) -> Result<Option<String>> {
+        self.format_value_as_with_scope(record, path, value, Some(scope), array_indices, format)
     }
 
     fn format_value_as_with_scope(
@@ -272,6 +284,7 @@ impl SemanticContext {
         path: &str,
         value: &FieldValue<'_>,
         scope: Option<&FieldValue<'_>>,
+        array_indices: &[usize],
         format: ValueFormat,
     ) -> Result<Option<String>> {
         let mut handler_value = value.to_handler_value();
@@ -307,7 +320,8 @@ impl SemanticContext {
             let output = self.handlers.invoke_with_records(
                 binding,
                 self.handler_record(record),
-                HandlerInvocationAccess::read_only_with_scope(record, handler_scope.as_ref()),
+                HandlerInvocationAccess::read_only_with_scope(record, handler_scope.as_ref())
+                    .with_array_indices(array_indices),
                 format.into(),
                 Some(&handler_value),
                 None,
@@ -346,7 +360,7 @@ impl SemanticContext {
         path: &str,
         value: &FieldValue<'_>,
     ) -> Result<Option<SemanticLink>> {
-        self.resolve_link_with_scope(record, path, value, None)
+        self.resolve_link_with_scope(record, path, value, None, &[])
     }
 
     /// Resolves a semantic link using the value's sibling-value container.
@@ -362,7 +376,18 @@ impl SemanticContext {
         value: &FieldValue<'_>,
         scope: &FieldValue<'_>,
     ) -> Result<Option<SemanticLink>> {
-        self.resolve_link_with_scope(record, path, value, Some(scope))
+        self.resolve_link_with_scope(record, path, value, Some(scope), &[])
+    }
+
+    pub(crate) fn resolve_link_in_scope_with_array_indices(
+        &self,
+        record: &Record,
+        path: &str,
+        value: &FieldValue<'_>,
+        scope: &FieldValue<'_>,
+        array_indices: &[usize],
+    ) -> Result<Option<SemanticLink>> {
+        self.resolve_link_with_scope(record, path, value, Some(scope), array_indices)
     }
 
     fn resolve_link_with_scope(
@@ -371,6 +396,7 @@ impl SemanticContext {
         path: &str,
         value: &FieldValue<'_>,
         scope: Option<&FieldValue<'_>>,
+        array_indices: &[usize],
     ) -> Result<Option<SemanticLink>> {
         let handler_value = value.to_handler_value();
         let handler_scope = scope.map(FieldValue::to_handler_value);
@@ -397,7 +423,8 @@ impl SemanticContext {
             match self.handlers.invoke_with_records(
                 binding,
                 self.handler_record(record),
-                HandlerInvocationAccess::read_only_with_scope(record, handler_scope.as_ref()),
+                HandlerInvocationAccess::read_only_with_scope(record, handler_scope.as_ref())
+                    .with_array_indices(array_indices),
                 HandlerPhase::ReferenceResolution,
                 Some(&handler_value),
                 None,
