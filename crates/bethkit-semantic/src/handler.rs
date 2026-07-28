@@ -247,6 +247,11 @@ pub enum HandlerMutation {
         /// Stable schema path.
         path: String,
     },
+    /// Remove every assigned subrecord contained by one structural schema node.
+    RemoveContainer {
+        /// Stable path of the sequence, repeat, choice, or other container node.
+        path: String,
+    },
     /// Remove every raw subrecord with one signature before initial decoding.
     RemoveAllBySignature {
         /// Stable record path that owns the raw subrecords.
@@ -1248,6 +1253,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(GameSettingEditorIdAfterSet));
+        registry.register(Arc::new(PerkEffectTypeAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
         registry.register(Arc::new(MagicEffectSecondAvWeightAfterSet));
         registry.register(Arc::new(MagicEffectArchetypeAfterSet));
@@ -12000,6 +12006,118 @@ impl SemanticHandler for GameSettingEditorIdAfterSet {
             occurrence: 0,
             value: default,
         }]))
+    }
+}
+
+struct PerkEffectTypeAfterSet;
+
+impl SemanticHandler for PerkEffectTypeAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.perk_effect_type"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        if invocation.context.record_signature != Signature(*b"PERK")
+            || !matches!(
+                invocation.context.game,
+                SchemaGame::SkyrimLe
+                    | SchemaGame::SkyrimSe
+                    | SchemaGame::SkyrimVr
+                    | SchemaGame::Fallout3
+                    | SchemaGame::FalloutNv
+                    | SchemaGame::Fallout4
+                    | SchemaGame::Fallout4Vr
+                    | SchemaGame::Fallout76
+                    | SchemaGame::Starfield
+            )
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "perk effect type updates require a guarded PERK binding".to_owned(),
+            });
+        }
+        let type_path = configured_text(self.id(), invocation.context.configuration, "type_path")?;
+        if type_path != invocation.context.binding.path {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "perk effect type configuration does not match its binding path"
+                    .to_owned(),
+            });
+        }
+        let new_type = invocation
+            .value
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "perk effect type updates require a new value".to_owned(),
+            })
+            .and_then(|value| callback_integer(value, self.id()))?;
+        let old_type = invocation
+            .old_value
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "perk effect type updates require the previous value".to_owned(),
+            })
+            .and_then(|value| callback_integer(value, self.id()))?;
+        if old_type == new_type {
+            return Ok(HandlerOutput::None);
+        }
+        if !(0..=2).contains(&new_type) {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("unsupported perk effect type {new_type}"),
+            });
+        }
+        let data_path = configured_text(self.id(), invocation.context.configuration, "data_path")?;
+        let conditions_path = configured_text(
+            self.id(),
+            invocation.context.configuration,
+            "conditions_path",
+        )?;
+        let parameters_path = configured_text(
+            self.id(),
+            invocation.context.configuration,
+            "parameters_path",
+        )?;
+        let mut mutations = vec![
+            HandlerMutation::ResetToDefault {
+                path: data_path.to_owned(),
+                occurrence: 0,
+            },
+            HandlerMutation::RemoveContainer {
+                path: conditions_path.to_owned(),
+            },
+            HandlerMutation::RemoveContainer {
+                path: parameters_path.to_owned(),
+            },
+        ];
+        if new_type == 2 {
+            let parameter_type_path = configured_text(
+                self.id(),
+                invocation.context.configuration,
+                "parameter_type_path",
+            )?;
+            let function_path =
+                configured_text(self.id(), invocation.context.configuration, "function_path")?;
+            mutations.push(HandlerMutation::SynchronizePresence {
+                path: parameter_type_path.to_owned(),
+                occurrence: 0,
+                present: true,
+                value: OwnedFieldValue::Int(0),
+            });
+            mutations.push(HandlerMutation::Set {
+                path: function_path.to_owned(),
+                occurrence: 0,
+                value: OwnedFieldValue::Int(2),
+            });
+        }
+        Ok(HandlerOutput::Mutations(mutations))
     }
 }
 
@@ -22936,6 +23054,88 @@ mod tests {
                 HandlerPhase::AfterSet,
                 Some(&FieldValue::String(std::borrow::Cow::Borrowed("fChanged"))),
                 Some(&old),
+            )?,
+            HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Rebuilds PERK effect data and clears dependent containers after a type change.
+    #[test]
+    fn perk_effect_type_rebuilds_dependent_state() -> Result<()> {
+        let type_path = "PERK/8:Effects/repeat/0:Effect/0:Header/payload/0:Type";
+        let data_path = "PERK/8:Effects/repeat/0:Effect/1:Effect Data";
+        let conditions_path = "PERK/8:Effects/repeat/0:Effect/2:Perk Conditions";
+        let parameters_path = "PERK/8:Effects/repeat/0:Effect/3:Function Parameters";
+        let parameter_type_path = "PERK/8:Effects/repeat/0:Effect/3:Function Parameters/0:Type";
+        let function_path =
+            "PERK/8:Effects/repeat/0:Effect/1:Effect Data/payload/2:Entry Point/1:Function";
+        let binding = CallbackBinding {
+            path: type_path.to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-perk-effect-type".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.perk_effect_type".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "type_path": type_path,
+                        "data_path": data_path,
+                        "conditions_path": conditions_path,
+                        "parameters_path": parameters_path,
+                        "parameter_type_path": parameter_type_path,
+                        "function_path": function_path
+                    }),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let record =
+            HandlerRecordContext::new(Signature(*b"PERK"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+
+        let output = handlers.invoke(
+            &binding,
+            record,
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::Int(2)),
+            Some(&FieldValue::Int(0)),
+        )?;
+
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::ResetToDefault {
+                        path: data_path.to_owned(),
+                        occurrence: 0,
+                    },
+                    HandlerMutation::RemoveContainer {
+                        path: conditions_path.to_owned(),
+                    },
+                    HandlerMutation::RemoveContainer {
+                        path: parameters_path.to_owned(),
+                    },
+                    HandlerMutation::SynchronizePresence {
+                        path: parameter_type_path.to_owned(),
+                        occurrence: 0,
+                        present: true,
+                        value: OwnedFieldValue::Int(0),
+                    },
+                    HandlerMutation::Set {
+                        path: function_path.to_owned(),
+                        occurrence: 0,
+                        value: OwnedFieldValue::Int(2),
+                    },
+                ]
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::Int(1)),
+                Some(&FieldValue::Int(1)),
             )?,
             HandlerOutput::None
         ));

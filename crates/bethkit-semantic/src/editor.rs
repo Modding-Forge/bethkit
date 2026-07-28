@@ -35,6 +35,20 @@ struct UnionSelectionContext<'a> {
     value_scope: Option<&'a FieldValue<'static>>,
 }
 
+#[derive(Clone, Copy)]
+struct NestedValueContext<'a> {
+    field_values: &'a BTreeMap<String, i64>,
+    source_record: &'a WritableRecord,
+    source_subrecord_index: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct CandidateValueContext<'a> {
+    source_record: &'a WritableRecord,
+    source_subrecord_index: Option<usize>,
+    decoded_values: &'a BTreeMap<(String, usize), FieldValue<'static>>,
+}
+
 /// Lossless editor for one record.
 pub struct RecordEditor {
     registry: bethkit_schema::SchemaRegistry,
@@ -1206,7 +1220,40 @@ impl RecordEditor {
     ) -> Result<Option<&'a OwnedFieldValue>> {
         let mut field_values = self.expression_field_values();
         collect_owned_expression_field_values(node, value, &mut field_values);
-        self.nested_value_at_with_fields(node, value, target_path, occurrence, &field_values)
+        self.nested_value_at_with_fields(
+            node,
+            value,
+            target_path,
+            occurrence,
+            NestedValueContext {
+                field_values: &field_values,
+                source_record: &self.record,
+                source_subrecord_index: None,
+            },
+        )
+    }
+
+    fn nested_value_at_for_record<'a>(
+        &self,
+        node: &SchemaNode,
+        value: &'a OwnedFieldValue,
+        target_path: &str,
+        occurrence: &mut usize,
+        context: CandidateValueContext<'_>,
+    ) -> Result<Option<&'a OwnedFieldValue>> {
+        let mut field_values = expression_field_values_from(context.decoded_values);
+        collect_owned_expression_field_values(node, value, &mut field_values);
+        self.nested_value_at_with_fields(
+            node,
+            value,
+            target_path,
+            occurrence,
+            NestedValueContext {
+                field_values: &field_values,
+                source_record: context.source_record,
+                source_subrecord_index: context.source_subrecord_index,
+            },
+        )
     }
 
     fn nested_value_at_with_fields<'a>(
@@ -1215,7 +1262,7 @@ impl RecordEditor {
         value: &'a OwnedFieldValue,
         target_path: &str,
         occurrence: &mut usize,
-        field_values: &BTreeMap<String, i64>,
+        context: NestedValueContext<'_>,
     ) -> Result<Option<&'a OwnedFieldValue>> {
         if node.path == target_path {
             if *occurrence == 0 {
@@ -1232,7 +1279,7 @@ impl RecordEditor {
                         value,
                         target_path,
                         occurrence,
-                        field_values,
+                        context,
                     )? {
                         return Ok(Some(found));
                     }
@@ -1245,7 +1292,7 @@ impl RecordEditor {
                         value,
                         target_path,
                         occurrence,
-                        field_values,
+                        context,
                     )? {
                         return Ok(Some(found));
                     }
@@ -1258,9 +1305,9 @@ impl RecordEditor {
                     variants,
                     current,
                     UnionSelectionContext {
-                        field_values,
-                        source_record: &self.record,
-                        source_subrecord_index: None,
+                        field_values: context.field_values,
+                        source_record: context.source_record,
+                        source_subrecord_index: context.source_subrecord_index,
                         value_scope: None,
                     },
                 )?;
@@ -1269,7 +1316,7 @@ impl RecordEditor {
                     current,
                     target_path,
                     occurrence,
-                    field_values,
+                    context,
                 );
             }
             (
@@ -1283,7 +1330,7 @@ impl RecordEditor {
                     current,
                     target_path,
                     occurrence,
-                    field_values,
+                    context,
                 );
             }
             _ => {}
@@ -1307,7 +1354,36 @@ impl RecordEditor {
             target_path,
             occurrence,
             replacement,
-            &field_values,
+            NestedValueContext {
+                field_values: &field_values,
+                source_record: &self.record,
+                source_subrecord_index: None,
+            },
+        )
+    }
+
+    fn set_nested_value_for_record(
+        &self,
+        node: &SchemaNode,
+        value: &mut OwnedFieldValue,
+        target_path: &str,
+        occurrence: &mut usize,
+        replacement: &mut Option<OwnedFieldValue>,
+        context: CandidateValueContext<'_>,
+    ) -> Result<bool> {
+        let mut field_values = expression_field_values_from(context.decoded_values);
+        collect_owned_expression_field_values(node, value, &mut field_values);
+        self.set_nested_value_with_fields(
+            node,
+            value,
+            target_path,
+            occurrence,
+            replacement,
+            NestedValueContext {
+                field_values: &field_values,
+                source_record: context.source_record,
+                source_subrecord_index: context.source_subrecord_index,
+            },
         )
     }
 
@@ -1318,7 +1394,7 @@ impl RecordEditor {
         target_path: &str,
         occurrence: &mut usize,
         replacement: &mut Option<OwnedFieldValue>,
-        field_values: &BTreeMap<String, i64>,
+        context: NestedValueContext<'_>,
     ) -> Result<bool> {
         if node.path == target_path {
             if *occurrence == 0 {
@@ -1340,7 +1416,7 @@ impl RecordEditor {
                         target_path,
                         occurrence,
                         replacement,
-                        field_values,
+                        context,
                     )? {
                         return Ok(true);
                     }
@@ -1354,7 +1430,7 @@ impl RecordEditor {
                         target_path,
                         occurrence,
                         replacement,
-                        field_values,
+                        context,
                     )? {
                         return Ok(true);
                     }
@@ -1367,9 +1443,9 @@ impl RecordEditor {
                     variants,
                     current,
                     UnionSelectionContext {
-                        field_values,
-                        source_record: &self.record,
-                        source_subrecord_index: None,
+                        field_values: context.field_values,
+                        source_record: context.source_record,
+                        source_subrecord_index: context.source_subrecord_index,
                         value_scope: None,
                     },
                 )?;
@@ -1379,7 +1455,7 @@ impl RecordEditor {
                     target_path,
                     occurrence,
                     replacement,
-                    field_values,
+                    context,
                 )? {
                     return Ok(true);
                 }
@@ -1396,7 +1472,7 @@ impl RecordEditor {
                     target_path,
                     occurrence,
                     replacement,
-                    field_values,
+                    context,
                 )? {
                     return Ok(true);
                 }
@@ -1507,6 +1583,18 @@ impl RecordEditor {
         depth: usize,
         array_indices: &[usize],
     ) -> Result<OwnedFieldValue> {
+        self.default_value_for_node_at(node, field_values, depth, array_indices, &self.record, None)
+    }
+
+    fn default_value_for_node_at(
+        &self,
+        node: &SchemaNode,
+        field_values: &BTreeMap<String, i64>,
+        depth: usize,
+        array_indices: &[usize],
+        source_record: &WritableRecord,
+        source_subrecord_index: Option<usize>,
+    ) -> Result<OwnedFieldValue> {
         if depth >= 128 {
             return Err(encode_error(
                 &node.path,
@@ -1519,7 +1607,14 @@ impl RecordEditor {
             SchemaNodeKind::Struct { fields } => fields
                 .iter()
                 .map(|field| {
-                    self.default_value_for_node(field, field_values, next_depth, array_indices)
+                    self.default_value_for_node_at(
+                        field,
+                        field_values,
+                        next_depth,
+                        array_indices,
+                        source_record,
+                        source_subrecord_index,
+                    )
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(OwnedFieldValue::Struct)?,
@@ -1534,26 +1629,53 @@ impl RecordEditor {
                     .map(|index| {
                         let mut child_array_indices = array_indices.to_vec();
                         child_array_indices.push(index);
-                        self.default_value_for_node(
+                        self.default_value_for_node_at(
                             element,
                             field_values,
                             next_depth,
                             &child_array_indices,
+                            source_record,
+                            source_subrecord_index,
                         )
                     })
                     .collect::<Result<Vec<_>>>()
                     .map(OwnedFieldValue::Array)?
             }
             SchemaNodeKind::Union { selector, variants } => {
-                let variant =
-                    self.select_default_union_variant(node, selector, variants, field_values)?;
-                self.default_value_for_node(variant, field_values, next_depth, array_indices)?
+                let variant = self.select_default_union_variant(
+                    node,
+                    selector,
+                    variants,
+                    field_values,
+                    source_record,
+                    source_subrecord_index,
+                )?;
+                self.default_value_for_node_at(
+                    variant,
+                    field_values,
+                    next_depth,
+                    array_indices,
+                    source_record,
+                    source_subrecord_index,
+                )?
             }
-            SchemaNodeKind::Subrecord { payload, .. } => {
-                self.default_value_for_node(payload, field_values, next_depth, array_indices)?
-            }
+            SchemaNodeKind::Subrecord { payload, .. } => self.default_value_for_node_at(
+                payload,
+                field_values,
+                next_depth,
+                array_indices,
+                source_record,
+                source_subrecord_index,
+            )?,
             SchemaNodeKind::Compressed { child, .. } | SchemaNodeKind::Terminated { child, .. } => {
-                self.default_value_for_node(child, field_values, next_depth, array_indices)?
+                self.default_value_for_node_at(
+                    child,
+                    field_values,
+                    next_depth,
+                    array_indices,
+                    source_record,
+                    source_subrecord_index,
+                )?
             }
             SchemaNodeKind::Custom { decoder, .. } => {
                 return Err(SemanticError::Encode {
@@ -1572,15 +1694,24 @@ impl RecordEditor {
                 });
             }
         };
-        self.apply_default_value_callbacks(node, value, field_values, array_indices)
+        self.apply_default_value_callbacks_at(
+            node,
+            value,
+            field_values,
+            array_indices,
+            source_record,
+            source_subrecord_index,
+        )
     }
 
-    fn apply_default_value_callbacks(
+    fn apply_default_value_callbacks_at(
         &self,
         node: &SchemaNode,
         mut value: OwnedFieldValue,
         field_values: &BTreeMap<String, i64>,
         array_indices: &[usize],
+        source_record: &WritableRecord,
+        source_subrecord_index: Option<usize>,
     ) -> Result<OwnedFieldValue> {
         for binding in self
             .registry
@@ -1595,14 +1726,23 @@ impl RecordEditor {
                 node,
                 &value,
                 field_values,
-                None,
-                &self.record,
+                source_subrecord_index,
+                source_record,
             )?;
+            let access = source_subrecord_index.map_or_else(
+                || HandlerInvocationAccess::writable_with_scope(source_record, None),
+                |index| {
+                    HandlerInvocationAccess::writable_subrecord_with_scope(
+                        source_record,
+                        index,
+                        None,
+                    )
+                },
+            );
             match self.handlers.invoke_with_records(
                 binding,
                 self.handler_record(),
-                HandlerInvocationAccess::writable_with_scope(&self.record, None)
-                    .with_array_indices(array_indices),
+                access.with_array_indices(array_indices),
                 HandlerPhase::DefaultValue,
                 Some(&handler_value),
                 None,
@@ -1649,32 +1789,74 @@ impl RecordEditor {
         selector: &UnionSelector,
         variants: &'a [SchemaNode],
         field_values: &BTreeMap<String, i64>,
+        source_record: &WritableRecord,
+        source_subrecord_index: Option<usize>,
     ) -> Result<&'a SchemaNode> {
-        let UnionSelector::Expression(expression) = selector else {
-            return Err(encode_error(
-                &node.path,
-                "callback-selected union has no declarative default",
-            ));
-        };
-        let context = EvalContext {
-            payload: &[],
-            field_values,
-            form_version: self.record.form_version,
-            record_signature: self.record.signature.into(),
-        };
-        let selected = match expression.evaluate(&context, 1024) {
-            Ok(EvalValue::Int(selected)) => selected,
-            Ok(_) => {
-                return Err(encode_error(
-                    &node.path,
-                    "default union selector returned a non-integer value",
-                ));
+        let selected = match selector {
+            UnionSelector::Expression(expression) => {
+                let context = EvalContext {
+                    payload: &[],
+                    field_values,
+                    form_version: source_record.form_version,
+                    record_signature: source_record.signature.into(),
+                };
+                match expression.evaluate(&context, 1024) {
+                    Ok(EvalValue::Int(selected)) => selected,
+                    Ok(_) => {
+                        return Err(encode_error(
+                            &node.path,
+                            "default union selector returned a non-integer value",
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(encode_error(
+                            &node.path,
+                            format!("default union selector failed: {error}"),
+                        ));
+                    }
+                }
             }
-            Err(error) => {
-                return Err(encode_error(
-                    &node.path,
-                    format!("default union selector failed: {error}"),
-                ));
+            UnionSelector::Callback { callback_id } => {
+                let binding = self
+                    .registry
+                    .package()
+                    .callback_bindings()
+                    .iter()
+                    .find(|binding| {
+                        binding.path == node.path && binding.callback_id.as_str() == callback_id
+                    })
+                    .ok_or_else(|| SemanticError::Handler {
+                        handler: callback_id.clone(),
+                        message: format!("union node {} has no callback binding", node.path),
+                    })?;
+                let value = FieldValue::Bytes(Cow::Borrowed(&[]));
+                let access = source_subrecord_index.map_or_else(
+                    || HandlerInvocationAccess::writable_with_scope(source_record, None),
+                    |index| {
+                        HandlerInvocationAccess::writable_subrecord_with_scope(
+                            source_record,
+                            index,
+                            None,
+                        )
+                    },
+                );
+                match self.handlers.invoke_with_records(
+                    binding,
+                    self.handler_record(),
+                    access,
+                    HandlerPhase::UnionSelection,
+                    Some(&value),
+                    None,
+                )? {
+                    HandlerOutput::Integer(selected) => selected,
+                    _ => {
+                        return Err(SemanticError::Handler {
+                            handler: callback_id.clone(),
+                            message: "default union selector returned a non-integer result"
+                                .to_owned(),
+                        });
+                    }
+                }
             }
         };
         let index = usize::try_from(selected)
@@ -2068,6 +2250,9 @@ impl RecordEditor {
                         ),
                     });
                 }
+                HandlerMutation::RemoveContainer { path } => {
+                    self.remove_container_assignments(record, decoded_values, None, &path)?;
+                }
                 HandlerMutation::Insert { path, value } => {
                     let (signature, encoded) = self.encode_path(&path, &value)?;
                     let node = self.find_node(&path)?;
@@ -2372,12 +2557,18 @@ impl RecordEditor {
                 handler: "def.after_set".to_owned(),
                 message: "scoped callbacks cannot insert raw subrecord payloads".to_owned(),
             }),
-            HandlerMutation::ResetToDefault { path, .. } => Err(SemanticError::Handler {
-                handler: "edit.reset_sibling_default".to_owned(),
-                message: format!(
-                    "schema-native default mutation for {path} escaped its value container"
-                ),
-            }),
+            HandlerMutation::ResetToDefault { path, occurrence } => {
+                let (index, occurrence) = self
+                    .scoped_assignment(record, repeat_scope, &path, occurrence)?
+                    .ok_or_else(|| SemanticError::MissingOccurrence {
+                        path: path.clone(),
+                        occurrence,
+                    })?;
+                self.reset_subrecord_to_default(record, decoded_values, &path, index, occurrence)
+            }
+            HandlerMutation::RemoveContainer { path } => {
+                self.remove_container_assignments(record, decoded_values, Some(repeat_scope), &path)
+            }
             HandlerMutation::Insert { path, value } => {
                 self.insert_in_scope(record, decoded_values, repeat_scope, &path, &value)
             }
@@ -2513,8 +2704,16 @@ impl RecordEditor {
                 message: "handler mutation path is not a subrecord".to_owned(),
             });
         };
-        let (signature, encoded) = self.encode_path(path, value)?;
         let index = self.scoped_schema_insertion_index(record, node, repeat_scope)?;
+        let SchemaNodeKind::Subrecord { signature, .. } = &node.kind else {
+            return Err(SemanticError::Encode {
+                path: path.to_owned(),
+                message: "handler mutation path is not a subrecord".to_owned(),
+            });
+        };
+        let signature = Signature::from(*signature);
+        let encoded =
+            self.encode_node_at_for_record(payload, value, Some(index), record, decoded_values)?;
         let grammar = self.grammar_for(record)?;
         let occurrence = grammar.assignments[..index]
             .iter()
@@ -2527,7 +2726,13 @@ impl RecordEditor {
                 data: encoded,
             },
         );
-        let decoded = self.owned_to_handler_value(payload, value)?;
+        let decoded = self.owned_to_handler_value_at_for_record(
+            payload,
+            value,
+            Some(index),
+            record,
+            decoded_values,
+        )?;
         insert_decoded_occurrence(decoded_values, path, occurrence, decoded);
         Ok(())
     }
@@ -2626,6 +2831,76 @@ impl RecordEditor {
         }
     }
 
+    fn remove_container_assignments(
+        &self,
+        record: &mut WritableRecord,
+        decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+        repeat_scope: Option<&RepeatScope>,
+        path: &str,
+    ) -> Result<()> {
+        self.find_node(path)?;
+        let grammar = self.grammar_for(record)?;
+        let mut assigned_occurrences: BTreeMap<String, usize> = BTreeMap::new();
+        let mut removals = Vec::new();
+        for (index, assignment) in grammar.assignments.iter().enumerate() {
+            let Some(assignment) = assignment else {
+                continue;
+            };
+            let occurrence = assigned_occurrences
+                .entry(assignment.path.clone())
+                .or_default();
+            let in_scope =
+                repeat_scope.is_none_or(|scope| grammar.repeat_scopes[index].contains(scope));
+            if in_scope && path_is_within(&assignment.path, path) {
+                removals.push((index, assignment.path.clone(), *occurrence));
+            }
+            *occurrence = occurrence.saturating_add(1);
+        }
+        for (index, assigned_path, occurrence) in removals.into_iter().rev() {
+            record.subrecords.remove(index);
+            remove_decoded_occurrence(decoded_values, &assigned_path, occurrence);
+        }
+        Ok(())
+    }
+
+    fn reset_subrecord_to_default(
+        &self,
+        record: &mut WritableRecord,
+        decoded_values: &mut BTreeMap<(String, usize), FieldValue<'static>>,
+        path: &str,
+        index: usize,
+        occurrence: usize,
+    ) -> Result<()> {
+        let node = self.find_node(path)?;
+        let SchemaNodeKind::Subrecord { signature, payload } = &node.kind else {
+            return Err(SemanticError::Encode {
+                path: path.to_owned(),
+                message: "schema-native default path is not a subrecord".to_owned(),
+            });
+        };
+        if record.subrecords[index].signature != Signature::from(*signature) {
+            return Err(SemanticError::Encode {
+                path: path.to_owned(),
+                message: "assigned subrecord signature does not match schema".to_owned(),
+            });
+        }
+        let field_values = expression_field_values_from(decoded_values);
+        let value =
+            self.default_value_for_node_at(payload, &field_values, 0, &[], record, Some(index))?;
+        let encoded =
+            self.encode_node_at_for_record(payload, &value, Some(index), record, decoded_values)?;
+        record.subrecords[index].data = encoded;
+        let decoded = self.owned_to_handler_value_at_for_record(
+            payload,
+            &value,
+            Some(index),
+            record,
+            decoded_values,
+        )?;
+        decoded_values.insert((path.to_owned(), occurrence), decoded);
+        Ok(())
+    }
+
     fn apply_nested_set(
         &self,
         record: &mut WritableRecord,
@@ -2659,17 +2934,35 @@ impl RecordEditor {
                         occurrence: parent_occurrence,
                     })?;
             let mut updated = handler_to_owned_value(current.to_handler_value(), &parent.path)?;
-            if !self.set_nested_value(
+            let index = self.assigned_subrecord_index(record, &parent.path, parent_occurrence)?;
+            if !self.set_nested_value_for_record(
                 &parent,
                 &mut updated,
                 path,
                 &mut remaining_occurrence,
                 &mut replacement,
+                CandidateValueContext {
+                    source_record: record,
+                    source_subrecord_index: Some(index),
+                    decoded_values,
+                },
             )? {
                 continue;
             }
-            let (signature, encoded) = self.encode_path(&parent.path, &updated)?;
-            let index = self.assigned_subrecord_index(record, &parent.path, parent_occurrence)?;
+            let SchemaNodeKind::Subrecord { signature, payload } = &parent.kind else {
+                return Err(SemanticError::Encode {
+                    path: parent.path,
+                    message: "containing schema node is not a subrecord".to_owned(),
+                });
+            };
+            let signature = Signature::from(*signature);
+            let encoded = self.encode_node_at_for_record(
+                payload,
+                &updated,
+                Some(index),
+                record,
+                decoded_values,
+            )?;
             if record.subrecords[index].signature != signature {
                 return Err(SemanticError::Encode {
                     path: parent.path,
@@ -2677,7 +2970,13 @@ impl RecordEditor {
                 });
             }
             record.subrecords[index].data = encoded;
-            let decoded = self.owned_to_handler_value(&parent, &updated)?;
+            let decoded = self.owned_to_handler_value_at_for_record(
+                payload,
+                &updated,
+                Some(index),
+                record,
+                decoded_values,
+            )?;
             decoded_values.insert(key, decoded);
             return Ok(());
         }
@@ -2722,8 +3021,18 @@ impl RecordEditor {
             let mut updated = handler_to_owned_value(current.to_handler_value(), &parent.path)?;
             let local_occurrence = remaining_occurrence;
             let mut probed_occurrence = remaining_occurrence;
-            let Some(current) =
-                self.nested_value_at(&parent, &updated, path, &mut probed_occurrence)?
+            let index = self.assigned_subrecord_index(record, &parent.path, parent_occurrence)?;
+            let Some(current) = self.nested_value_at_for_record(
+                &parent,
+                &updated,
+                path,
+                &mut probed_occurrence,
+                CandidateValueContext {
+                    source_record: record,
+                    source_subrecord_index: Some(index),
+                    decoded_values,
+                },
+            )?
             else {
                 remaining_occurrence = probed_occurrence;
                 continue;
@@ -2733,20 +3042,37 @@ impl RecordEditor {
             }
             let mut target_occurrence = local_occurrence;
             let mut replacement = Some(value);
-            if !self.set_nested_value(
+            if !self.set_nested_value_for_record(
                 &parent,
                 &mut updated,
                 path,
                 &mut target_occurrence,
                 &mut replacement,
+                CandidateValueContext {
+                    source_record: record,
+                    source_subrecord_index: Some(index),
+                    decoded_values,
+                },
             )? {
                 return Err(SemanticError::MissingOccurrence {
                     path: path.to_owned(),
                     occurrence,
                 });
             }
-            let (signature, encoded) = self.encode_path(&parent.path, &updated)?;
-            let index = self.assigned_subrecord_index(record, &parent.path, parent_occurrence)?;
+            let SchemaNodeKind::Subrecord { signature, payload } = &parent.kind else {
+                return Err(SemanticError::Encode {
+                    path: parent.path,
+                    message: "containing schema node is not a subrecord".to_owned(),
+                });
+            };
+            let signature = Signature::from(*signature);
+            let encoded = self.encode_node_at_for_record(
+                payload,
+                &updated,
+                Some(index),
+                record,
+                decoded_values,
+            )?;
             if record.subrecords[index].signature != signature {
                 return Err(SemanticError::Encode {
                     path: parent.path,
@@ -2754,7 +3080,13 @@ impl RecordEditor {
                 });
             }
             record.subrecords[index].data = encoded;
-            let decoded = self.owned_to_handler_value(&parent, &updated)?;
+            let decoded = self.owned_to_handler_value_at_for_record(
+                payload,
+                &updated,
+                Some(index),
+                record,
+                decoded_values,
+            )?;
             decoded_values.insert(key, decoded);
             return Ok(());
         }
@@ -2980,6 +3312,13 @@ impl RecordEditor {
                                 "schema-native default mutation for {path} escaped its value \
                                  container"
                             ),
+                        });
+                    }
+                    HandlerMutation::RemoveContainer { .. } => {
+                        return Err(SemanticError::Handler {
+                            handler: "def.after_set".to_owned(),
+                            message: "scoped callbacks cannot globalize container removal"
+                                .to_owned(),
                         });
                     }
                     HandlerMutation::Remove { path, occurrence } => HandlerMutation::Remove {
@@ -3225,6 +3564,7 @@ fn mutation_path(mutation: &HandlerMutation) -> &str {
         | HandlerMutation::ReplacePayload { path, .. }
         | HandlerMutation::InsertPayload { path, .. }
         | HandlerMutation::ResetToDefault { path, .. }
+        | HandlerMutation::RemoveContainer { path }
         | HandlerMutation::Insert { path, .. }
         | HandlerMutation::Remove { path, .. }
         | HandlerMutation::RemoveAll { path }
@@ -9331,6 +9671,316 @@ mod tests {
         SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())
     }
 
+    fn perk_effect_editor_context() -> Result<SemanticContext> {
+        fn node(
+            id: u32,
+            path: &str,
+            name: &str,
+            required: bool,
+            kind: SchemaNodeKind,
+        ) -> SchemaNode {
+            SchemaNode {
+                id: SchemaNodeId(id),
+                path: path.to_owned(),
+                name: name.to_owned(),
+                required,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind,
+            }
+        }
+
+        fn byte(id: u32, path: &str, name: &str) -> SchemaNode {
+            node(
+                id,
+                path,
+                name,
+                true,
+                SchemaNodeKind::Primitive {
+                    primitive: PrimitiveType::Integer {
+                        integer: IntegerType {
+                            width: 1,
+                            signed: false,
+                            byte_order: ByteOrder::LittleEndian,
+                        },
+                    },
+                },
+            )
+        }
+
+        fn bytes(id: u32, path: &str, length: u32) -> SchemaNode {
+            node(
+                id,
+                path,
+                path,
+                true,
+                SchemaNodeKind::Primitive {
+                    primitive: PrimitiveType::Bytes {
+                        length: Some(length),
+                    },
+                },
+            )
+        }
+
+        fn subrecord(
+            id: u32,
+            path: &str,
+            signature: [u8; 4],
+            required: bool,
+            payload: SchemaNode,
+        ) -> SchemaNode {
+            node(
+                id,
+                path,
+                path,
+                required,
+                SchemaNodeKind::Subrecord {
+                    signature: SchemaSignature(signature),
+                    payload: Box::new(payload),
+                },
+            )
+        }
+
+        let effects_path = "PERK/8:Effects";
+        let effect_path = "PERK/8:Effects/repeat/0:Effect";
+        let header_path = "PERK/8:Effects/repeat/0:Effect/0:Header";
+        let type_path = "PERK/8:Effects/repeat/0:Effect/0:Header/payload/0:Type";
+        let data_path = "PERK/8:Effects/repeat/0:Effect/1:Effect Data";
+        let data_union_path = "PERK/8:Effects/repeat/0:Effect/1:Effect Data/payload";
+        let entry_path = concat!(
+            "PERK/8:Effects/repeat/0:Effect/1:Effect Data/payload/",
+            "variants/2:Entry Point"
+        );
+        let function_path = concat!(
+            "PERK/8:Effects/repeat/0:Effect/1:Effect Data/payload/",
+            "variants/2:Entry Point/1:Function"
+        );
+        let conditions_path = "PERK/8:Effects/repeat/0:Effect/2:Perk Conditions";
+        let condition_path = "PERK/8:Effects/repeat/0:Effect/2:Perk Conditions/repeat/0:Condition";
+        let parameters_path = "PERK/8:Effects/repeat/0:Effect/3:Function Parameters";
+        let parameter_type_path = "PERK/8:Effects/repeat/0:Effect/3:Function Parameters/0:Type";
+        let parameter_data_path = "PERK/8:Effects/repeat/0:Effect/3:Function Parameters/1:Data";
+        let end_path = "PERK/8:Effects/repeat/0:Effect/4:End Marker";
+        let header = subrecord(
+            3,
+            header_path,
+            *b"PRKE",
+            true,
+            node(
+                4,
+                &format!("{header_path}/payload"),
+                "Header",
+                true,
+                SchemaNodeKind::Struct {
+                    fields: vec![
+                        byte(5, type_path, "Type"),
+                        byte(6, &format!("{header_path}/payload/1:Rank"), "Rank"),
+                    ],
+                },
+            ),
+        );
+        let entry_point = node(
+            10,
+            entry_path,
+            "Entry Point",
+            true,
+            SchemaNodeKind::Struct {
+                fields: vec![
+                    byte(11, &format!("{entry_path}/0:Entry Point"), "Entry Point"),
+                    byte(12, function_path, "Function"),
+                    byte(
+                        13,
+                        &format!("{entry_path}/2:Perk Condition Tab Count"),
+                        "Perk Condition Tab Count",
+                    ),
+                    byte(14, &format!("{entry_path}/3:Unknown"), "Unknown"),
+                ],
+            },
+        );
+        let data = subrecord(
+            7,
+            data_path,
+            *b"DATA",
+            true,
+            node(
+                8,
+                data_union_path,
+                "Effect Data",
+                true,
+                SchemaNodeKind::Union {
+                    selector: UnionSelector::Callback {
+                        callback_id: "union.select".to_owned(),
+                    },
+                    variants: vec![
+                        bytes(9, &format!("{data_union_path}/variants/0:Quest Stage"), 4),
+                        bytes(15, &format!("{data_union_path}/variants/1:Ability"), 4),
+                        entry_point,
+                    ],
+                },
+            ),
+        );
+        let conditions = node(
+            16,
+            conditions_path,
+            "Perk Conditions",
+            false,
+            SchemaNodeKind::Repeat {
+                minimum: 0,
+                maximum: None,
+                child: Box::new(node(
+                    17,
+                    condition_path,
+                    "Condition",
+                    false,
+                    SchemaNodeKind::Sequence {
+                        children: vec![
+                            subrecord(
+                                18,
+                                &format!("{condition_path}/0:Condition"),
+                                *b"CTDA",
+                                true,
+                                bytes(19, &format!("{condition_path}/0:Condition/payload"), 4),
+                            ),
+                            subrecord(
+                                20,
+                                &format!("{condition_path}/1:String"),
+                                *b"CIS1",
+                                false,
+                                node(
+                                    21,
+                                    &format!("{condition_path}/1:String/payload"),
+                                    "String",
+                                    true,
+                                    SchemaNodeKind::Primitive {
+                                        primitive: windows_1252_string(true),
+                                    },
+                                ),
+                            ),
+                        ],
+                    },
+                )),
+            },
+        );
+        let parameters = node(
+            22,
+            parameters_path,
+            "Function Parameters",
+            false,
+            SchemaNodeKind::Sequence {
+                children: vec![
+                    subrecord(
+                        23,
+                        parameter_type_path,
+                        *b"EPFT",
+                        false,
+                        byte(
+                            24,
+                            &format!("{parameter_type_path}/payload"),
+                            "Parameter Type",
+                        ),
+                    ),
+                    subrecord(
+                        25,
+                        parameter_data_path,
+                        *b"EPF2",
+                        false,
+                        bytes(26, &format!("{parameter_data_path}/payload"), 4),
+                    ),
+                ],
+            },
+        );
+        let end = subrecord(
+            27,
+            end_path,
+            *b"PRKF",
+            true,
+            bytes(28, &format!("{end_path}/payload"), 0),
+        );
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = 2;
+        manifest.callbacks_classified = 2;
+        manifest.required_handlers = vec![
+            HandlerRequirement {
+                id: "edit.perk_effect_type".to_owned(),
+                minimum_version: 1,
+            },
+            HandlerRequirement {
+                id: "select.perk_effect_data".to_owned(),
+                minimum_version: 1,
+            },
+        ];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"PERK"),
+                name: "Perk".to_owned(),
+                root: node(
+                    0,
+                    "PERK",
+                    "Perk",
+                    true,
+                    SchemaNodeKind::Sequence {
+                        children: vec![node(
+                            1,
+                            effects_path,
+                            "Effects",
+                            false,
+                            SchemaNodeKind::Repeat {
+                                minimum: 0,
+                                maximum: None,
+                                child: Box::new(node(
+                                    2,
+                                    effect_path,
+                                    "Effect",
+                                    false,
+                                    SchemaNodeKind::Sequence {
+                                        children: vec![header, data, conditions, parameters, end],
+                                    },
+                                )),
+                            },
+                        )],
+                    },
+                ),
+            }],
+            vec![
+                CallbackBinding {
+                    path: type_path.to_owned(),
+                    callback_id: "def.after_set".to_owned(),
+                    callback_slot: None,
+                    implementation_fingerprint: "77".repeat(32),
+                    implementation: CallbackImplementation::BuiltIn {
+                        operation: BuiltInOperation {
+                            id: "edit.perk_effect_type".to_owned(),
+                            minimum_version: 1,
+                            configuration: serde_json::json!({
+                                "type_path": type_path,
+                                "data_path": data_path,
+                                "conditions_path": conditions_path,
+                                "parameters_path": parameters_path,
+                                "parameter_type_path": parameter_type_path,
+                                "function_path": function_path
+                            }),
+                        },
+                    },
+                },
+                CallbackBinding {
+                    path: data_union_path.to_owned(),
+                    callback_id: "union.select".to_owned(),
+                    callback_slot: None,
+                    implementation_fingerprint: "88".repeat(32),
+                    implementation: CallbackImplementation::BuiltIn {
+                        operation: BuiltInOperation {
+                            id: "select.perk_effect_data".to_owned(),
+                            minimum_version: 1,
+                            configuration: serde_json::json!({}),
+                        },
+                    },
+                },
+            ],
+        )?;
+        SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())
+    }
+
     fn editor_with_reused_signature() -> Result<RecordEditor> {
         fn subrecord(id: u32, path: &str) -> SchemaNode {
             SchemaNode {
@@ -10245,6 +10895,119 @@ mod tests {
         assert_eq!(
             localized_editor.record.subrecords[1].data,
             0_u32.to_le_bytes()
+        );
+        Ok(())
+    }
+
+    /// Rebuilds only the edited PERK effect and preserves source and unknown bytes.
+    #[test]
+    fn perk_effect_type_change_rebuilds_repeat_local_state(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let context = perk_effect_editor_context()?;
+        let source_subrecords = vec![
+            WritableSubRecord {
+                signature: Signature(*b"PRKE"),
+                data: vec![0, 9],
+            },
+            WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: vec![11, 12, 13, 14],
+            },
+            WritableSubRecord {
+                signature: Signature(*b"CTDA"),
+                data: vec![1, 2, 3, 4],
+            },
+            WritableSubRecord {
+                signature: Signature(*b"CIS1"),
+                data: b"first\0".to_vec(),
+            },
+            WritableSubRecord {
+                signature: Signature(*b"EPFT"),
+                data: vec![5],
+            },
+            WritableSubRecord {
+                signature: Signature(*b"EPF2"),
+                data: vec![6, 7, 8, 9],
+            },
+            WritableSubRecord {
+                signature: Signature(*b"ZZZZ"),
+                data: vec![0xaa, 0xbb],
+            },
+            WritableSubRecord {
+                signature: Signature(*b"PRKF"),
+                data: Vec::new(),
+            },
+            WritableSubRecord {
+                signature: Signature(*b"PRKE"),
+                data: vec![1, 4],
+            },
+            WritableSubRecord {
+                signature: Signature(*b"DATA"),
+                data: vec![21, 22, 23, 24],
+            },
+            WritableSubRecord {
+                signature: Signature(*b"CTDA"),
+                data: vec![31, 32, 33, 34],
+            },
+            WritableSubRecord {
+                signature: Signature(*b"EPFT"),
+                data: vec![7],
+            },
+            WritableSubRecord {
+                signature: Signature(*b"PRKF"),
+                data: Vec::new(),
+            },
+        ];
+        let source_snapshot = source_subrecords
+            .iter()
+            .map(|subrecord| (subrecord.signature, subrecord.data.clone()))
+            .collect::<Vec<_>>();
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"PERK"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1234),
+            form_version: 44,
+            subrecords: source_subrecords,
+        });
+        let mut editor = context.edit(&source, false)?;
+        let type_path = "PERK/8:Effects/repeat/0:Effect/0:Header/payload/0:Type";
+
+        // when
+        editor.set_parsed_value(
+            type_path,
+            0,
+            &ParsedEditValue::new(OwnedFieldValue::UInt(2), Vec::new()),
+        )?;
+
+        // then
+        assert_eq!(
+            editor
+                .record
+                .subrecords
+                .iter()
+                .map(|subrecord| (subrecord.signature, subrecord.data.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Signature(*b"PRKE"), vec![2, 9]),
+                (Signature(*b"DATA"), vec![0, 2, 0, 0]),
+                (Signature(*b"ZZZZ"), vec![0xaa, 0xbb]),
+                (Signature(*b"EPFT"), vec![0]),
+                (Signature(*b"PRKF"), Vec::new()),
+                (Signature(*b"PRKE"), vec![1, 4]),
+                (Signature(*b"DATA"), vec![21, 22, 23, 24]),
+                (Signature(*b"CTDA"), vec![31, 32, 33, 34]),
+                (Signature(*b"EPFT"), vec![7]),
+                (Signature(*b"PRKF"), Vec::new()),
+            ]
+        );
+        assert_eq!(
+            source
+                .subrecords()?
+                .iter()
+                .map(|subrecord| (subrecord.signature, subrecord.as_bytes().to_vec()))
+                .collect::<Vec<_>>(),
+            source_snapshot
         );
         Ok(())
     }
