@@ -313,6 +313,73 @@ impl<'context, 'record> RecordView<'context, 'record> {
         Ok(fields)
     }
 
+    /// Decodes each occurrence of a repeated structural schema node.
+    ///
+    /// Every returned value is a structure containing the top-level subrecords assigned
+    /// to one repeat occurrence. This exposes callback sites such as a condition sequence
+    /// made from CTDA and optional CIS1/CIS2 subrecords without merging their byte origins.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when grammar interpretation or payload decoding fails.
+    pub fn repeated_structures(&self, path: &str) -> Result<Vec<FieldValue<'record>>> {
+        let subrecords = self.record.subrecords()?;
+        let grammar = interpret(
+            &self.schema.root,
+            self.record.header.signature,
+            self.record.header.form_version,
+            subrecords,
+        )?;
+        let fields = self.fields()?;
+        let mut occurrences: BTreeMap<u32, Vec<NamedValue<'record>>> = BTreeMap::new();
+
+        for (index, field) in fields.into_iter().enumerate() {
+            let Some(scope) = grammar
+                .repeat_scopes
+                .get(index)
+                .and_then(|scopes| scopes.iter().find(|scope| scope.path == path))
+            else {
+                continue;
+            };
+            occurrences
+                .entry(scope.occurrence)
+                .or_default()
+                .push(NamedValue {
+                    node_id: field.node_id,
+                    path: field.path,
+                    name: field.name,
+                    span: field.span,
+                    value: field.value,
+                });
+        }
+
+        Ok(occurrences.into_values().map(FieldValue::Struct).collect())
+    }
+
+    /// Formats one occurrence of a repeated structural callback site.
+    ///
+    /// `None` means that no executable value transform is bound to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticError`] when the occurrence does not exist, structural decoding
+    /// fails, or the bound formatter rejects the aggregate value.
+    pub fn format_repeated_structure_as(
+        &self,
+        path: &str,
+        occurrence: usize,
+        format: ValueFormat,
+    ) -> Result<Option<String>> {
+        let structures = self.repeated_structures(path)?;
+        let value = structures
+            .get(occurrence)
+            .ok_or_else(|| SemanticError::Decode {
+                path: path.to_owned(),
+                message: format!("repeat occurrence {occurrence} does not exist"),
+            })?;
+        self.format_value_as(path, value, format)
+    }
+
     /// Validates required fields, duplicate constraints, unknown subrecords,
     /// payload decoding, and complete byte coverage.
     pub fn validate(&self) -> ValidationReport {
@@ -2544,12 +2611,149 @@ mod tests {
         Ok(())
     }
 
+    /// Reconstructs repeated structural callback sites from grammar repeat scopes.
+    #[test]
+    fn repeated_structures_group_subrecords_by_occurrence(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        fn byte_subrecord(
+            id: u32,
+            path: &str,
+            name: &str,
+            signature: [u8; 4],
+            required: bool,
+        ) -> SchemaNode {
+            SchemaNode {
+                id: bethkit_schema::SchemaNodeId(id),
+                path: path.to_owned(),
+                name: name.to_owned(),
+                required,
+                conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Subrecord {
+                    signature: SchemaSignature(signature),
+                    payload: Box::new(SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(id + 1),
+                        path: format!("{path}/payload"),
+                        name: "Byte".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::Integer {
+                                integer: IntegerType {
+                                    width: 1,
+                                    signed: false,
+                                    byte_order: ByteOrder::LittleEndian,
+                                },
+                            },
+                        },
+                    }),
+                },
+            }
+        }
+
+        let structure_path = "TEST/0:Conditions/repeat/0:Condition";
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(1),
+                    path: "TEST/0:Conditions".to_owned(),
+                    name: "Conditions".to_owned(),
+                    required: false,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Repeat {
+                        minimum: 0,
+                        maximum: None,
+                        child: Box::new(SchemaNode {
+                            id: bethkit_schema::SchemaNodeId(2),
+                            path: structure_path.to_owned(),
+                            name: "Condition".to_owned(),
+                            required: false,
+                            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Sequence {
+                                children: vec![
+                                    byte_subrecord(
+                                        3,
+                                        &format!("{structure_path}/0:CTDA"),
+                                        "CTDA",
+                                        *b"CTDA",
+                                        true,
+                                    ),
+                                    byte_subrecord(
+                                        5,
+                                        &format!("{structure_path}/1:Parameter"),
+                                        "Parameter",
+                                        *b"CIS1",
+                                        false,
+                                    ),
+                                ],
+                            },
+                        }),
+                    },
+                }],
+            },
+        };
+        let package = SchemaPackage::new(
+            test_manifest(),
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root,
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let record_bytes = test_record_with_subrecords(
+            b"TEST",
+            &[(b"CTDA", &[1]), (b"CIS1", &[2]), (b"CTDA", &[3])],
+        );
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::sse())?;
+
+        // when
+        let structures = context
+            .view(&record, false)?
+            .repeated_structures(structure_path)?;
+
+        // then
+        assert_eq!(structures.len(), 2);
+        let FieldValue::Struct(first) = &structures[0] else {
+            return Err("expected first structural occurrence".into());
+        };
+        let FieldValue::Struct(second) = &structures[1] else {
+            return Err("expected second structural occurrence".into());
+        };
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 1);
+        assert!(matches!(first[0].value, FieldValue::UInt(1)));
+        assert!(matches!(first[1].value, FieldValue::UInt(2)));
+        assert!(matches!(second[0].value, FieldValue::UInt(3)));
+        Ok(())
+    }
+
     fn test_record_bytes(
         record_signature: &[u8; 4],
         subrecord_signature: &[u8; 4],
         payload: &[u8],
     ) -> Vec<u8> {
-        let data_size = 6_u32 + u32::try_from(payload.len()).expect("test payload fits u32");
+        test_record_with_subrecords(record_signature, &[(subrecord_signature, payload)])
+    }
+
+    fn test_record_with_subrecords(
+        record_signature: &[u8; 4],
+        subrecords: &[(&[u8; 4], &[u8])],
+    ) -> Vec<u8> {
+        let data_size = subrecords.iter().fold(0_u32, |size, (_, payload)| {
+            size + 6 + u32::try_from(payload.len()).expect("test payload fits u32")
+        });
         let mut bytes = Vec::new();
         bytes.extend_from_slice(record_signature);
         bytes.extend_from_slice(&data_size.to_le_bytes());
@@ -2558,13 +2762,15 @@ mod tests {
         bytes.extend_from_slice(&0_u32.to_le_bytes());
         bytes.extend_from_slice(&44_u16.to_le_bytes());
         bytes.extend_from_slice(&0_u16.to_le_bytes());
-        bytes.extend_from_slice(subrecord_signature);
-        bytes.extend_from_slice(
-            &u16::try_from(payload.len())
-                .expect("test payload fits u16")
-                .to_le_bytes(),
-        );
-        bytes.extend_from_slice(payload);
+        for (signature, payload) in subrecords {
+            bytes.extend_from_slice(*signature);
+            bytes.extend_from_slice(
+                &u16::try_from(payload.len())
+                    .expect("test payload fits u16")
+                    .to_le_bytes(),
+            );
+            bytes.extend_from_slice(payload);
+        }
         bytes
     }
 
