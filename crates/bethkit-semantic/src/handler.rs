@@ -59,6 +59,8 @@ pub enum HandlerPhase {
     DefaultValue,
     /// Validation equivalent to xEdit's `ctCheck`.
     Validation,
+    /// Transactional normalization performed when a writable record is loaded.
+    AfterLoad,
     /// Transactional callback after a value is changed.
     AfterSet,
     /// Dynamic reference or link resolution.
@@ -267,6 +269,8 @@ pub enum HandlerOutput {
     IndexKeys(Vec<RecordIndexKey>),
     /// Transactional record edits.
     Mutations(Vec<HandlerMutation>),
+    /// Replacement bytes for the active top-level subrecord payload.
+    SubrecordPayload(Vec<u8>),
 }
 
 /// Stable target identity returned by an xEdit link callback.
@@ -1090,6 +1094,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ResolveNavmeshEdge { resolver: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
+        registry.register(Arc::new(LegacyCtdaAfterLoad));
         registry.register(Arc::new(MessageDisplayTimeAfterSet));
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
@@ -3849,6 +3854,7 @@ fn unresolved_vmad_alias(raw: i64, phase: HandlerPhase, game: SchemaGame) -> Res
         | HandlerPhase::ArrayCount
         | HandlerPhase::ArrayElementInclusion
         | HandlerPhase::DefaultValue
+        | HandlerPhase::AfterLoad
         | HandlerPhase::AfterSet
         | HandlerPhase::ReferenceResolution
         | HandlerPhase::Conflict
@@ -7278,6 +7284,87 @@ fn ctda_function_error(message: impl Into<String>) -> SemanticError {
     SemanticError::Handler {
         handler: "format.ctda_function".to_owned(),
         message: message.into(),
+    }
+}
+
+struct LegacyCtdaAfterLoad;
+
+impl SemanticHandler for LegacyCtdaAfterLoad {
+    fn id(&self) -> &'static str {
+        "migrate.legacy_ctda_run_on"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterLoad {
+            return Ok(HandlerOutput::None);
+        }
+        if !matches!(
+            invocation.context.game,
+            SchemaGame::Fallout3 | SchemaGame::FalloutNv
+        ) {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy CTDA migration is only valid for Fallout 3 and Fallout NV"
+                    .to_owned(),
+            });
+        }
+        let record = invocation
+            .source_writable_record
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy CTDA migration requires a writable record".to_owned(),
+            })?;
+        let index = invocation
+            .source_subrecord_index
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy CTDA migration requires a source subrecord".to_owned(),
+            })?;
+        let subrecord = record
+            .subrecords
+            .get(index)
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("source subrecord index {index} is out of bounds"),
+            })?;
+        if subrecord.signature != Signature(*b"CTDA") {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "legacy CTDA migration received {} instead of CTDA",
+                    subrecord.signature
+                ),
+            });
+        }
+        let Some(type_flags) = subrecord.data.first().copied() else {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy CTDA payload is empty".to_owned(),
+            });
+        };
+        if type_flags & 0x02 == 0 {
+            return Ok(HandlerOutput::None);
+        }
+        if subrecord.data.len() != 20 && subrecord.data.len() < 24 {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!(
+                    "legacy CTDA payload has unsupported size {}",
+                    subrecord.data.len()
+                ),
+            });
+        }
+        let mut data = subrecord.data.clone();
+        if data.len() == 20 {
+            data.resize(28, 0);
+        }
+        data[0] &= !0x02;
+        data[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        Ok(HandlerOutput::SubrecordPayload(data))
     }
 }
 
@@ -14266,6 +14353,69 @@ mod tests {
             source,
         )
         .is_err());
+        Ok(())
+    }
+
+    /// Migrates modern-sized legacy CTDA payloads without changing unrelated bytes.
+    #[test]
+    fn legacy_ctda_after_load_preserves_existing_reference_bytes() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/0:CTDA".to_owned(),
+            callback_id: "def.after_load".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-ctda-after-load".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "migrate.legacy_ctda_run_on".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let mut data = (0_u8..28).collect::<Vec<_>>();
+        data[0] = 0x43;
+        let record = WritableRecord {
+            signature: Signature(*b"TEST"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![bethkit_core::WritableSubRecord {
+                signature: Signature(*b"CTDA"),
+                data: data.clone(),
+            }],
+        };
+        let output = SemanticHandlerRegistry::builtin().invoke_with_records(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Fallout3),
+            HandlerInvocationAccess::writable_subrecord_with_scope(&record, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+
+        let HandlerOutput::SubrecordPayload(migrated) = output else {
+            return Err(SemanticError::Handler {
+                handler: "migrate.legacy_ctda_run_on".to_owned(),
+                message: "legacy CTDA migration did not return a payload".to_owned(),
+            });
+        };
+        assert_eq!(migrated.len(), 28);
+        assert_eq!(migrated[0], 0x41);
+        assert_eq!(&migrated[1..20], &data[1..20]);
+        assert_eq!(&migrated[20..24], &1_u32.to_le_bytes());
+        assert_eq!(&migrated[24..], &data[24..]);
+
+        let mut normalized = record;
+        normalized.subrecords[0].data[0] = 0x41;
+        let unchanged = SemanticHandlerRegistry::builtin().invoke_with_records(
+            &binding,
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Fallout3),
+            HandlerInvocationAccess::writable_subrecord_with_scope(&normalized, 0, None),
+            HandlerPhase::AfterLoad,
+            None,
+            None,
+        )?;
+        assert!(matches!(unchanged, HandlerOutput::None));
         Ok(())
     }
 

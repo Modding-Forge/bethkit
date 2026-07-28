@@ -32,6 +32,7 @@ use once_cell::sync::OnceCell;
 
 use crate::error::{CoreError, Result};
 use crate::types::{FormId, GameContext, PluginKind, RecordFlags, Signature};
+use crate::WritableRecord;
 
 /// The raw data payload of a subrecord.
 ///
@@ -368,6 +369,46 @@ pub struct Record {
 }
 
 impl Record {
+    /// Creates an immutable record snapshot from a writable record.
+    ///
+    /// The snapshot owns copies of all subrecord payloads and has no source
+    /// byte range. This is useful when a higher-level editor needs to decode
+    /// a transactional writable state without serializing a complete plugin.
+    pub fn from_writable(record: &WritableRecord) -> Self {
+        let data_size = record.subrecords.iter().fold(0_u32, |size, subrecord| {
+            let header_size = if subrecord.data.len() > u16::MAX as usize {
+                16
+            } else {
+                6
+            };
+            size.saturating_add(
+                u32::try_from(header_size + subrecord.data.len()).unwrap_or(u32::MAX),
+            )
+        });
+        let subrecords: Vec<SubRecord> = record
+            .subrecords
+            .iter()
+            .map(|subrecord| SubRecord {
+                signature: subrecord.signature,
+                data: SubRecordData::Owned(subrecord.data.clone()),
+            })
+            .collect();
+        Self {
+            header: RecordHeader {
+                signature: record.signature,
+                data_size,
+                flags: record.flags,
+                form_id: record.form_id,
+                version_control: 0,
+                form_version: record.form_version,
+                unknown: 0,
+            },
+            source_range: None,
+            data: RecordData::Raw(Arc::from([])),
+            parsed: OnceLock::from(subrecords),
+        }
+    }
+
     /// Parses the record header from `cursor` and stores the raw data block.
     ///
     /// Subrecords are **not** parsed yet.

@@ -40,6 +40,7 @@ pub struct RecordEditor {
     handlers: SemanticHandlerRegistry,
     record: WritableRecord,
     localized: bool,
+    after_load_migrations: usize,
     decoded_values: BTreeMap<(String, usize), FieldValue<'static>>,
 }
 
@@ -62,18 +63,7 @@ impl RecordEditor {
                 data: subrecord.as_bytes().to_vec(),
             })
             .collect();
-        let decoded_values = context
-            .view(record, plugin_localized)?
-            .fields()?
-            .into_iter()
-            .map(|field| {
-                (
-                    (field.path, field.occurrence),
-                    field.value.to_handler_value(),
-                )
-            })
-            .collect();
-        Ok(Self {
+        let mut editor = Self {
             registry: context.registry().clone(),
             decoders: context.decoders().clone(),
             handlers: context.handlers().clone(),
@@ -85,8 +75,23 @@ impl RecordEditor {
                 subrecords,
             },
             localized: plugin_localized,
-            decoded_values,
-        })
+            after_load_migrations: 0,
+            decoded_values: BTreeMap::new(),
+        };
+        editor.apply_after_load_callbacks()?;
+        let snapshot = Record::from_writable(&editor.record);
+        editor.decoded_values = context
+            .view(&snapshot, plugin_localized)?
+            .fields()?
+            .into_iter()
+            .map(|field| {
+                (
+                    (field.path, field.occurrence),
+                    field.value.to_handler_value(),
+                )
+            })
+            .collect();
+        Ok(editor)
     }
 
     /// Replaces an existing top-level schema-path occurrence with a typed value.
@@ -344,6 +349,83 @@ impl RecordEditor {
     /// Returns whether the parent plugin uses localized string tables.
     pub fn is_localized(&self) -> bool {
         self.localized
+    }
+
+    /// Returns the number of subrecord payloads normalized by `after_load` callbacks.
+    pub fn after_load_migration_count(&self) -> usize {
+        self.after_load_migrations
+    }
+
+    fn apply_after_load_callbacks(&mut self) -> Result<()> {
+        let record_path = self.record.signature.to_string();
+        let bindings = self
+            .registry
+            .package()
+            .callback_bindings()
+            .iter()
+            .filter(|binding| {
+                binding.callback_id == "def.after_load"
+                    && (binding.path == record_path
+                        || binding
+                            .path
+                            .strip_prefix(&record_path)
+                            .is_some_and(|suffix| suffix.starts_with('/')))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for binding in bindings {
+            if !matches!(
+                binding.implementation,
+                CallbackImplementation::BuiltIn { .. }
+                    | CallbackImplementation::CustomHandler { .. }
+            ) {
+                return Err(SemanticError::Handler {
+                    handler: binding.callback_id,
+                    message: "after-load callback is not executable".to_owned(),
+                });
+            }
+            let indices = {
+                let grammar = self.grammar_for(&self.record)?;
+                grammar
+                    .assignments
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, assignment)| {
+                        assignment
+                            .is_some_and(|node| node.path == binding.path)
+                            .then_some(index)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for index in indices {
+                let output = self.handlers.invoke_with_records(
+                    &binding,
+                    self.handler_record(),
+                    HandlerInvocationAccess::writable_subrecord_with_scope(
+                        &self.record,
+                        index,
+                        None,
+                    ),
+                    HandlerPhase::AfterLoad,
+                    None,
+                    None,
+                )?;
+                match output {
+                    HandlerOutput::None => {}
+                    HandlerOutput::SubrecordPayload(data) => {
+                        self.record.subrecords[index].data = data;
+                        self.after_load_migrations = self.after_load_migrations.saturating_add(1);
+                    }
+                    _ => {
+                        return Err(SemanticError::Handler {
+                            handler: binding.callback_id.clone(),
+                            message: "after-load callback returned an invalid result".to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn find_node(&self, path: &str) -> Result<&SchemaNode> {
@@ -3433,6 +3515,7 @@ mod tests {
                 }],
             },
             localized: false,
+            after_load_migrations: 0,
             decoded_values: BTreeMap::from([((ctda_path.to_owned(), 0), FieldValue::UInt(5))]),
         };
         let parsed = ParsedEditValue::new(
@@ -3633,6 +3716,7 @@ mod tests {
                 }],
             },
             localized: false,
+            after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
         let decoded = editor.owned_to_handler_value(
@@ -3859,6 +3943,7 @@ mod tests {
                 subrecords: Vec::new(),
             },
             localized: false,
+            after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
         let mut groups = vec![OwnedFieldValue::Array(Vec::new()); 5];
@@ -3968,6 +4053,7 @@ mod tests {
                 subrecords: Vec::new(),
             },
             localized: false,
+            after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
 
@@ -4086,6 +4172,7 @@ mod tests {
                 subrecords: Vec::new(),
             },
             localized: false,
+            after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
 
@@ -4353,6 +4440,157 @@ mod tests {
         Ok(())
     }
 
+    /// Normalizes legacy Fallout CTDA bytes only in the writable editor snapshot.
+    #[test]
+    fn editor_applies_legacy_ctda_after_load_migration() -> Result<()> {
+        let condition_path = "TEST/0:Condition";
+        let payload_path = "TEST/0:Condition/payload";
+        let fields = vec![
+            SchemaNode {
+                id: SchemaNodeId(3),
+                path: format!("{payload_path}/0:Type"),
+                name: "Type".to_owned(),
+                required: true,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Primitive {
+                    primitive: PrimitiveType::Integer {
+                        integer: IntegerType {
+                            width: 1,
+                            signed: false,
+                            byte_order: ByteOrder::LittleEndian,
+                        },
+                    },
+                },
+            },
+            SchemaNode {
+                id: SchemaNodeId(4),
+                path: format!("{payload_path}/1:Legacy Data"),
+                name: "Legacy Data".to_owned(),
+                required: true,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Primitive {
+                    primitive: PrimitiveType::Bytes { length: Some(19) },
+                },
+            },
+            SchemaNode {
+                id: SchemaNodeId(5),
+                path: format!("{payload_path}/2:Run On"),
+                name: "Run On".to_owned(),
+                required: true,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Primitive {
+                    primitive: PrimitiveType::Integer {
+                        integer: IntegerType {
+                            width: 4,
+                            signed: false,
+                            byte_order: ByteOrder::LittleEndian,
+                        },
+                    },
+                },
+            },
+            SchemaNode {
+                id: SchemaNodeId(6),
+                path: format!("{payload_path}/3:Reference"),
+                name: "Reference".to_owned(),
+                required: true,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Primitive {
+                    primitive: PrimitiveType::Bytes { length: Some(4) },
+                },
+            },
+        ];
+        let mut manifest = test_manifest();
+        manifest.game = SchemaGame::FalloutNv;
+        manifest.callbacks_total = 1;
+        manifest.callbacks_classified = 1;
+        manifest.required_handlers = vec![HandlerRequirement {
+            id: "migrate.legacy_ctda_run_on".to_owned(),
+            minimum_version: 1,
+        }];
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: SchemaNode {
+                    id: SchemaNodeId(0),
+                    path: "TEST".to_owned(),
+                    name: "Test".to_owned(),
+                    required: true,
+                    conflict_priority: ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: SchemaNodeId(1),
+                            path: condition_path.to_owned(),
+                            name: "Condition".to_owned(),
+                            required: true,
+                            conflict_priority: ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"CTDA"),
+                                payload: Box::new(SchemaNode {
+                                    id: SchemaNodeId(2),
+                                    path: payload_path.to_owned(),
+                                    name: "Condition".to_owned(),
+                                    required: true,
+                                    conflict_priority: ConflictPriority::Normal,
+                                    condition: None,
+                                    kind: SchemaNodeKind::Struct { fields },
+                                }),
+                            },
+                        }],
+                    },
+                },
+            }],
+            vec![CallbackBinding {
+                path: condition_path.to_owned(),
+                callback_id: "def.after_load".to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "55".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: "migrate.legacy_ctda_run_on".to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut legacy_payload = (0_u8..20).collect::<Vec<_>>();
+        legacy_payload[0] = 0x27;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"TEST");
+        bytes.extend_from_slice(&26_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(b"CTDA");
+        bytes.extend_from_slice(&20_u16.to_le_bytes());
+        bytes.extend_from_slice(&legacy_payload);
+        let mut cursor = bethkit_io::SliceCursor::new(&bytes);
+        let record = Record::parse_header(&mut cursor, &bethkit_core::GameContext::sse())?;
+
+        let editor = context.edit(&record, false)?;
+
+        assert_eq!(record.subrecords()?[0].as_bytes(), legacy_payload);
+        assert_eq!(editor.after_load_migration_count(), 1);
+        let writable = editor.into_writable_record();
+        assert_eq!(writable.subrecords[0].data.len(), 28);
+        assert_eq!(writable.subrecords[0].data[0], 0x27 & !0x02);
+        assert_eq!(&writable.subrecords[0].data[1..20], &legacy_payload[1..]);
+        assert_eq!(&writable.subrecords[0].data[20..24], &1_u32.to_le_bytes());
+        assert_eq!(&writable.subrecords[0].data[24..28], &[0; 4]);
+        Ok(())
+    }
+
     fn test_manifest() -> SchemaManifest {
         SchemaManifest {
             format_version: PACKAGE_FORMAT_VERSION,
@@ -4532,6 +4770,7 @@ mod tests {
                 ],
             },
             localized: false,
+            after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         })
     }
@@ -4625,6 +4864,7 @@ mod tests {
                 }],
             },
             localized: false,
+            after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
         let decoded = editor.owned_to_handler_value(
@@ -4792,6 +5032,7 @@ mod tests {
                 ],
             },
             localized: false,
+            after_load_migrations: 0,
             decoded_values: BTreeMap::from([
                 ((counter_path.clone(), 0), FieldValue::UInt(1)),
                 ((counter_path, 1), FieldValue::UInt(1)),

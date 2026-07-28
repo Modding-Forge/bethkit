@@ -108,6 +108,9 @@ impl SemanticContext {
 
     /// Creates a lossless semantic editor over a record.
     ///
+    /// Classified xEdit `after_load` callbacks normalize the writable copy
+    /// before it is decoded. The source [`Record`] remains unchanged.
+    ///
     /// # Errors
     ///
     /// Returns [`crate::SemanticError`] when the record subrecords cannot be
