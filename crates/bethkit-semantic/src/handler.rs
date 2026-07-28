@@ -2313,6 +2313,16 @@ fn configured_byte(handler: &str, configuration: &serde_json::Value, key: &str) 
         })
 }
 
+fn configured_i64(handler: &str, configuration: &serde_json::Value, key: &str) -> Result<i64> {
+    configuration
+        .get(key)
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("configuration key {key} is not a signed integer"),
+        })
+}
+
 fn configured_optional_digits(
     handler: &str,
     configuration: &serde_json::Value,
@@ -12250,24 +12260,6 @@ impl SemanticHandler for MagicEffectAssocItemAfterSet {
         if invocation.phase != HandlerPhase::AfterSet {
             return Ok(HandlerOutput::None);
         }
-        if invocation.context.record_signature != Signature(*b"MGEF")
-            || !matches!(
-                invocation.context.game,
-                SchemaGame::SkyrimLe
-                    | SchemaGame::SkyrimSe
-                    | SchemaGame::SkyrimVr
-                    | SchemaGame::Fallout3
-                    | SchemaGame::FalloutNv
-                    | SchemaGame::Fallout4
-                    | SchemaGame::Fallout4Vr
-                    | SchemaGame::Fallout76
-            )
-        {
-            return Err(SemanticError::Handler {
-                handler: self.id().to_owned(),
-                message: "associated-item updates require a guarded MGEF binding".to_owned(),
-            });
-        }
         let assoc_item_path = configured_text(
             self.id(),
             invocation.context.configuration,
@@ -12293,12 +12285,22 @@ impl SemanticHandler for MagicEffectAssocItemAfterSet {
             invocation.context.configuration,
             "archetype_path",
         )?;
+        let unset_archetype = configured_i64(
+            self.id(),
+            invocation.context.configuration,
+            "unset_archetype",
+        )?;
+        let generic_archetype = configured_i64(
+            self.id(),
+            invocation.context.configuration,
+            "generic_archetype",
+        )?;
         Ok(HandlerOutput::Mutations(vec![
             HandlerMutation::SetIfEqual {
                 path: archetype_path.to_owned(),
                 occurrence: 0,
-                expected: OwnedFieldValue::Int(0),
-                value: OwnedFieldValue::Int(0xFF),
+                expected: OwnedFieldValue::Int(unset_archetype),
+                value: OwnedFieldValue::Int(generic_archetype),
             },
         ]))
     }
@@ -12318,23 +12320,6 @@ impl SemanticHandler for PackageInputTypeAfterSet {
     fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
         if invocation.phase != HandlerPhase::AfterSet {
             return Ok(HandlerOutput::None);
-        }
-        if invocation.context.record_signature != Signature(*b"PACK")
-            || !matches!(
-                invocation.context.game,
-                SchemaGame::SkyrimLe
-                    | SchemaGame::SkyrimSe
-                    | SchemaGame::SkyrimVr
-                    | SchemaGame::Fallout4
-                    | SchemaGame::Fallout4Vr
-                    | SchemaGame::Fallout76
-                    | SchemaGame::Starfield
-            )
-        {
-            return Err(SemanticError::Handler {
-                handler: self.id().to_owned(),
-                message: "package-input updates require a guarded PACK binding".to_owned(),
-            });
         }
         let type_path = configured_text(self.id(), invocation.context.configuration, "type_path")?;
         if type_path != invocation.context.binding.path {
@@ -12432,20 +12417,6 @@ impl SemanticHandler for QuestScriptNameAfterSet {
     fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
         if invocation.phase != HandlerPhase::AfterSet {
             return Ok(HandlerOutput::None);
-        }
-        if invocation.context.record_signature != Signature(*b"QUST")
-            || !matches!(
-                invocation.context.game,
-                SchemaGame::Fallout4
-                    | SchemaGame::Fallout4Vr
-                    | SchemaGame::Fallout76
-                    | SchemaGame::Starfield
-            )
-        {
-            return Err(SemanticError::Handler {
-                handler: self.id().to_owned(),
-                message: "quest script-name updates require a guarded QUST binding".to_owned(),
-            });
         }
         let name_path = configured_text(self.id(), invocation.context.configuration, "name_path")?;
         if name_path != invocation.context.binding.path {
@@ -24337,7 +24308,7 @@ mod tests {
         };
         let handlers = SemanticHandlerRegistry::builtin();
         let context =
-            HandlerRecordContext::new(Signature(*b"PACK"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Morrowind);
         let subrecord = |signature, data| bethkit_core::WritableSubRecord { signature, data };
         let invoke = |subrecords: Vec<bethkit_core::WritableSubRecord>,
                       old_value: &'static str,
@@ -24452,7 +24423,7 @@ mod tests {
         };
         let handlers = SemanticHandlerRegistry::builtin();
         let context =
-            HandlerRecordContext::new(Signature(*b"QUST"), FormId::NULL, 0, SchemaGame::Fallout4);
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Morrowind);
         let invoke = |old_value: &'static str, new_value: &'static str| {
             handlers.invoke(
                 &binding,
@@ -24490,19 +24461,16 @@ mod tests {
     #[test]
     fn magic_effect_assoc_item_protects_unset_archetype() -> Result<()> {
         let handlers = SemanticHandlerRegistry::builtin();
-        for (game, assoc_item_path, archetype_path) in [
+        for (assoc_item_path, archetype_path) in [
             (
-                SchemaGame::Fallout3,
                 "MGEF/5:Data/payload/2:Assoc. Item",
                 "MGEF/5:Data/payload/17:Archtype",
             ),
             (
-                SchemaGame::SkyrimSe,
                 "MGEF/6:Magic Effect Data/0:Data/payload/2:Assoc. Item",
                 "MGEF/6:Magic Effect Data/0:Data/payload/16:Archtype",
             ),
             (
-                SchemaGame::Fallout76,
                 "MGEF/5:Magic Effect Data/0:Data/payload/3:Assoc. Item",
                 "MGEF/5:Magic Effect Data/0:Data/payload/17:Archetype",
             ),
@@ -24518,12 +24486,19 @@ mod tests {
                         minimum_version: 1,
                         configuration: serde_json::json!({
                             "assoc_item_path": assoc_item_path,
-                            "archetype_path": archetype_path
+                            "archetype_path": archetype_path,
+                            "unset_archetype": 0,
+                            "generic_archetype": 0xff
                         }),
                     },
                 },
             };
-            let record = HandlerRecordContext::new(Signature(*b"MGEF"), FormId::NULL, 0, game);
+            let record = HandlerRecordContext::new(
+                Signature(*b"TEST"),
+                FormId::NULL,
+                0,
+                SchemaGame::Morrowind,
+            );
             let protected = handlers.invoke(
                 &binding,
                 record,

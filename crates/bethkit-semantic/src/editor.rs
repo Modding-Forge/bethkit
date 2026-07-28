@@ -9790,7 +9790,9 @@ mod tests {
                         minimum_version: 1,
                         configuration: serde_json::json!({
                             "assoc_item_path": assoc_item_path,
-                            "archetype_path": archetype_path
+                            "archetype_path": archetype_path,
+                            "unset_archetype": 0,
+                            "generic_archetype": 0xff
                         }),
                     },
                 },
