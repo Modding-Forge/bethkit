@@ -228,6 +228,11 @@ pub enum HandlerMutation {
         /// Zero-based occurrence.
         occurrence: usize,
     },
+    /// Insert a subrecord using its schema-native default in the current edit context.
+    InsertDefault {
+        /// Stable subrecord schema path.
+        path: String,
+    },
     /// Insert a new field.
     Insert {
         /// Stable schema path.
@@ -251,6 +256,13 @@ pub enum HandlerMutation {
     RemoveContainer {
         /// Stable path of the sequence, repeat, choice, or other container node.
         path: String,
+    },
+    /// Remove one repeated structural container and its assigned subrecords.
+    RemoveContainerOccurrence {
+        /// Stable path of the repeated child container.
+        path: String,
+        /// Zero-based occurrence within the active outer repeat scope.
+        occurrence: usize,
     },
     /// Remove every raw subrecord with one signature before initial decoding.
     RemoveAllBySignature {
@@ -1254,6 +1266,9 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormListEditorIdAfterSet));
         registry.register(Arc::new(GameSettingEditorIdAfterSet));
         registry.register(Arc::new(PerkEffectTypeAfterSet));
+        registry.register(Arc::new(LegacyPerkEntryPointAfterSet));
+        registry.register(Arc::new(LegacyPerkFunctionAfterSet));
+        registry.register(Arc::new(LegacyPerkParameterTypeAfterSet));
         registry.register(Arc::new(HeadPartsAfterSet));
         registry.register(Arc::new(MagicEffectSecondAvWeightAfterSet));
         registry.register(Arc::new(MagicEffectArchetypeAfterSet));
@@ -2126,6 +2141,78 @@ fn configured_text<'a>(
             handler: handler.to_owned(),
             message: format!("record metadata callback requires string configuration `{key}`"),
         })
+}
+
+fn configured_u8_array(
+    handler: &str,
+    configuration: &serde_json::Value,
+    key: &str,
+) -> Result<Vec<u8>> {
+    let values = configuration
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("callback configuration `{key}` must be an array"),
+        })?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_u64()
+                .and_then(|value| u8::try_from(value).ok())
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: handler.to_owned(),
+                    message: format!("callback configuration `{key}[{index}]` must be a byte"),
+                })
+        })
+        .collect()
+}
+
+fn configured_u8_matrix(
+    handler: &str,
+    configuration: &serde_json::Value,
+    key: &str,
+    width: usize,
+) -> Result<Vec<Vec<u8>>> {
+    let rows = configuration
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("callback configuration `{key}` must be an array"),
+        })?;
+    rows.iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let values = row
+                .as_array()
+                .filter(|values| values.len() == width)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: handler.to_owned(),
+                    message: format!(
+                        "callback configuration `{key}[{row_index}]` must contain {width} bytes"
+                    ),
+                })?;
+            values
+                .iter()
+                .enumerate()
+                .map(|(column_index, value)| {
+                    value
+                        .as_u64()
+                        .and_then(|value| u8::try_from(value).ok())
+                        .ok_or_else(|| SemanticError::Handler {
+                            handler: handler.to_owned(),
+                            message: format!(
+                                "callback configuration `{key}[{row_index}][{column_index}]` \
+                                 must be a byte"
+                            ),
+                        })
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn configured_optional_text<'a>(
@@ -12118,6 +12205,454 @@ impl SemanticHandler for PerkEffectTypeAfterSet {
             });
         }
         Ok(HandlerOutput::Mutations(mutations))
+    }
+}
+
+fn require_legacy_perk_invocation<'a>(
+    handler: &str,
+    invocation: &'a HandlerInvocation<'_>,
+) -> Result<(&'a WritableRecord, usize)> {
+    if invocation.context.record_signature != Signature(*b"PERK")
+        || !matches!(
+            invocation.context.game,
+            SchemaGame::Fallout3 | SchemaGame::FalloutNv
+        )
+    {
+        return Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "legacy PERK callback requires a guarded Fallout 3 or New Vegas binding"
+                .to_owned(),
+        });
+    }
+    let record = invocation
+        .source_writable_record
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "legacy PERK callback requires the writable source record".to_owned(),
+        })?;
+    let index = invocation
+        .source_subrecord_index
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "legacy PERK callback requires its source subrecord index".to_owned(),
+        })?;
+    if index >= record.subrecords.len() {
+        return Err(SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "legacy PERK source subrecord index is out of bounds".to_owned(),
+        });
+    }
+    Ok((record, index))
+}
+
+fn legacy_perk_callback_i64(value: &FieldValue<'_>, handler: &str) -> Result<i64> {
+    i64::try_from(callback_integer(value, handler)?).map_err(|_| SemanticError::Handler {
+        handler: handler.to_owned(),
+        message: "legacy PERK callback value exceeds i64".to_owned(),
+    })
+}
+
+fn legacy_perk_effect_range(
+    handler: &str,
+    record: &WritableRecord,
+    source_index: usize,
+) -> Result<std::ops::Range<usize>> {
+    let start = (0..=source_index)
+        .rev()
+        .find(|index| record.subrecords[*index].signature == Signature(*b"PRKE"))
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: "legacy PERK callback has no preceding PRKE header".to_owned(),
+        })?;
+    let end = (source_index.saturating_add(1)..record.subrecords.len())
+        .find(|index| record.subrecords[*index].signature == Signature(*b"PRKE"))
+        .unwrap_or(record.subrecords.len());
+    Ok(start..end)
+}
+
+fn legacy_perk_parameter_type(
+    handler: &str,
+    configuration: &serde_json::Value,
+    record: &WritableRecord,
+    range: &std::ops::Range<usize>,
+) -> Result<i64> {
+    let Some(subrecord) = record.subrecords[range.clone()]
+        .iter()
+        .find(|subrecord| subrecord.signature == Signature(*b"EPFT"))
+    else {
+        return Ok(0);
+    };
+    read_configured_integer(configuration, "parameter_type", &subrecord.data, handler)
+}
+
+fn legacy_perk_parameter_mutations(
+    handler: &str,
+    configuration: &serde_json::Value,
+    record: &WritableRecord,
+    range: &std::ops::Range<usize>,
+    parameter_type: i64,
+) -> Result<Vec<HandlerMutation>> {
+    let mut mutations = Vec::new();
+    for (key, signature) in [
+        ("parameter_data_path", Signature(*b"EPFD")),
+        ("button_label_path", Signature(*b"EPF2")),
+        ("script_flags_path", Signature(*b"EPF3")),
+    ] {
+        if record.subrecords[range.clone()]
+            .iter()
+            .any(|subrecord| subrecord.signature == signature)
+        {
+            mutations.push(HandlerMutation::Remove {
+                path: configured_text(handler, configuration, key)?.to_owned(),
+                occurrence: 0,
+            });
+        }
+    }
+    mutations.push(HandlerMutation::RemoveContainer {
+        path: configured_text(handler, configuration, "embedded_script_path")?.to_owned(),
+    });
+    match parameter_type {
+        1..=3 => mutations.push(HandlerMutation::InsertDefault {
+            path: configured_text(handler, configuration, "parameter_data_path")?.to_owned(),
+        }),
+        4 => {
+            for key in [
+                "button_label_path",
+                "script_flags_path",
+                "script_header_path",
+            ] {
+                mutations.push(HandlerMutation::InsertDefault {
+                    path: configured_text(handler, configuration, key)?.to_owned(),
+                });
+            }
+        }
+        _ => {}
+    }
+    Ok(mutations)
+}
+
+fn legacy_perk_set_parameter_type(
+    handler: &str,
+    configuration: &serde_json::Value,
+    record: &WritableRecord,
+    range: &std::ops::Range<usize>,
+    old_function: i64,
+    new_function: i64,
+) -> Result<Vec<HandlerMutation>> {
+    let parameter_types = configured_u8_array(handler, configuration, "function_parameter_types")?;
+    let new_index = usize::try_from(new_function)
+        .ok()
+        .filter(|index| *index < parameter_types.len());
+    let Some(new_index) = new_index else {
+        return Ok(Vec::new());
+    };
+    let new_parameter_type = i64::from(parameter_types[new_index]);
+    let old_parameter_type = legacy_perk_parameter_type(handler, configuration, record, range)?;
+    let parameter_type_path =
+        configured_text(handler, configuration, "parameter_type_path")?.to_owned();
+    let parameter_type_present = record.subrecords[range.clone()]
+        .iter()
+        .any(|subrecord| subrecord.signature == Signature(*b"EPFT"));
+    let mut mutations = vec![if parameter_type_present {
+        HandlerMutation::Set {
+            path: parameter_type_path,
+            occurrence: 0,
+            value: OwnedFieldValue::Int(new_parameter_type),
+        }
+    } else {
+        HandlerMutation::SynchronizePresence {
+            path: parameter_type_path,
+            occurrence: 0,
+            present: true,
+            value: OwnedFieldValue::Int(new_parameter_type),
+        }
+    }];
+    let force_rebuild = old_function != new_function && matches!(new_function, 4 | 5);
+    if old_parameter_type != new_parameter_type || force_rebuild {
+        mutations.extend(legacy_perk_parameter_mutations(
+            handler,
+            configuration,
+            record,
+            range,
+            new_parameter_type,
+        )?);
+    }
+    Ok(mutations)
+}
+
+struct LegacyPerkEntryPointAfterSet;
+
+impl SemanticHandler for LegacyPerkEntryPointAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.legacy_perk_entry_point"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let configuration = invocation.context.configuration;
+        if configured_text(self.id(), configuration, "binding_path")?
+            != invocation.context.binding.path
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy PERK entry-point configuration does not match its binding"
+                    .to_owned(),
+            });
+        }
+        let new_entry_point = invocation
+            .value
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy PERK entry-point callback requires a new value".to_owned(),
+            })
+            .and_then(|value| legacy_perk_callback_i64(value, self.id()))?;
+        let old_entry_point = invocation
+            .old_value
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy PERK entry-point callback requires the previous value".to_owned(),
+            })
+            .and_then(|value| legacy_perk_callback_i64(value, self.id()))?;
+        if old_entry_point == new_entry_point {
+            return Ok(HandlerOutput::None);
+        }
+        let (record, source_index) = require_legacy_perk_invocation(self.id(), &invocation)?;
+        let range = legacy_perk_effect_range(self.id(), record, source_index)?;
+        let entry_conditions =
+            configured_u8_array(self.id(), configuration, "entry_point_conditions")?;
+        let entry_function_types =
+            configured_u8_array(self.id(), configuration, "entry_point_function_types")?;
+        if entry_conditions.len() != entry_function_types.len() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy PERK entry-point metadata lengths differ".to_owned(),
+            });
+        }
+        let old_index = usize::try_from(old_entry_point)
+            .ok()
+            .filter(|index| *index < entry_conditions.len())
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("legacy PERK entry point {old_entry_point} is out of range"),
+            })?;
+        let new_index = usize::try_from(new_entry_point)
+            .ok()
+            .filter(|index| *index < entry_conditions.len())
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: format!("legacy PERK entry point {new_entry_point} is out of range"),
+            })?;
+        let function_types = configured_u8_array(self.id(), configuration, "function_types")?;
+        let current_function = read_configured_integer(
+            configuration,
+            "function",
+            &record.subrecords[source_index].data,
+            self.id(),
+        )?;
+        let required_function_type = entry_function_types[new_index];
+        let current_matches = usize::try_from(current_function)
+            .ok()
+            .and_then(|index| function_types.get(index))
+            .is_some_and(|function_type| *function_type == required_function_type);
+        let selected_function = if current_matches {
+            current_function
+        } else {
+            function_types
+                .iter()
+                .position(|function_type| *function_type == required_function_type)
+                .and_then(|index| i64::try_from(index).ok())
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!(
+                        "legacy PERK has no function for type {required_function_type}"
+                    ),
+                })?
+        };
+        let condition_slots = configured_u8_matrix(self.id(), configuration, "condition_slots", 3)?;
+        let old_condition = usize::from(entry_conditions[old_index]);
+        let new_condition = usize::from(entry_conditions[new_index]);
+        let old_slots =
+            condition_slots
+                .get(old_condition)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "legacy PERK old condition metadata is out of range".to_owned(),
+                })?;
+        let new_slots =
+            condition_slots
+                .get(new_condition)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "legacy PERK new condition metadata is out of range".to_owned(),
+                })?;
+        let new_count = new_slots.iter().take_while(|slot| **slot != 0).count();
+        let mut mutations = Vec::new();
+        if selected_function != current_function {
+            mutations.push(HandlerMutation::Set {
+                path: configured_text(self.id(), configuration, "function_path")?.to_owned(),
+                occurrence: 0,
+                value: OwnedFieldValue::Int(selected_function),
+            });
+            mutations.extend(legacy_perk_set_parameter_type(
+                self.id(),
+                configuration,
+                record,
+                &range,
+                current_function,
+                selected_function,
+            )?);
+        }
+        mutations.push(HandlerMutation::Set {
+            path: configured_text(self.id(), configuration, "condition_count_path")?.to_owned(),
+            occurrence: 0,
+            value: OwnedFieldValue::Int(i64::try_from(new_count).map_err(|_| {
+                SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "legacy PERK condition count exceeds i64".to_owned(),
+                }
+            })?),
+        });
+        let mut condition_indices = Vec::new();
+        for subrecord in &record.subrecords[range.clone()] {
+            if subrecord.signature == Signature(*b"PRKC") {
+                condition_indices.push(read_configured_integer(
+                    configuration,
+                    "condition_index",
+                    &subrecord.data,
+                    self.id(),
+                )?);
+            }
+        }
+        let condition_item_path = configured_text(self.id(), configuration, "condition_item_path")?;
+        for (occurrence, condition_index) in condition_indices.iter().enumerate().rev() {
+            let remove = usize::try_from(*condition_index).map_or(true, |index| {
+                index >= new_count
+                    || (index == 2 && old_slots[1] != new_slots[1])
+                    || (index == 3 && old_slots[2] != new_slots[2])
+            });
+            if remove {
+                mutations.push(HandlerMutation::RemoveContainerOccurrence {
+                    path: condition_item_path.to_owned(),
+                    occurrence,
+                });
+            }
+        }
+        Ok(HandlerOutput::Mutations(mutations))
+    }
+}
+
+struct LegacyPerkFunctionAfterSet;
+
+impl SemanticHandler for LegacyPerkFunctionAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.legacy_perk_function"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let configuration = invocation.context.configuration;
+        if configured_text(self.id(), configuration, "binding_path")?
+            != invocation.context.binding.path
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy PERK function configuration does not match its binding".to_owned(),
+            });
+        }
+        let new_function = invocation
+            .value
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy PERK function callback requires a new value".to_owned(),
+            })
+            .and_then(|value| legacy_perk_callback_i64(value, self.id()))?;
+        let old_function = invocation
+            .old_value
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy PERK function callback requires the previous value".to_owned(),
+            })
+            .and_then(|value| legacy_perk_callback_i64(value, self.id()))?;
+        let (record, source_index) = require_legacy_perk_invocation(self.id(), &invocation)?;
+        let range = legacy_perk_effect_range(self.id(), record, source_index)?;
+        let mutations = legacy_perk_set_parameter_type(
+            self.id(),
+            configuration,
+            record,
+            &range,
+            old_function,
+            new_function,
+        )?;
+        if mutations.is_empty() {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::Mutations(mutations))
+        }
+    }
+}
+
+struct LegacyPerkParameterTypeAfterSet;
+
+impl SemanticHandler for LegacyPerkParameterTypeAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.legacy_perk_parameter_type"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet {
+            return Ok(HandlerOutput::None);
+        }
+        let configuration = invocation.context.configuration;
+        if configured_text(self.id(), configuration, "binding_path")?
+            != invocation.context.binding.path
+        {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy PERK EPFT configuration does not match its binding".to_owned(),
+            });
+        }
+        let new_parameter_type = invocation
+            .value
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy PERK EPFT callback requires a new value".to_owned(),
+            })
+            .and_then(|value| legacy_perk_callback_i64(value, self.id()))?;
+        let old_parameter_type = invocation
+            .old_value
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy PERK EPFT callback requires the previous value".to_owned(),
+            })
+            .and_then(|value| legacy_perk_callback_i64(value, self.id()))?;
+        if old_parameter_type == new_parameter_type || !(0..=4).contains(&new_parameter_type) {
+            return Ok(HandlerOutput::None);
+        }
+        let (record, source_index) = require_legacy_perk_invocation(self.id(), &invocation)?;
+        let range = legacy_perk_effect_range(self.id(), record, source_index)?;
+        Ok(HandlerOutput::Mutations(legacy_perk_parameter_mutations(
+            self.id(),
+            configuration,
+            record,
+            &range,
+            new_parameter_type,
+        )?))
     }
 }
 
@@ -23138,6 +23673,277 @@ mod tests {
                 Some(&FieldValue::Int(1)),
             )?,
             HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Reproduces the coupled legacy PERK entry-point, function, and EPFT setters.
+    #[test]
+    fn legacy_perk_after_set_rebuilds_coupled_state() -> Result<()> {
+        let entry_path = "PERK/6:Effects/repeat/0:Effect/1:DATA/payload/0:Entry Point";
+        let function_path = "PERK/6:Effects/repeat/0:Effect/1:DATA/payload/1:Function";
+        let count_path = "PERK/6:Effects/repeat/0:Effect/1:DATA/payload/2:Count";
+        let condition_item_path = "PERK/6:Effects/repeat/0:Effect/2:Conditions/repeat/0:Condition";
+        let condition_index_path = concat!(
+            "PERK/6:Effects/repeat/0:Effect/2:Conditions/repeat/",
+            "0:Condition/0:Run On"
+        );
+        let parameter_type_path = "PERK/6:Effects/repeat/0:Effect/3:Parameters/0:Type";
+        let parameter_data_path = "PERK/6:Effects/repeat/0:Effect/3:Parameters/1:Data";
+        let button_label_path = "PERK/6:Effects/repeat/0:Effect/3:Parameters/2:Button";
+        let script_flags_path = "PERK/6:Effects/repeat/0:Effect/3:Parameters/3:Flags";
+        let embedded_script_path = "PERK/6:Effects/repeat/0:Effect/3:Parameters/4:Script";
+        let script_header_path = "PERK/6:Effects/repeat/0:Effect/3:Parameters/4:Script/0:Header";
+        let configuration = |binding_path: &str| {
+            let mut value = serde_json::json!({
+                "binding_path": binding_path,
+                "function_path": function_path,
+                "condition_count_path": count_path,
+                "condition_item_path": condition_item_path,
+                "condition_index_path": condition_index_path,
+                "parameter_type_path": parameter_type_path,
+                "parameter_data_path": parameter_data_path,
+                "button_label_path": button_label_path,
+                "script_flags_path": script_flags_path,
+                "embedded_script_path": embedded_script_path,
+                "script_header_path": script_header_path,
+                "callback_offset": 0,
+                "callback_width": 1,
+                "callback_signed": false,
+                "callback_byte_order": "little",
+                "function_offset": 1,
+                "function_width": 1,
+                "function_signed": false,
+                "function_byte_order": "little",
+                "parameter_type_offset": 0,
+                "parameter_type_width": 1,
+                "parameter_type_signed": false,
+                "parameter_type_byte_order": "little",
+                "condition_index_offset": 0,
+                "condition_index_width": 1,
+                "condition_index_signed": false,
+                "condition_index_byte_order": "little"
+            });
+            value["entry_point_conditions"] = serde_json::json!([
+                3, 3, 3, 2, 1, 2, 7, 2, 3, 0, 0, 0, 0, 0, 4, 5, 6, 1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 4,
+                0, 0, 0, 0, 0, 0, 2, 3, 3
+            ]);
+            value["entry_point_function_types"] = serde_json::json!([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2,
+                0, 0, 0, 0, 0, 0, 0, 0, 0
+            ]);
+            value["condition_slots"] = serde_json::json!([
+                [1, 0, 0],
+                [1, 2, 0],
+                [1, 3, 0],
+                [1, 3, 4],
+                [1, 4, 0],
+                [1, 5, 0],
+                [1, 5, 6],
+                [1, 5, 7]
+            ]);
+            value["function_types"] = serde_json::json!([3, 0, 0, 0, 0, 0, 3, 3, 1, 2]);
+            value["function_parameter_types"] = serde_json::json!([0, 1, 1, 1, 2, 2, 0, 0, 3, 4]);
+            value
+        };
+        let binding = |id: &str, path: &str| CallbackBinding {
+            path: path.to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: format!("test-{id}"),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: id.to_owned(),
+                    minimum_version: 1,
+                    configuration: configuration(path),
+                },
+            },
+        };
+        let subrecord = |signature, data| bethkit_core::WritableSubRecord { signature, data };
+        let record = WritableRecord {
+            signature: Signature(*b"PERK"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![
+                subrecord(Signature(*b"PRKE"), vec![2, 0, 0]),
+                subrecord(Signature(*b"DATA"), vec![0, 1, 3]),
+                subrecord(Signature(*b"PRKC"), vec![0]),
+                subrecord(Signature(*b"CTDA"), vec![0; 28]),
+                subrecord(Signature(*b"PRKC"), vec![1]),
+                subrecord(Signature(*b"CTDA"), vec![0; 28]),
+                subrecord(Signature(*b"PRKC"), vec![2]),
+                subrecord(Signature(*b"CTDA"), vec![0; 28]),
+                subrecord(Signature(*b"PRKC"), vec![3]),
+                subrecord(Signature(*b"CTDA"), vec![0; 28]),
+                subrecord(Signature(*b"EPFT"), vec![1]),
+                subrecord(Signature(*b"EPFD"), vec![0; 4]),
+            ],
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"PERK"), FormId::NULL, 0, SchemaGame::Fallout3);
+        let output = handlers.invoke_with_records(
+            &binding("edit.legacy_perk_entry_point", entry_path),
+            context,
+            HandlerInvocationAccess::writable_subrecord_with_scope(&record, 1, None),
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::Int(21)),
+            Some(&FieldValue::Int(0)),
+        )?;
+        assert!(matches!(
+            output,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::Set {
+                        path: function_path.to_owned(),
+                        occurrence: 0,
+                        value: OwnedFieldValue::Int(8),
+                    },
+                    HandlerMutation::Set {
+                        path: parameter_type_path.to_owned(),
+                        occurrence: 0,
+                        value: OwnedFieldValue::Int(3),
+                    },
+                    HandlerMutation::Remove {
+                        path: parameter_data_path.to_owned(),
+                        occurrence: 0,
+                    },
+                    HandlerMutation::RemoveContainer {
+                        path: embedded_script_path.to_owned(),
+                    },
+                    HandlerMutation::InsertDefault {
+                        path: parameter_data_path.to_owned(),
+                    },
+                    HandlerMutation::Set {
+                        path: count_path.to_owned(),
+                        occurrence: 0,
+                        value: OwnedFieldValue::Int(2),
+                    },
+                    HandlerMutation::RemoveContainerOccurrence {
+                        path: condition_item_path.to_owned(),
+                        occurrence: 3,
+                    },
+                    HandlerMutation::RemoveContainerOccurrence {
+                        path: condition_item_path.to_owned(),
+                        occurrence: 2,
+                    },
+                ]
+        ));
+
+        let function_output = handlers.invoke_with_records(
+            &binding("edit.legacy_perk_function", function_path),
+            context,
+            HandlerInvocationAccess::writable_subrecord_with_scope(&record, 1, None),
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::Int(5)),
+            Some(&FieldValue::Int(4)),
+        )?;
+        assert!(matches!(
+            function_output,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::Set {
+                        path: parameter_type_path.to_owned(),
+                        occurrence: 0,
+                        value: OwnedFieldValue::Int(2),
+                    },
+                    HandlerMutation::Remove {
+                        path: parameter_data_path.to_owned(),
+                        occurrence: 0,
+                    },
+                    HandlerMutation::RemoveContainer {
+                        path: embedded_script_path.to_owned(),
+                    },
+                    HandlerMutation::InsertDefault {
+                        path: parameter_data_path.to_owned(),
+                    },
+                ]
+        ));
+
+        let parameter_output = handlers.invoke_with_records(
+            &binding("edit.legacy_perk_parameter_type", parameter_type_path),
+            context,
+            HandlerInvocationAccess::writable_subrecord_with_scope(&record, 10, None),
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::Int(4)),
+            Some(&FieldValue::Int(1)),
+        )?;
+        assert!(matches!(
+            parameter_output,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [
+                    HandlerMutation::Remove {
+                        path: parameter_data_path.to_owned(),
+                        occurrence: 0,
+                    },
+                    HandlerMutation::RemoveContainer {
+                        path: embedded_script_path.to_owned(),
+                    },
+                    HandlerMutation::InsertDefault {
+                        path: button_label_path.to_owned(),
+                    },
+                    HandlerMutation::InsertDefault {
+                        path: script_flags_path.to_owned(),
+                    },
+                    HandlerMutation::InsertDefault {
+                        path: script_header_path.to_owned(),
+                    },
+                ]
+        ));
+
+        let mut new_vegas_configuration = configuration(entry_path);
+        new_vegas_configuration["entry_point_conditions"] = serde_json::json!([
+            3, 3, 3, 2, 1, 2, 7, 2, 3, 0, 0, 0, 0, 0, 4, 5, 6, 1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 4, 0,
+            0, 0, 0, 0, 0, 2, 3, 3, 2, 2, 2, 2, 0, 0, 2, 0, 0, 0, 0, 0, 2, 2, 0, 2, 2, 2, 0, 3, 2,
+            3, 2, 2, 0, 3, 0, 3, 0, 0, 0, 0, 0, 0, 0, 2, 2
+        ]);
+        new_vegas_configuration["entry_point_function_types"] =
+            serde_json::Value::Array((0..74).map(|_| serde_json::Value::from(0)).collect());
+        new_vegas_configuration["entry_point_function_types"][21] = serde_json::Value::from(1);
+        new_vegas_configuration["entry_point_function_types"][27] = serde_json::Value::from(2);
+        new_vegas_configuration["function_types"] =
+            serde_json::json!([3, 0, 0, 0, 0, 0, 0, 0, 1, 2]);
+        let new_vegas_binding = CallbackBinding {
+            path: entry_path.to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-new-vegas-entry-point".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.legacy_perk_entry_point".to_owned(),
+                    minimum_version: 1,
+                    configuration: new_vegas_configuration,
+                },
+            },
+        };
+        let new_vegas_record = WritableRecord {
+            signature: Signature(*b"PERK"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![
+                subrecord(Signature(*b"PRKE"), vec![2, 0, 0]),
+                subrecord(Signature(*b"DATA"), vec![21, 6, 2]),
+                subrecord(Signature(*b"EPFT"), vec![0]),
+            ],
+        };
+        let new_vegas_output = handlers.invoke_with_records(
+            &new_vegas_binding,
+            HandlerRecordContext::new(Signature(*b"PERK"), FormId::NULL, 0, SchemaGame::FalloutNv),
+            HandlerInvocationAccess::writable_subrecord_with_scope(&new_vegas_record, 1, None),
+            HandlerPhase::AfterSet,
+            Some(&FieldValue::Int(0)),
+            Some(&FieldValue::Int(21)),
+        )?;
+        assert!(matches!(
+            new_vegas_output,
+            HandlerOutput::Mutations(mutations)
+                if mutations == [HandlerMutation::Set {
+                    path: count_path.to_owned(),
+                    occurrence: 0,
+                    value: OwnedFieldValue::Int(3),
+                }]
         ));
         Ok(())
     }
