@@ -483,6 +483,7 @@ pub enum RecordIndexKeyValue {
 pub struct IndexedRecordInfo {
     form_id: FormId,
     link: FormLinkInfo,
+    index_name: Option<String>,
 }
 
 /// Resolved nested element inside another main record.
@@ -605,7 +606,17 @@ impl ResolvedElementInfo {
 impl IndexedRecordInfo {
     /// Creates indexed-record metadata.
     pub const fn new(form_id: FormId, link: FormLinkInfo) -> Self {
-        Self { form_id, link }
+        Self {
+            form_id,
+            link,
+            index_name: None,
+        }
+    }
+
+    /// Adds the domain-specific name stored beside the index key.
+    pub fn with_index_name(mut self, name: impl Into<String>) -> Self {
+        self.index_name = Some(name.into());
+        self
     }
 
     /// Returns the file-local FormID of the indexed record.
@@ -616,6 +627,11 @@ impl IndexedRecordInfo {
     /// Returns the record's xEdit-compatible presentation metadata.
     pub const fn link(&self) -> &FormLinkInfo {
         &self.link
+    }
+
+    /// Returns the domain-specific name stored beside the index key.
+    pub fn index_name(&self) -> Option<&str> {
+        self.index_name.as_deref()
     }
 }
 
@@ -1161,6 +1177,9 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatCrowdProperty { resolver: None }));
         registry.register(Arc::new(FormatVmadObjectAlias { resolver: None }));
         registry.register(Arc::new(FormatQuestAlias { resolver: None }));
+        registry.register(Arc::new(FormatStarId { resolver: None }));
+        registry.register(Arc::new(FormatLegendaryFilterMod { resolver: None }));
+        registry.register(Arc::new(FormatColorOrFloat));
         registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
         registry.register(Arc::new(FormatLinkedQuestStage { resolver: None }));
         registry.register(Arc::new(FormatCtdaVariableName { resolver: None }));
@@ -1374,6 +1393,12 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatQuestAlias {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatStarId {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatLegendaryFilterMod {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatCtdaQuestStage {
@@ -2922,6 +2947,16 @@ struct FormatQuestAlias {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatStarId {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+struct FormatLegendaryFilterMod {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
+struct FormatColorOrFloat;
+
 struct ResolveVmadObjectAliasLink {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
@@ -3710,6 +3745,203 @@ fn scoped_array_element<'a>(
     })
 }
 
+fn resolve_legendary_filter_name(
+    invocation: &HandlerInvocation<'_>,
+    offset: usize,
+    resolver: Option<&dyn FormLinkResolver>,
+    handler: &str,
+) -> Result<Option<(String, String)>> {
+    let Some(scope) = invocation.value_scope else {
+        return Ok(None);
+    };
+    let filter_path = configured_text(handler, invocation.context.configuration, "filters_path")?;
+    let mods_path = configured_text(handler, invocation.context.configuration, "mods_path")?;
+    let mode = configured_text(handler, invocation.context.configuration, "mode")?;
+    let Some(filter) = scoped_value_at_indices(scope, filter_path, invocation.array_indices) else {
+        return Ok(None);
+    };
+    let FieldValue::Struct(filter_fields) = filter else {
+        return Ok(None);
+    };
+    let Some(base_slot) = condition_field(filter_fields, &["Star Slot"])
+        .map(|field| callback_integer(&field.value, handler))
+        .transpose()?
+    else {
+        return Ok(None);
+    };
+    let Some(mods) = scoped_named_value(scope, mods_path) else {
+        return Ok(None);
+    };
+    let FieldValue::Array(mods) = &mods.value else {
+        return Err(indexed_record_error(
+            handler,
+            format!("legendary mods path {mods_path:?} is not an array"),
+        ));
+    };
+    let target = match mode {
+        "flat_slot_offset" => {
+            let first = mods.iter().position(|value| {
+                let FieldValue::Struct(fields) = value else {
+                    return false;
+                };
+                condition_field(fields, &["Star Slot"]).is_some_and(|field| {
+                    callback_integer(&field.value, handler).ok() == Some(base_slot)
+                })
+            });
+            first
+                .and_then(|first| first.checked_add(offset))
+                .and_then(|index| mods.get(index))
+        }
+        "nested_slot_index" => usize::try_from(base_slot)
+            .ok()
+            .and_then(|slot| mods.get(slot))
+            .and_then(|slot| match slot {
+                FieldValue::Array(values) => values.get(offset),
+                _ => None,
+            }),
+        value => {
+            return Err(indexed_record_error(
+                handler,
+                format!("unknown legendary-filter mode {value:?}"),
+            ));
+        }
+    };
+    let Some(FieldValue::Struct(fields)) = target else {
+        return Ok(None);
+    };
+    let Some(field) = condition_field(fields, &["Legendary Modifier", "Object Modification"])
+    else {
+        return Ok(None);
+    };
+    let form_id = callback_form_id(&field.value, handler)?;
+    let Some(link) = resolver.and_then(|resolver| {
+        resolver.resolve_form_id(handler_record_context(&invocation.context), form_id, &[])
+    }) else {
+        return Ok(None);
+    };
+    let summary = link
+        .editor_id()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| link.short_name())
+        .to_owned();
+    Ok(Some((summary, link.value().to_owned())))
+}
+
+fn scoped_value_at_indices<'a>(
+    scope: &'a FieldValue<'static>,
+    path: &str,
+    indices: &[usize],
+) -> Option<&'a FieldValue<'static>> {
+    let mut value = &scoped_named_value(scope, path)?.value;
+    for index in indices {
+        let FieldValue::Array(values) = value else {
+            return None;
+        };
+        value = values.get(*index)?;
+    }
+    Some(value)
+}
+
+fn parse_unsigned_decimal_prefix(value: &str) -> i64 {
+    let value = value.trim();
+    let end = value
+        .char_indices()
+        .take_while(|(_, value)| value.is_ascii_digit())
+        .map(|(index, value)| index + value.len_utf8())
+        .last()
+        .unwrap_or(0);
+    value[..end].parse().unwrap_or(0)
+}
+
+fn parse_star_id(value: &str) -> i64 {
+    if matches!(value, "None" | "Universe") {
+        return -1;
+    }
+    let value = value.trim();
+    let end = value
+        .char_indices()
+        .take_while(|(_, value)| *value == '-' || value.is_ascii_digit())
+        .map(|(index, value)| index + value.len_utf8())
+        .last()
+        .unwrap_or(0);
+    value[..end].parse().unwrap_or(-1)
+}
+
+fn color_uses_remapping_index(invocation: &HandlerInvocation<'_>, handler: &str) -> Result<bool> {
+    let signature =
+        configured_signature(handler, invocation.context.configuration, "flags_signature")?;
+    let mask = configured_u64(handler, invocation.context.configuration, "remapping_mask")?;
+    let flags = source_subrecord_bytes_anywhere(invocation, signature, handler)?
+        .and_then(|bytes| bytes.get(..4))
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_le_bytes)
+        .unwrap_or(0);
+    Ok(u64::from(flags) & mask != 0)
+}
+
+fn source_subrecord_bytes_anywhere<'a>(
+    invocation: &HandlerInvocation<'a>,
+    signature: Signature,
+    handler: &str,
+) -> Result<Option<&'a [u8]>> {
+    if let Some(record) = invocation.source_record {
+        return Ok(record
+            .subrecords()?
+            .iter()
+            .rev()
+            .find(|subrecord| subrecord.signature == signature)
+            .map(bethkit_core::SubRecord::as_bytes));
+    }
+    if let Some(record) = invocation.source_writable_record {
+        return Ok(record
+            .subrecords
+            .iter()
+            .rev()
+            .find(|subrecord| subrecord.signature == signature)
+            .map(|subrecord| subrecord.data.as_slice()));
+    }
+    Err(indexed_record_error(
+        handler,
+        "color formatter requires its source record",
+    ))
+}
+
+fn parse_color_or_float(value: &str) -> u32 {
+    if value
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("rgba("))
+    {
+        let components = value
+            .get(5..)
+            .and_then(|value| value.split_once(')').map(|(value, _)| value))
+            .map(|value| value.split(',').collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let [red, green, blue, alpha] = components.as_slice() {
+            return [red, green, blue, alpha].iter().enumerate().fold(
+                0_u32,
+                |bits, (index, component)| {
+                    let value = component.trim().parse::<i64>().unwrap_or(0) as u8;
+                    bits | (u32::from(value) << (index * 8))
+                },
+            );
+        }
+        return 0;
+    }
+    value.trim().parse::<f32>().unwrap_or(0.0).to_bits()
+}
+
+fn format_fixed_float(value: f32) -> String {
+    if value.is_nan() {
+        "NAN".to_owned()
+    } else if value.is_infinite() && value.is_sign_negative() {
+        "-INF".to_owned()
+    } else if value.is_infinite() {
+        "INF".to_owned()
+    } else {
+        format!("{value:.6}")
+    }
+}
+
 fn format_ctda_quest_stage(
     stage: i64,
     phase: HandlerPhase,
@@ -4410,6 +4642,211 @@ impl SemanticHandler for FormatQuestAlias {
             invocation.context.game,
             quest.as_ref(),
         )))
+    }
+}
+
+impl SemanticHandler for FormatStarId {
+    fn id(&self) -> &'static str {
+        "format.star_id"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(indexed_record_error(
+                    self.id(),
+                    "star-ID edit parsing requires text",
+                ));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Int(parse_star_id(value))));
+        }
+        let value = i64::try_from(callback_integer(
+            invocation
+                .value
+                .ok_or_else(|| indexed_record_error(self.id(), "star ID requires an integer"))?,
+            self.id(),
+        )?)
+        .map_err(|_| indexed_record_error(self.id(), "star ID exceeds i64"))?;
+        if invocation.phase == HandlerPhase::SortKey {
+            return Ok(HandlerOutput::Text(format!("{:08X}", value as u64)));
+        }
+        if value == -1 {
+            let text = match invocation.phase {
+                HandlerPhase::Display | HandlerPhase::EditValue => "Universe",
+                HandlerPhase::Summary | HandlerPhase::Validation | HandlerPhase::NativeValue => "",
+                _ => return Ok(HandlerOutput::None),
+            };
+            return Ok(HandlerOutput::Text(text.to_owned()));
+        }
+        let index = configured_text(self.id(), invocation.context.configuration, "index")?;
+        let record = self.resolver.as_deref().and_then(|resolver| {
+            resolver.resolve_record_index(
+                handler_record_context(&invocation.context),
+                index,
+                &RecordIndexKeyValue::Integer(value),
+            )
+        });
+        let text = match (invocation.phase, record) {
+            (
+                HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue,
+                Some(record),
+            ) => {
+                let name = record
+                    .index_name()
+                    .or_else(|| record.link().editor_id())
+                    .unwrap_or_else(|| record.link().short_name());
+                format!("{value} ({name})")
+            }
+            (HandlerPhase::EditValue, None) => value.to_string(),
+            (HandlerPhase::Validation | HandlerPhase::NativeValue, Some(_)) => String::new(),
+            (HandlerPhase::Display, None) => {
+                format!("{value} <Warning: Could not resolve Star>")
+            }
+            (HandlerPhase::Summary, None) => value.to_string(),
+            (HandlerPhase::Validation, None) => {
+                format!("<Warning: Could not resolve Star [{value}]>")
+            }
+            (HandlerPhase::NativeValue, None) => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+impl SemanticHandler for FormatLegendaryFilterMod {
+    fn id(&self) -> &'static str {
+        "format.legendary_filter_mod"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(indexed_record_error(
+                    self.id(),
+                    "legendary-filter edit parsing requires text",
+                ));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Int(
+                parse_unsigned_decimal_prefix(value),
+            )));
+        }
+        let offset = usize::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                indexed_record_error(self.id(), "legendary-filter offset requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .ok();
+        let resolved = if let Some(offset) = offset {
+            resolve_legendary_filter_name(&invocation, offset, self.resolver.as_deref(), self.id())?
+        } else {
+            None
+        };
+        let mode = configured_text(self.id(), invocation.context.configuration, "mode")?;
+        let value = callback_integer(
+            invocation
+                .value
+                .expect("legendary-filter value checked above"),
+            self.id(),
+        )?;
+        let text = match mode {
+            "flat_slot_offset" => {
+                resolved.map_or_else(|| "Unknown Ref".to_owned(), |(_, value)| value)
+            }
+            "nested_slot_index" => match invocation.phase {
+                HandlerPhase::Display => resolved.map_or_else(
+                    || format!("{value} <Warning: Could not resolve mod index>"),
+                    |(_, name)| format!("{value:02} {name}"),
+                ),
+                HandlerPhase::Summary => resolved
+                    .map(|(summary, _)| summary)
+                    .unwrap_or_else(String::new),
+                HandlerPhase::EditValue => resolved.map_or_else(
+                    || value.to_string(),
+                    |(_, name)| format!("{value:02} {name}"),
+                ),
+                HandlerPhase::SortKey => format!("{:08X}", value as u64),
+                HandlerPhase::Validation => resolved.map_or_else(
+                    || "<Warning: Could not resolve mod index>".to_owned(),
+                    |_| String::new(),
+                ),
+                HandlerPhase::NativeValue => String::new(),
+                _ => return Ok(HandlerOutput::None),
+            },
+            value => {
+                return Err(indexed_record_error(
+                    self.id(),
+                    format!("unknown legendary-filter mode {value:?}"),
+                ));
+            }
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+impl SemanticHandler for FormatColorOrFloat {
+    fn id(&self) -> &'static str {
+        "format.color_or_float"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let uppercase = configured_bool(
+            self.id(),
+            invocation.context.configuration,
+            "uppercase_rgba",
+        )?;
+        let remapping = color_uses_remapping_index(&invocation, self.id())?;
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(indexed_record_error(
+                    self.id(),
+                    "color edit parsing requires text",
+                ));
+            };
+            let bits = parse_color_or_float(value);
+            return Ok(HandlerOutput::Value(FieldValue::UInt(u64::from(bits))));
+        }
+        let bits = callback_u32(
+            callback_integer(
+                invocation
+                    .value
+                    .ok_or_else(|| indexed_record_error(self.id(), "color requires an integer"))?,
+                self.id(),
+            )?,
+            self.id(),
+        )?;
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+                if remapping {
+                    format_fixed_float(f32::from_bits(bits))
+                } else {
+                    let label = if uppercase { "RGBA" } else { "rgba" };
+                    format!(
+                        "{label}({}, {}, {}, {})",
+                        bits & 0xff,
+                        bits >> 8 & 0xff,
+                        bits >> 16 & 0xff,
+                        bits >> 24 & 0xff
+                    )
+                }
+            }
+            HandlerPhase::SortKey => format!("{bits:08X}"),
+            HandlerPhase::NativeValue | HandlerPhase::Validation => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
     }
 }
 
@@ -17004,6 +17441,16 @@ mod tests {
                         ),
                     ))
                 }
+                ("star_id", RecordIndexKeyValue::Integer(42)) => Some(
+                    IndexedRecordInfo::new(
+                        FormId(0x5678),
+                        FormLinkInfo::new(
+                            "Example Star [STDT:00005678]",
+                            "Example Star [STDT:00005678]",
+                        ),
+                    )
+                    .with_index_name("Alpha Centauri"),
+                ),
                 _ => None,
             }
         }
@@ -19355,6 +19802,207 @@ mod tests {
             HandlerOutput::Link(SemanticLink::Record {
                 form_id: FormId(0x1234),
             })
+        ));
+        Ok(())
+    }
+
+    /// Formats CLFM storage as RGBA bytes or float bits from the record flags.
+    #[test]
+    fn color_or_float_formatter_matches_xedit() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.color_or_float",
+            serde_json::json!({
+                "flags_signature": "FNAM",
+                "remapping_mask": 2,
+                "uppercase_rgba": false
+            }),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"CLFM"), FormId::NULL, 0, SchemaGame::Fallout4);
+        let color = FieldValue::UInt(0x4030_2010);
+        let color_record = test_record(
+            *b"CLFM",
+            &[
+                (*b"CNAM", 0x4030_2010_u32.to_le_bytes().to_vec()),
+                (*b"FNAM", 0_u32.to_le_bytes().to_vec()),
+            ],
+        )?;
+        let float_bits = 1.25_f32.to_bits();
+        let float = FieldValue::UInt(u64::from(float_bits));
+        let float_record = test_record(
+            *b"CLFM",
+            &[
+                (*b"CNAM", float_bits.to_le_bytes().to_vec()),
+                (*b"FNAM", 2_u32.to_le_bytes().to_vec()),
+            ],
+        )?;
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &binding,
+                context,
+                HandlerInvocationAccess::read_only_with_scope(&color_record, None),
+                HandlerPhase::Display,
+                Some(&color),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "rgba(16, 32, 48, 64)"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &binding,
+                context,
+                HandlerInvocationAccess::read_only_with_scope(&float_record, None),
+                HandlerPhase::Display,
+                Some(&float),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "1.250000"
+        ));
+        assert_eq!(parse_color_or_float("RGBA(255, 2, 3, 4)"), 0x0403_02ff);
+        assert_eq!(parse_color_or_float("2.5"), 2.5_f32.to_bits());
+        Ok(())
+    }
+
+    /// Formats flat Fallout legendary-filter offsets through the owning record arrays.
+    #[test]
+    fn legendary_filter_formatter_matches_fallout_xedit() -> TestResult {
+        // given
+        let filters_path = "LGDI/12:Include Filters";
+        let mods_path = "LGDI/11:Legendary Mods";
+        let named = |path: &str, name: &str, value: FieldValue<'static>| crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: path.to_owned(),
+            effective_path: None,
+            name: name.to_owned(),
+            span: crate::ByteSpan { start: 0, end: 0 },
+            value,
+        };
+        let filter = |slot| {
+            FieldValue::Struct(vec![named(
+                &format!("{filters_path}/element/0:Star Slot"),
+                "Star Slot",
+                FieldValue::UInt(slot),
+            )])
+        };
+        let legendary_mod = |slot, form_id| {
+            FieldValue::Struct(vec![
+                named(
+                    &format!("{mods_path}/element/0:Star Slot"),
+                    "Star Slot",
+                    FieldValue::UInt(slot),
+                ),
+                named(
+                    &format!("{mods_path}/element/1:Legendary Modifier"),
+                    "Legendary Modifier",
+                    FieldValue::FormId {
+                        value: FormId(form_id),
+                        targets: Vec::new(),
+                    },
+                ),
+            ])
+        };
+        let scope = FieldValue::Struct(vec![
+            named(
+                filters_path,
+                "Include Filters",
+                FieldValue::Array(vec![filter(1), filter(2)]),
+            ),
+            named(
+                mods_path,
+                "Legendary Mods",
+                FieldValue::Array(vec![
+                    legendary_mod(1, 0x9999),
+                    legendary_mod(2, 0x9999),
+                    legendary_mod(3, 0x1234),
+                ]),
+            ),
+        ]);
+        let mut binding = test_metadata_binding(
+            "integer.formatter",
+            "format.legendary_filter_mod",
+            serde_json::json!({
+                "mode": "flat_slot_offset",
+                "filters_path": filters_path,
+                "mods_path": mods_path
+            }),
+        );
+        binding.path = format!("{filters_path}/payload/element/1:Referenced Mod");
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source = HandlerRecordContext::new(
+            Signature(*b"LGDI"),
+            FormId(0x5678),
+            0,
+            SchemaGame::Fallout76,
+        );
+        let offset = FieldValue::UInt(1);
+        let filter_index = [1];
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &binding,
+                source,
+                HandlerInvocationAccess {
+                    source: HandlerRecordSource::None,
+                    value_scope: Some(&scope),
+                    source_subrecord_index: None,
+                    array_indices: &filter_index,
+                },
+                HandlerPhase::Display,
+                Some(&offset),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "[00001234] Example Faction"
+        ));
+        Ok(())
+    }
+
+    /// Formats Starfield star IDs with the indexed star name and Universe sentinel.
+    #[test]
+    fn star_id_formatter_matches_xedit() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.star_id",
+            serde_json::json!({ "index": "star_id" }),
+        );
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source = HandlerRecordContext::new(
+            Signature(*b"LCTN"),
+            FormId(0x1234),
+            0,
+            SchemaGame::Starfield,
+        );
+        let star = FieldValue::Int(42);
+        let universe = FieldValue::Int(-1);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                source,
+                HandlerPhase::Display,
+                Some(&star),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "42 (Alpha Centauri)"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                source,
+                HandlerPhase::Display,
+                Some(&universe),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "Universe"
         ));
         Ok(())
     }
