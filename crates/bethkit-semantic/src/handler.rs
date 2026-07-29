@@ -1226,6 +1226,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ResolveLocalArrayElement));
         registry.register(Arc::new(FormatNavmeshVertex));
         registry.register(Arc::new(FormatNavmeshEdge { resolver: None }));
+        registry.register(Arc::new(FormatNavmeshTriangleReference { resolver: None }));
         registry.register(Arc::new(ResolveNavmeshEdge { resolver: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -1444,6 +1445,9 @@ impl SemanticHandlerRegistry {
             resolver: self.form_link_resolver.clone(),
         }));
         self.register(Arc::new(FormatNavmeshEdge {
+            resolver: self.form_link_resolver.clone(),
+        }));
+        self.register(Arc::new(FormatNavmeshTriangleReference {
             resolver: self.form_link_resolver.clone(),
         }));
         self.register(Arc::new(ResolveNavmeshEdge {
@@ -6497,6 +6501,10 @@ struct FormatNavmeshEdge {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatNavmeshTriangleReference {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 struct FormatNavmeshVertex;
 
 struct ResolveNavmeshEdge {
@@ -6628,6 +6636,104 @@ impl SemanticHandler for FormatNavmeshEdge {
             _ => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Text(text))
+    }
+}
+
+impl SemanticHandler for FormatNavmeshTriangleReference {
+    fn id(&self) -> &'static str {
+        "format.navmesh_triangle_reference"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(input)) = invocation.value else {
+                return Err(indexed_record_error(
+                    self.id(),
+                    "navmesh triangle edit parsing requires text",
+                ));
+            };
+            let parsed = parse_delphi_integer(input, self.id()).unwrap_or(0);
+            return Ok(HandlerOutput::Value(FieldValue::Int(parsed)));
+        }
+        let raw = callback_integer(
+            invocation.value.ok_or_else(|| {
+                indexed_record_error(self.id(), "navmesh triangle requires an integer")
+            })?,
+            self.id(),
+        )?;
+        match invocation.phase {
+            HandlerPhase::SortKey => {
+                return Ok(HandlerOutput::Text(format!("{:08X}", raw as i64 as u64)));
+            }
+            HandlerPhase::EditValue => {
+                return Ok(HandlerOutput::Text(raw.to_string()));
+            }
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::Validation => {}
+            _ => return Ok(HandlerOutput::None),
+        }
+
+        let default = if invocation.phase == HandlerPhase::Validation {
+            String::new()
+        } else {
+            raw.to_string()
+        };
+        let Some(resolver) = self.resolver.as_deref() else {
+            return Ok(HandlerOutput::Text(default));
+        };
+        let Some(scope) = invocation.value_scope else {
+            return Ok(HandlerOutput::Text(default));
+        };
+        let navmesh_path =
+            configured_text(self.id(), invocation.context.configuration, "navmesh_path")?;
+        let expected_signature = configured_signature(
+            self.id(),
+            invocation.context.configuration,
+            "target_signature",
+        )?;
+        let Some(navmesh_field) = scoped_named_value(scope, navmesh_path) else {
+            return Ok(HandlerOutput::Text(default));
+        };
+        let form_id = callback_form_id(&navmesh_field.value, self.id())?;
+        let source = handler_record_context(&invocation.context);
+        let Some(link) = resolver.resolve_form_id(source, form_id, &[]) else {
+            return Ok(HandlerOutput::Text(default));
+        };
+        if link
+            .signature()
+            .is_some_and(|signature| signature != expected_signature)
+        {
+            let warning = format!(
+                "<Warning: \"{}\" is not a Navmesh record>",
+                link.short_name()
+            );
+            let text = match invocation.phase {
+                HandlerPhase::Display => format!("{raw} {warning}"),
+                HandlerPhase::Validation => warning,
+                HandlerPhase::Summary => default,
+                _ => unreachable!("formatter phases were checked"),
+            };
+            return Ok(HandlerOutput::Text(text));
+        }
+        if invocation.phase != HandlerPhase::Validation || raw < 0 {
+            return Ok(HandlerOutput::Text(default));
+        }
+        let Some(navmesh) = resolver.resolve_navmesh(source, form_id) else {
+            return Ok(HandlerOutput::Text(default));
+        };
+        let Some(index) = usize::try_from(raw).ok() else {
+            return Ok(HandlerOutput::Text(default));
+        };
+        if index < navmesh.triangle_count() {
+            return Ok(HandlerOutput::Text(default));
+        }
+        Ok(HandlerOutput::Text(format!(
+            "<Warning: Navmesh triangle not found in \"{}\">",
+            navmesh.name()
+        )))
     }
 }
 
@@ -16893,6 +16999,165 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Text(text) if text.is_empty()
+        ));
+        Ok(())
+    }
+
+    /// Matches xEdit navigation-door triangle presentation and validation.
+    #[test]
+    fn navmesh_triangle_reference_formatter_matches_xedit() -> TestResult {
+        // given
+        struct NavmeshTriangleResolver;
+
+        impl FormLinkResolver for NavmeshTriangleResolver {
+            fn resolve_form_id(
+                &self,
+                _source: HandlerRecordContext,
+                form_id: FormId,
+                _targets: &[Signature],
+            ) -> Option<FormLinkInfo> {
+                match form_id {
+                    FormId(0x2468) => Some(
+                        FormLinkInfo::new(
+                            "Target Navmesh [NAVM:00002468]",
+                            "Target Navmesh [NAVM:00002468]",
+                        )
+                        .with_signature(Signature(*b"NAVM")),
+                    ),
+                    FormId(0x9999) => Some(
+                        FormLinkInfo::new(
+                            "Wrong Target [MISC:00009999]",
+                            "Wrong Target [MISC:00009999]",
+                        )
+                        .with_signature(Signature(*b"MISC")),
+                    ),
+                    _ => None,
+                }
+            }
+
+            fn resolve_navmesh(
+                &self,
+                _source: HandlerRecordContext,
+                form_id: FormId,
+            ) -> Option<ResolvedNavmeshInfo> {
+                (form_id == FormId(0x2468)).then(|| {
+                    ResolvedNavmeshInfo::new(
+                        FormId(0x2468),
+                        0x0200_2468,
+                        "Target Navmesh [NAVM:00002468]",
+                        "NAVM/0:Navigation Mesh/payload/3:Triangles",
+                        4,
+                    )
+                })
+            }
+        }
+
+        let navmesh_path = "REFR/41:Navigation Door Link/payload/0:Navigation Mesh";
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.navmesh_triangle_reference",
+            serde_json::json!({
+                "navmesh_path": navmesh_path,
+                "target_signature": "NAVM"
+            }),
+        );
+        let scope = |form_id| {
+            FieldValue::Struct(vec![crate::NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(1),
+                path: navmesh_path.to_owned(),
+                effective_path: None,
+                name: "Navigation Mesh".to_owned(),
+                span: crate::ByteSpan { start: 0, end: 4 },
+                value: FieldValue::FormId {
+                    value: form_id,
+                    targets: vec![Signature(*b"NAVM")],
+                },
+            }])
+        };
+        let valid_scope = scope(FormId(0x2468));
+        let wrong_scope = scope(FormId(0x9999));
+        let source =
+            HandlerRecordContext::new(Signature(*b"REFR"), FormId(1), 0, SchemaGame::Fallout4);
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(NavmeshTriangleResolver));
+
+        // when / then
+        for (phase, raw, expected) in [
+            (HandlerPhase::Display, 4, "4"),
+            (HandlerPhase::Summary, 4, "4"),
+            (HandlerPhase::EditValue, 4, "4"),
+            (HandlerPhase::SortKey, 4, "00000004"),
+            (HandlerPhase::Validation, 3, ""),
+            (
+                HandlerPhase::Validation,
+                4,
+                "<Warning: Navmesh triangle not found in \
+                 \"Target Navmesh [NAVM:00002468]\">",
+            ),
+        ] {
+            let value = FieldValue::Int(raw);
+            assert!(matches!(
+                handlers.invoke_with_value_scope(
+                    &binding,
+                    source,
+                    phase,
+                    Some(&value),
+                    None,
+                    Some(&valid_scope),
+                )?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
+        let value = FieldValue::Int(2);
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                source,
+                HandlerPhase::Display,
+                Some(&value),
+                None,
+                Some(&wrong_scope),
+            )?,
+            HandlerOutput::Text(text)
+                if text
+                    == "2 <Warning: \"Wrong Target [MISC:00009999]\" \
+                        is not a Navmesh record>"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                source,
+                HandlerPhase::Summary,
+                Some(&value),
+                None,
+                Some(&wrong_scope),
+            )?,
+            HandlerOutput::Text(text) if text == "2"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &binding,
+                source,
+                HandlerPhase::Validation,
+                Some(&value),
+                None,
+                Some(&wrong_scope),
+            )?,
+            HandlerOutput::Text(text)
+                if text
+                    == "<Warning: \"Wrong Target [MISC:00009999]\" \
+                        is not a Navmesh record>"
+        ));
+        let input = FieldValue::String(Cow::Borrowed("invalid"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                source,
+                HandlerPhase::ParseEditValue,
+                Some(&input),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(0))
         ));
         Ok(())
     }
