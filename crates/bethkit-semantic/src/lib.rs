@@ -29,10 +29,11 @@ pub use error::{Result, SemanticError};
 pub use handler::{
     FormLinkInfo, FormLinkResolver, HandlerContext, HandlerInvocation, HandlerMutation,
     HandlerOutput, HandlerPhase, HandlerRecordContext, HandlerSubrecordSource, IndexedRecordInfo,
-    NextObjectIdResolver, NpcFaceEntryKind, QuestAliasInfo, QuestObjectiveInfo, QuestStageInfo,
-    RecordGridCell, RecordIndexKey, RecordIndexKeyValue, ResolvedElementInfo, ResolvedNavmeshInfo,
-    ResourceHashResolver, ScriptVariableInfo, ScriptVariableMetadata, SemanticHandler,
-    SemanticHandlerRegistry, SemanticLink, ValueFormat, WwiseGuidInfo, WwiseGuidResolver,
+    NextObjectIdResolver, NpcAppearanceEntryInfo, NpcAppearanceInfo, NpcFaceEntryKind,
+    QuestAliasInfo, QuestObjectiveInfo, QuestStageInfo, RecordGridCell, RecordIndexKey,
+    RecordIndexKeyValue, ResolvedElementInfo, ResolvedNavmeshInfo, ResourceHashResolver,
+    ScriptVariableInfo, ScriptVariableMetadata, SemanticHandler, SemanticHandlerRegistry,
+    SemanticLink, ValueFormat, WwiseGuidInfo, WwiseGuidResolver,
 };
 pub use info_sort::{
     edit_info_previous, plan_info_group_sort, InfoGroupSortPlan, InfoPreviousEdit,

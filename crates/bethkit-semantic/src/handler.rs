@@ -509,10 +509,116 @@ pub struct ResolvedNavmeshInfo {
 /// Starfield NPC face-entry collection selected through the effective race and gender.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NpcFaceEntryKind {
+    /// Skyrim or Fallout tint-layer entry.
+    TintLayer,
+    /// Fallout morph-preset or shared morph-value entry.
+    MorphValue,
+    /// Fallout face-morph entry.
+    FaceMorph,
     /// Chargen face-dial entry keyed by its skin index.
     FaceDial,
     /// Chargen face-morph phenotype keyed by its morph index.
     FaceMorphPhenotype,
+}
+
+/// One effective race entry used by an NPC appearance formatter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpcAppearanceEntryInfo {
+    index: i64,
+    value: String,
+    summary: String,
+}
+
+impl NpcAppearanceEntryInfo {
+    /// Creates one appearance entry with matching normal and summary labels.
+    pub fn new(index: i64, label: impl Into<String>) -> Self {
+        let label = label.into();
+        Self {
+            index,
+            value: label.clone(),
+            summary: label,
+        }
+    }
+
+    /// Replaces the compact summary label.
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = summary.into();
+        self
+    }
+
+    /// Returns the format-specific numeric key.
+    pub const fn index(&self) -> i64 {
+        self.index
+    }
+
+    /// Returns the normal and editable label.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Returns the compact summary label.
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+}
+
+/// Effective race and gender metadata used by NPC appearance formatters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpcAppearanceInfo {
+    race_name: String,
+    race_short_name: String,
+    gender: String,
+    is_race: bool,
+    collection_available: bool,
+    entries: Vec<NpcAppearanceEntryInfo>,
+    opposite_gender_entries: Vec<NpcAppearanceEntryInfo>,
+}
+
+impl NpcAppearanceInfo {
+    /// Creates appearance metadata for one effective race and gender.
+    pub fn new(
+        race_name: impl Into<String>,
+        race_short_name: impl Into<String>,
+        gender: impl Into<String>,
+        entries: Vec<NpcAppearanceEntryInfo>,
+    ) -> Self {
+        Self {
+            race_name: race_name.into(),
+            race_short_name: race_short_name.into(),
+            gender: gender.into(),
+            is_race: true,
+            collection_available: true,
+            entries,
+            opposite_gender_entries: Vec::new(),
+        }
+    }
+
+    /// Marks a resolved link as a non-race record.
+    pub fn non_race(short_name: impl Into<String>) -> Self {
+        let short_name = short_name.into();
+        Self {
+            race_name: short_name.clone(),
+            race_short_name: short_name,
+            gender: String::new(),
+            is_race: false,
+            collection_available: false,
+            entries: Vec::new(),
+            opposite_gender_entries: Vec::new(),
+        }
+    }
+
+    /// Marks the gender-specific source collection as absent.
+    pub fn with_missing_collection(mut self) -> Self {
+        self.collection_available = false;
+        self.entries.clear();
+        self
+    }
+
+    /// Adds the opposite gender's entries for formats with xEdit fallback behavior.
+    pub fn with_opposite_gender_entries(mut self, entries: Vec<NpcAppearanceEntryInfo>) -> Self {
+        self.opposite_gender_entries = entries;
+        self
+    }
 }
 
 impl ResolvedNavmeshInfo {
@@ -992,6 +1098,17 @@ pub trait FormLinkResolver: Send + Sync {
         None
     }
 
+    /// Returns the effective race collection used by an NPC appearance formatter.
+    ///
+    /// The default returns `None` for resolvers without effective race metadata.
+    fn resolve_npc_appearance(
+        &self,
+        _source: HandlerRecordContext,
+        _kind: NpcFaceEntryKind,
+    ) -> Option<NpcAppearanceInfo> {
+        None
+    }
+
     /// Resolves the effective quest context inherited by an INFO condition.
     ///
     /// The default returns `None` because resolving INFO parent groups requires
@@ -1179,6 +1296,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatQuestAlias { resolver: None }));
         registry.register(Arc::new(FormatStarId { resolver: None }));
         registry.register(Arc::new(FormatLegendaryFilterMod { resolver: None }));
+        registry.register(Arc::new(FormatNpcAppearanceIndex { resolver: None }));
         registry.register(Arc::new(FormatColorOrFloat));
         registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
         registry.register(Arc::new(FormatLinkedQuestStage { resolver: None }));
@@ -1399,6 +1517,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatLegendaryFilterMod {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatNpcAppearanceIndex {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatCtdaQuestStage {
@@ -2955,6 +3076,10 @@ struct FormatLegendaryFilterMod {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatNpcAppearanceIndex {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 struct FormatColorOrFloat;
 
 struct ResolveVmadObjectAliasLink {
@@ -3851,6 +3976,185 @@ fn parse_unsigned_decimal_prefix(value: &str) -> i64 {
         .last()
         .unwrap_or(0);
     value[..end].parse().unwrap_or(0)
+}
+
+fn parse_hex_prefix(value: &str) -> i64 {
+    let value = value.trim();
+    let end = value
+        .char_indices()
+        .take_while(|(_, value)| value.is_ascii_hexdigit())
+        .map(|(index, value)| index + value.len_utf8())
+        .last()
+        .unwrap_or(0);
+    u32::from_str_radix(&value[..end], 16)
+        .map(i64::from)
+        .unwrap_or(0)
+}
+
+fn configured_npc_appearance_kind(
+    configuration: &serde_json::Value,
+    handler: &str,
+) -> Result<NpcFaceEntryKind> {
+    match configured_text(handler, configuration, "kind")? {
+        "tint_layer" => Ok(NpcFaceEntryKind::TintLayer),
+        "morph_value" => Ok(NpcFaceEntryKind::MorphValue),
+        "face_morph" => Ok(NpcFaceEntryKind::FaceMorph),
+        "face_dial" => Ok(NpcFaceEntryKind::FaceDial),
+        "face_morph_phenotype" => Ok(NpcFaceEntryKind::FaceMorphPhenotype),
+        value => Err(indexed_record_error(
+            handler,
+            format!("unknown NPC appearance kind {value:?}"),
+        )),
+    }
+}
+
+fn format_npc_appearance_number(
+    value: i64,
+    numeric: &str,
+    width: usize,
+    handler: &str,
+) -> Result<String> {
+    match numeric {
+        "decimal" => {
+            let value = value.to_string();
+            Ok(if value.len() < width {
+                format!("{value:0>width$}")
+            } else {
+                value
+            })
+        }
+        "hex" => Ok(format!("{:08X}", value as u64)),
+        value => Err(indexed_record_error(
+            handler,
+            format!("unknown NPC appearance numeric format {value:?}"),
+        )),
+    }
+}
+
+fn format_npc_appearance(
+    value: i64,
+    raw: &str,
+    phase: HandlerPhase,
+    appearance: Option<&NpcAppearanceInfo>,
+    configuration: &serde_json::Value,
+    handler: &str,
+) -> Result<String> {
+    if !matches!(
+        phase,
+        HandlerPhase::Display
+            | HandlerPhase::Summary
+            | HandlerPhase::EditValue
+            | HandlerPhase::Validation
+            | HandlerPhase::NativeValue
+    ) {
+        return Ok(String::new());
+    }
+    if phase == HandlerPhase::NativeValue {
+        return Ok(String::new());
+    }
+    let unresolved_label = configured_text(handler, configuration, "unresolved_label")?;
+    let missing_label = configured_text(handler, configuration, "missing_label")?;
+    let resolved_edit_value = configured_bool(handler, configuration, "resolved_edit_value")?;
+    let opposite_gender = configured_bool(handler, configuration, "opposite_gender_fallback")?;
+    let quoted_race = configured_bool(handler, configuration, "quoted_race")?;
+    let width = configuration
+        .get("pad_width")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let width = usize::try_from(width)
+        .map_err(|_| indexed_record_error(handler, "NPC appearance pad width exceeds usize"))?;
+    let Some(appearance) = appearance else {
+        return Ok(match phase {
+            HandlerPhase::Display => {
+                format!("{raw} <Warning: Could not resolve {unresolved_label}>")
+            }
+            HandlerPhase::Summary | HandlerPhase::EditValue => raw.to_owned(),
+            HandlerPhase::Validation => {
+                format!("<Warning: Could not resolve {unresolved_label}>")
+            }
+            _ => String::new(),
+        });
+    };
+    if !appearance.is_race {
+        return Ok(match phase {
+            HandlerPhase::Display => format!(
+                "{raw} <Warning: \"{}\" is not a Race record>",
+                appearance.race_short_name
+            ),
+            HandlerPhase::Summary | HandlerPhase::EditValue => raw.to_owned(),
+            HandlerPhase::Validation => format!(
+                "<Warning: \"{}\" is not a Race record>",
+                appearance.race_short_name
+            ),
+            _ => String::new(),
+        });
+    }
+    if !appearance.collection_available {
+        let collection =
+            configured_optional_text(handler, configuration, "collection_label")?.unwrap_or("");
+        return Ok(match phase {
+            HandlerPhase::Display => format!(
+                "{raw} <Warning: \"{}\" does not contain {} {}>",
+                appearance.race_short_name, appearance.gender, collection
+            ),
+            HandlerPhase::Summary | HandlerPhase::EditValue => raw.to_owned(),
+            HandlerPhase::Validation => format!(
+                "<Warning: \"{}\" does not contain {} {}>",
+                appearance.race_short_name, appearance.gender, collection
+            ),
+            _ => String::new(),
+        });
+    }
+    let entry = appearance
+        .entries
+        .iter()
+        .find(|entry| entry.index() == value)
+        .or_else(|| {
+            if opposite_gender {
+                appearance
+                    .opposite_gender_entries
+                    .iter()
+                    .find(|entry| entry.index() == value)
+            } else {
+                None
+            }
+        });
+    if let Some(entry) = entry {
+        if phase == HandlerPhase::Validation {
+            return Ok(String::new());
+        }
+        if phase == HandlerPhase::EditValue && !resolved_edit_value {
+            return Ok(raw.to_owned());
+        }
+        let number = format_npc_appearance_number(
+            value,
+            configured_text(handler, configuration, "numeric")?,
+            width,
+            handler,
+        )?;
+        let label = if phase == HandlerPhase::Summary {
+            entry.summary()
+        } else {
+            entry.value()
+        };
+        return Ok(if label.is_empty() {
+            number
+        } else {
+            format!("{number} {label}")
+        });
+    }
+    let race = if quoted_race {
+        format!("\"{}\"", appearance.race_name)
+    } else {
+        appearance.race_name.clone()
+    };
+    let warning = format!("<{missing_label} [{raw}] not found in {race}>");
+    Ok(match phase {
+        HandlerPhase::Display => format!("{raw} {warning}"),
+        HandlerPhase::Summary | HandlerPhase::EditValue => raw.to_owned(),
+        HandlerPhase::Validation => warning,
+        _ => String::new(),
+    })
 }
 
 fn parse_star_id(value: &str) -> i64 {
@@ -4788,6 +5092,83 @@ impl SemanticHandler for FormatLegendaryFilterMod {
                 ));
             }
         };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+impl SemanticHandler for FormatNpcAppearanceIndex {
+    fn id(&self) -> &'static str {
+        "format.npc_appearance_index"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let numeric = configured_text(self.id(), invocation.context.configuration, "numeric")?;
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(indexed_record_error(
+                    self.id(),
+                    "NPC appearance edit parsing requires text",
+                ));
+            };
+            let value = match numeric {
+                "decimal" => parse_unsigned_decimal_prefix(value),
+                "hex" => parse_hex_prefix(value),
+                value => {
+                    return Err(indexed_record_error(
+                        self.id(),
+                        format!("unknown NPC appearance numeric format {value:?}"),
+                    ));
+                }
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Int(value)));
+        }
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                indexed_record_error(self.id(), "NPC appearance index requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| indexed_record_error(self.id(), "NPC appearance index exceeds i64"))?;
+        let raw = format_npc_appearance_number(value, numeric, 0, self.id())?;
+        if invocation.phase == HandlerPhase::SortKey {
+            return Ok(HandlerOutput::Text(format!("{:08X}", value as u64)));
+        }
+        let kind = configured_npc_appearance_kind(invocation.context.configuration, self.id())?;
+        let source = handler_record_context(&invocation.context);
+        let resolver = self.resolver.as_deref();
+        let appearance =
+            resolver.and_then(|resolver| resolver.resolve_npc_appearance(source, kind));
+        if appearance.is_none() {
+            if let Some(entry) =
+                resolver.and_then(|resolver| resolver.resolve_npc_face_entry(source, kind, value))
+            {
+                let resolved_edit_value = configured_bool(
+                    self.id(),
+                    invocation.context.configuration,
+                    "resolved_edit_value",
+                )?;
+                let text = match invocation.phase {
+                    HandlerPhase::Display | HandlerPhase::Summary => entry.summary().to_owned(),
+                    HandlerPhase::EditValue if resolved_edit_value => entry.summary().to_owned(),
+                    HandlerPhase::EditValue => raw,
+                    HandlerPhase::Validation | HandlerPhase::NativeValue => String::new(),
+                    _ => return Ok(HandlerOutput::None),
+                };
+                return Ok(HandlerOutput::Text(text));
+            }
+        }
+        let text = format_npc_appearance(
+            value,
+            &raw,
+            invocation.phase,
+            appearance.as_ref(),
+            invocation.context.configuration,
+            self.id(),
+        )?;
         Ok(HandlerOutput::Text(text))
     }
 }
@@ -17498,25 +17879,70 @@ mod tests {
             kind: NpcFaceEntryKind,
             index: i64,
         ) -> Option<ResolvedElementInfo> {
-            (index == 7).then(|| {
-                let (path, summary) = match kind {
-                    NpcFaceEntryKind::FaceDial => (
-                        "RACE/Chargen and Skintones/Male/Chargen/Face Dials/element",
-                        "007 Jaw Width",
-                    ),
-                    NpcFaceEntryKind::FaceMorphPhenotype => (
-                        "RACE/Chargen and Skintones/Male/Chargen/Face Morph Phenotypes/element",
-                        "007 Athletic",
-                    ),
-                };
-                ResolvedElementInfo::new(
-                    FormId(0x2468),
-                    path,
-                    vec![3],
-                    summary,
+            if index != 7 {
+                return None;
+            }
+            let (path, summary) = match kind {
+                NpcFaceEntryKind::FaceDial => (
+                    "RACE/Chargen and Skintones/Male/Chargen/Face Dials/element",
+                    "007 Jaw Width",
+                ),
+                NpcFaceEntryKind::FaceMorphPhenotype => (
+                    "RACE/Chargen and Skintones/Male/Chargen/Face Morph Phenotypes/element",
+                    "007 Athletic",
+                ),
+                NpcFaceEntryKind::TintLayer
+                | NpcFaceEntryKind::MorphValue
+                | NpcFaceEntryKind::FaceMorph => return None,
+            };
+            Some(ResolvedElementInfo::new(
+                FormId(0x2468),
+                path,
+                vec![3],
+                summary,
+                "Example Race [RACE:00002468]",
+            ))
+        }
+
+        fn resolve_npc_appearance(
+            &self,
+            _source: HandlerRecordContext,
+            kind: NpcFaceEntryKind,
+        ) -> Option<NpcAppearanceInfo> {
+            let info = match kind {
+                NpcFaceEntryKind::TintLayer => NpcAppearanceInfo::new(
                     "Example Race [RACE:00002468]",
+                    "Example Race [RACE:00002468]",
+                    "Male",
+                    vec![NpcAppearanceEntryInfo::new(7, "Skin Tone")],
+                ),
+                NpcFaceEntryKind::MorphValue => NpcAppearanceInfo::new(
+                    "Example Race [RACE:00002468]",
+                    "Example Race [RACE:00002468]",
+                    "Male",
+                    vec![NpcAppearanceEntryInfo::new(7, "Nose - Wide")],
+                ),
+                NpcFaceEntryKind::FaceMorph => NpcAppearanceInfo::new(
+                    "Example Race [RACE:00002468]",
+                    "Example Race [RACE:00002468]",
+                    "Male",
+                    Vec::new(),
                 )
-            })
+                .with_opposite_gender_entries(vec![NpcAppearanceEntryInfo::new(7, "Athletic")]),
+                NpcFaceEntryKind::FaceDial => NpcAppearanceInfo::new(
+                    "Example Race [RACE:00002468]",
+                    "Example Race [RACE:00002468]",
+                    "Male",
+                    vec![NpcAppearanceEntryInfo::new(7, "Jaw Width").with_summary("Jaw summary")],
+                ),
+                NpcFaceEntryKind::FaceMorphPhenotype => NpcAppearanceInfo::new(
+                    "Example Race [RACE:00002468]",
+                    "Example Race [RACE:00002468]",
+                    "Male",
+                    vec![NpcAppearanceEntryInfo::new(7, "Athletic")],
+                ),
+            };
+            Some(info)
         }
 
         fn resolve_condition_quest_form_id(
@@ -20004,6 +20430,100 @@ mod tests {
             )?,
             HandlerOutput::Text(text) if text == "Universe"
         ));
+        Ok(())
+    }
+
+    /// Formats NPC appearance indexes through effective race and gender metadata.
+    #[test]
+    fn npc_appearance_formatter_matches_xedit_families() -> TestResult {
+        // given
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source = HandlerRecordContext::new(
+            Signature(*b"NPC_"),
+            FormId(0x1234),
+            0,
+            SchemaGame::Fallout76,
+        );
+        let value = FieldValue::UInt(7);
+        let configuration =
+            |kind, numeric, missing_label, unresolved_label, opposite, pad, edit| {
+                serde_json::json!({
+                    "kind": kind,
+                    "numeric": numeric,
+                    "missing_label": missing_label,
+                    "unresolved_label": unresolved_label,
+                    "opposite_gender_fallback": opposite,
+                    "pad_width": pad,
+                    "resolved_edit_value": edit,
+                    "quoted_race": false
+                })
+            };
+
+        // when / then
+        for (config, expected) in [
+            (
+                configuration(
+                    "tint_layer",
+                    "decimal",
+                    "Tint Layer Index",
+                    "tint layer index",
+                    false,
+                    0,
+                    false,
+                ),
+                "7 Skin Tone",
+            ),
+            (
+                configuration(
+                    "morph_value",
+                    "hex",
+                    "Morph Index",
+                    "morph index",
+                    false,
+                    0,
+                    false,
+                ),
+                "00000007 Nose - Wide",
+            ),
+            (
+                configuration(
+                    "face_morph",
+                    "hex",
+                    "Face Morph Index",
+                    "face morph index",
+                    true,
+                    0,
+                    false,
+                ),
+                "00000007 Athletic",
+            ),
+            (
+                configuration(
+                    "face_dial",
+                    "decimal",
+                    "Face Dial",
+                    "face dial",
+                    false,
+                    3,
+                    true,
+                ),
+                "007 Jaw Width",
+            ),
+        ] {
+            let binding =
+                test_metadata_binding("integer.formatter", "format.npc_appearance_index", config);
+            assert!(matches!(
+                handlers.invoke(
+                    &binding,
+                    source,
+                    HandlerPhase::Display,
+                    Some(&value),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
         Ok(())
     }
 
