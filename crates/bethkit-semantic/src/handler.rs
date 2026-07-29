@@ -1160,6 +1160,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatObjectProperty { resolver: None }));
         registry.register(Arc::new(FormatCrowdProperty { resolver: None }));
         registry.register(Arc::new(FormatVmadObjectAlias { resolver: None }));
+        registry.register(Arc::new(FormatQuestAlias { resolver: None }));
         registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
         registry.register(Arc::new(FormatLinkedQuestStage { resolver: None }));
         registry.register(Arc::new(FormatCtdaVariableName { resolver: None }));
@@ -1370,6 +1371,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatVmadObjectAlias {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatQuestAlias {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatCtdaQuestStage {
@@ -2914,6 +2918,10 @@ struct FormatVmadObjectAlias {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatQuestAlias {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 struct ResolveVmadObjectAliasLink {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
@@ -4331,6 +4339,231 @@ impl SemanticHandler for FormatVmadObjectAlias {
             self.resolver.as_deref(),
             handler_record_context(&invocation.context),
         )?))
+    }
+}
+
+impl SemanticHandler for FormatQuestAlias {
+    fn id(&self) -> &'static str {
+        "format.quest_alias"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(quest_alias_error("quest-alias edit parsing requires text"));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Int(parse_quest_alias(
+                value,
+                invocation.context.game,
+            ))));
+        }
+        let raw = i64::try_from(callback_integer(
+            invocation
+                .value
+                .ok_or_else(|| quest_alias_error("quest-alias formatting requires an integer"))?,
+            self.id(),
+        )?)
+        .map_err(|_| quest_alias_error("quest alias exceeds i64"))?;
+        if invocation.phase == HandlerPhase::SortKey {
+            return Ok(HandlerOutput::Text(format!("{:08X}", raw as u64)));
+        }
+        let source = handler_record_context(&invocation.context);
+        let quest_source =
+            configured_text(self.id(), invocation.context.configuration, "quest_source")?;
+        let quest_form_id = match quest_source {
+            "record" => Some(source.form_id),
+            "subrecord" => {
+                let signature = configured_signature(
+                    self.id(),
+                    invocation.context.configuration,
+                    "quest_signature",
+                )?;
+                source_record_form_id(&invocation, signature, self.id())?
+            }
+            "sibling" => {
+                let path =
+                    configured_text(self.id(), invocation.context.configuration, "quest_path")?;
+                invocation
+                    .value_scope
+                    .and_then(|scope| scoped_form_id(scope, path))
+                    .map(|(form_id, _)| form_id)
+            }
+            value => {
+                return Err(quest_alias_error(format!(
+                    "unknown quest-alias source {value:?}"
+                )));
+            }
+        };
+        let targets = [Signature(*b"QUST")];
+        let quest = quest_form_id.and_then(|form_id| {
+            self.resolver
+                .as_deref()
+                .and_then(|resolver| resolver.resolve_form_id(source, form_id, &targets))
+        });
+        Ok(HandlerOutput::Text(format_quest_alias(
+            raw,
+            invocation.phase,
+            invocation.context.game,
+            quest.as_ref(),
+        )))
+    }
+}
+
+fn source_record_form_id(
+    invocation: &HandlerInvocation<'_>,
+    signature: Signature,
+    handler: &str,
+) -> Result<Option<FormId>> {
+    let bytes = if let Some(record) = invocation.source_record {
+        record
+            .subrecords()?
+            .iter()
+            .find(|subrecord| subrecord.signature == signature)
+            .map(bethkit_core::SubRecord::as_bytes)
+    } else if let Some(record) = invocation.source_writable_record {
+        record
+            .subrecords
+            .iter()
+            .find(|subrecord| subrecord.signature == signature)
+            .map(|subrecord| subrecord.data.as_slice())
+    } else {
+        None
+    };
+    bytes
+        .map(|bytes| {
+            bytes
+                .get(..4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u32::from_le_bytes)
+                .map(FormId)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: handler.to_owned(),
+                    message: format!("{signature} quest reference is shorter than four bytes"),
+                })
+        })
+        .transpose()
+}
+
+fn format_quest_alias(
+    raw: i64,
+    phase: HandlerPhase,
+    game: SchemaGame,
+    quest: Option<&FormLinkInfo>,
+) -> String {
+    if let Some(sentinel) = quest_alias_sentinel(raw, game) {
+        return match phase {
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+                sentinel.to_owned()
+            }
+            HandlerPhase::Validation | HandlerPhase::NativeValue => String::new(),
+            _ => String::new(),
+        };
+    }
+    let Some(quest) = quest else {
+        return match phase {
+            HandlerPhase::Display => {
+                format!("{raw} <Warning: Could not resolve alias>")
+            }
+            HandlerPhase::Summary | HandlerPhase::EditValue => raw.to_string(),
+            HandlerPhase::Validation => {
+                format!("<Warning: Could not resolve alias [{raw}]>")
+            }
+            _ => String::new(),
+        };
+    };
+    let Some(aliases) = quest.quest_aliases() else {
+        return match phase {
+            HandlerPhase::Display => {
+                format!(
+                    "{raw} <Warning: \"{}\" is not a Quest record>",
+                    quest.short_name()
+                )
+            }
+            HandlerPhase::Summary | HandlerPhase::EditValue => raw.to_string(),
+            HandlerPhase::Validation => {
+                format!(
+                    "<Warning: \"{}\" is not a Quest record>",
+                    quest.short_name()
+                )
+            }
+            _ => String::new(),
+        };
+    };
+    if let Some(alias) = aliases.iter().find(|alias| alias.index() == raw) {
+        return match phase {
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+                format_vmad_alias_label(alias)
+            }
+            HandlerPhase::Validation | HandlerPhase::NativeValue => String::new(),
+            _ => String::new(),
+        };
+    }
+    match phase {
+        HandlerPhase::Display => format!(
+            "{raw} <Warning: Quest Alias [{raw}] not found in \"{}\">",
+            quest.value()
+        ),
+        HandlerPhase::Summary | HandlerPhase::EditValue => raw.to_string(),
+        HandlerPhase::Validation => format!(
+            "<Warning: Quest Alias [{raw}] not found in \"{}\">",
+            quest.value()
+        ),
+        _ => String::new(),
+    }
+}
+
+fn parse_quest_alias(value: &str, game: SchemaGame) -> i64 {
+    for (sentinel, name) in quest_alias_sentinels(game) {
+        if value == *name {
+            return *sentinel;
+        }
+    }
+    let value = value.trim();
+    let end = value
+        .char_indices()
+        .take_while(|(_, value)| *value == '-' || value.is_ascii_digit())
+        .map(|(index, value)| index + value.len_utf8())
+        .last()
+        .unwrap_or(0);
+    value[..end].parse::<i32>().map(i64::from).unwrap_or(-1)
+}
+
+fn quest_alias_sentinel(raw: i64, game: SchemaGame) -> Option<&'static str> {
+    quest_alias_sentinels(game)
+        .iter()
+        .find(|(value, _)| *value == raw)
+        .map(|(_, name)| *name)
+}
+
+fn quest_alias_sentinels(game: SchemaGame) -> &'static [(i64, &'static str)] {
+    const NONE: &[(i64, &str)] = &[(-1, "None")];
+    const FALLOUT: &[(i64, &str)] = &[(-1, "None"), (-2, "Player")];
+    const STARFIELD: &[(i64, &str)] = &[
+        (-1, "None"),
+        (-2, "Player"),
+        (-3, "Non-Actor Track"),
+        (-4, "Play Audio At Player(Voice Note)"),
+        (-5, "Dialogue For Scene"),
+    ];
+    match game {
+        SchemaGame::Fallout3
+        | SchemaGame::FalloutNv
+        | SchemaGame::Fallout4
+        | SchemaGame::Fallout4Vr
+        | SchemaGame::Fallout76 => FALLOUT,
+        SchemaGame::Starfield => STARFIELD,
+        _ => NONE,
+    }
+}
+
+fn quest_alias_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.quest_alias".to_owned(),
+        message: message.into(),
     }
 }
 
@@ -18893,6 +19126,142 @@ mod tests {
                 None,
             )?,
             HandlerOutput::None
+        ));
+        Ok(())
+    }
+
+    /// Formats local, package-linked, and external quest aliases like xEdit.
+    #[test]
+    fn quest_alias_formatter_resolves_configured_quest_sources() -> TestResult {
+        // given
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let local_source =
+            HandlerRecordContext::new(Signature(*b"QUST"), FormId(0x5678), 0, SchemaGame::SkyrimSe);
+        let local = test_metadata_binding(
+            "integer.formatter",
+            "format.quest_alias",
+            serde_json::json!({ "quest_source": "record" }),
+        );
+        let alias = FieldValue::Int(7);
+
+        // when / then
+        for phase in [
+            HandlerPhase::Display,
+            HandlerPhase::Summary,
+            HandlerPhase::EditValue,
+        ] {
+            assert!(matches!(
+                handlers.invoke(&local, local_source, phase, Some(&alias), None)?,
+                HandlerOutput::Text(text) if text == "007 Target"
+            ));
+        }
+        assert!(matches!(
+            handlers.invoke(
+                &local,
+                local_source,
+                HandlerPhase::SortKey,
+                Some(&FieldValue::Int(-2)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "FFFFFFFFFFFFFFFE"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &local,
+                local_source,
+                HandlerPhase::Display,
+                Some(&FieldValue::Int(-2)),
+                None,
+            )?,
+            HandlerOutput::Text(text)
+                if text == concat!(
+                    "-2 <Warning: Quest Alias [-2] not found in ",
+                    "\"Example Quest [QUST:00005678]\">"
+                )
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &local,
+                HandlerRecordContext::new(
+                    Signature(*b"QUST"),
+                    FormId(0x5678),
+                    0,
+                    SchemaGame::Fallout4,
+                ),
+                HandlerPhase::Display,
+                Some(&FieldValue::Int(-2)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "Player"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &local,
+                local_source,
+                HandlerPhase::ParseEditValue,
+                Some(&FieldValue::String(Cow::Borrowed("007 Target"))),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(7))
+        ));
+
+        let package = test_record(*b"PACK", &[(*b"QNAM", 0x5678_u32.to_le_bytes().to_vec())])?;
+        let package_binding = test_metadata_binding(
+            "integer.formatter",
+            "format.quest_alias",
+            serde_json::json!({
+                "quest_source": "subrecord",
+                "quest_signature": "QNAM"
+            }),
+        );
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &package_binding,
+                HandlerRecordContext::new(
+                    Signature(*b"PACK"),
+                    FormId(0x1111),
+                    0,
+                    SchemaGame::SkyrimSe,
+                ),
+                HandlerInvocationAccess::read_only_with_scope(&package, None),
+                HandlerPhase::Display,
+                Some(&alias),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "007 Target"
+        ));
+
+        let quest_path = "QUST/Alias/External/0:Quest";
+        let scope = FieldValue::Struct(vec![crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: quest_path.to_owned(),
+            effective_path: None,
+            name: "Quest".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 4 },
+            value: FieldValue::FormId {
+                value: FormId(0x5678),
+                targets: vec![Signature(*b"QUST")],
+            },
+        }]);
+        let external = test_metadata_binding(
+            "integer.formatter",
+            "format.quest_alias",
+            serde_json::json!({
+                "quest_source": "sibling",
+                "quest_path": quest_path
+            }),
+        );
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &external,
+                local_source,
+                HandlerPhase::Display,
+                Some(&alias),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "007 Target"
         ));
         Ok(())
     }
