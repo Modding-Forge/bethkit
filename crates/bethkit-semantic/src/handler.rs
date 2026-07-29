@@ -1289,6 +1289,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(InvalidateConflicts));
         registry.register(Arc::new(CtdaTypeFormatter));
         registry.register(Arc::new(IntegerLookupFormatter));
+        registry.register(Arc::new(FloatBitsIntegerLookupFormatter));
         registry.register(Arc::new(EventFunctionMemberFormatter));
         registry.register(Arc::new(SynchronizeCountAfterSet));
         registry.register(Arc::new(SynchronizeContainerCountsAfterSet));
@@ -14173,6 +14174,136 @@ impl SemanticHandler for IntegerLookupFormatter {
     }
 }
 
+struct FloatBitsIntegerLookupFormatter;
+
+impl SemanticHandler for FloatBitsIntegerLookupFormatter {
+    fn id(&self) -> &'static str {
+        "format.float_bits_integer_lookup"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let values = integer_lookup_values(invocation.context.configuration, self.id())?;
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let FieldValue::String(input) =
+                invocation.value.ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "float-bits integer lookup edit parsing requires text".to_owned(),
+                })?
+            else {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "float-bits integer lookup edit parsing requires text".to_owned(),
+                });
+            };
+            let bits = values
+                .iter()
+                .find(|(_, name)| name.eq_ignore_ascii_case(input))
+                .map(|(bits, _)| callback_u32(i128::from(*bits), self.id()))
+                .unwrap_or_else(|| {
+                    let value = parse_delphi_integer(input, self.id())?;
+                    Ok((value as f32).to_bits())
+                })?;
+            return Ok(HandlerOutput::Value(FieldValue::UInt(u64::from(bits))));
+        }
+
+        let bits = callback_u32(
+            callback_integer(
+                invocation.value.ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "float-bits integer lookup requires an integer value".to_owned(),
+                })?,
+                self.id(),
+            )?,
+            self.id(),
+        )?;
+        let float = f32::from_bits(bits);
+        if !float.is_finite() {
+            return Err(SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "float-bits integer lookup requires a finite float".to_owned(),
+            });
+        }
+        let value = float.round_ties_even() as i64;
+        let name = values.iter().find_map(|(candidate_bits, name)| {
+            let candidate_bits = callback_u32(i128::from(*candidate_bits), self.id()).ok()?;
+            (f32::from_bits(candidate_bits).round_ties_even() as i64 == value).then_some(*name)
+        });
+        let text = match invocation.phase {
+            HandlerPhase::Display => name.map_or_else(
+                || match configuration_string(
+                    invocation.context.configuration,
+                    "unknown_display",
+                    self.id(),
+                ) {
+                    Ok("angle") => Ok(format!("<Unknown: {value}>")),
+                    Ok(policy) => Err(SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: format!("unsupported unknown display policy {policy:?}"),
+                    }),
+                    Err(error) => Err(error),
+                },
+                |name| Ok(name.to_owned()),
+            )?,
+            HandlerPhase::Summary => name.map_or_else(
+                || match configuration_string(
+                    invocation.context.configuration,
+                    "unknown_summary",
+                    self.id(),
+                ) {
+                    Ok("decimal") => Ok(value.to_string()),
+                    Ok("angle") => Ok(format!("<Unknown: {value}>")),
+                    Ok(policy) => Err(SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: format!("unsupported unknown summary policy {policy:?}"),
+                    }),
+                    Err(error) => Err(error),
+                },
+                |name| Ok(name.to_owned()),
+            )?,
+            HandlerPhase::EditValue => name.map_or_else(|| value.to_string(), str::to_owned),
+            HandlerPhase::SortKey => {
+                let width = invocation
+                    .context
+                    .configuration
+                    .get("sort_hex_width")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: "float-bits integer lookup requires sort_hex_width".to_owned(),
+                    })?;
+                let width = usize::try_from(width).map_err(|_| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "float-bits integer lookup sort width exceeds usize".to_owned(),
+                })?;
+                format!("{:0width$X}", value as u64)
+            }
+            HandlerPhase::NativeValue => String::new(),
+            HandlerPhase::Validation => name.map_or_else(
+                || match configuration_string(
+                    invocation.context.configuration,
+                    "unknown_validation",
+                    self.id(),
+                ) {
+                    Ok("angle") => Ok(format!("<Unknown: {value}>")),
+                    Ok("none") => Ok(String::new()),
+                    Ok(policy) => Err(SemanticError::Handler {
+                        handler: self.id().to_owned(),
+                        message: format!("unsupported unknown validation policy {policy:?}"),
+                    }),
+                    Err(error) => Err(error),
+                },
+                |_| Ok(String::new()),
+            )?,
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
 struct EventFunctionMemberFormatter;
 
 impl SemanticHandler for EventFunctionMemberFormatter {
@@ -26140,6 +26271,92 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::Int(123))
+        ));
+        Ok(())
+    }
+
+    /// Reinterprets stored float bits while preserving actor-value lookup semantics.
+    #[test]
+    fn float_bits_integer_lookup_formatter_rounds_and_parses_values() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "TEST/value".to_owned(),
+            callback_id: "integer.formatter".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-float-bits-integer-lookup".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "format.float_bits_integer_lookup".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({
+                        "values": [
+                            { "value": 0_f32.to_bits(), "name": "Aggression" },
+                            { "value": 10_f32.to_bits(), "name": "Agility" }
+                        ],
+                        "unknown_display": "angle",
+                        "unknown_summary": "decimal",
+                        "unknown_validation": "angle",
+                        "sort_hex_width": 8
+                    }),
+                },
+            },
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::SkyrimSe);
+        let rounded = FieldValue::UInt(u64::from(10.4_f32.to_bits()));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::Display,
+                Some(&rounded),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "Agility"
+        ));
+        let tie = FieldValue::UInt(u64::from(11.5_f32.to_bits()));
+        assert!(matches!(
+            handlers.invoke(&binding, record, HandlerPhase::Summary, Some(&tie), None)?,
+            HandlerOutput::Text(text) if text == "12"
+        ));
+        assert!(matches!(
+            handlers.invoke(&binding, record, HandlerPhase::SortKey, Some(&tie), None)?,
+            HandlerOutput::Text(text) if text == "0000000C"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::Validation,
+                Some(&tie),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "<Unknown: 12>"
+        ));
+
+        let named_edit = FieldValue::String(Cow::Borrowed("agility"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&named_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(value))
+                if value == u64::from(10_f32.to_bits())
+        ));
+        let numeric_edit = FieldValue::String(Cow::Borrowed("$0C"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&numeric_edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(value))
+                if value == u64::from(12_f32.to_bits())
         ));
         Ok(())
     }
