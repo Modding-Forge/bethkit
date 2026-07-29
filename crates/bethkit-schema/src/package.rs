@@ -889,10 +889,10 @@ fn validate_expression_field_order(
             if let crate::ArrayCount::Expression { expression } = count {
                 validate_expression_fields(expression, visible_fields, &node.path, limits)?;
             }
-            validate_expression_field_order(element, &BTreeSet::new(), limits)?;
+            validate_expression_field_order(element, visible_fields, limits)?;
         }
         SchemaNodeKind::Struct { fields } => {
-            let mut local_fields = BTreeSet::new();
+            let mut local_fields = visible_fields.clone();
             for field in fields {
                 validate_expression_field_order(field, &local_fields, limits)?;
                 local_fields.insert(field.path.clone());
