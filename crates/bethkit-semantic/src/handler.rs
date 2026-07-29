@@ -1161,6 +1161,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatCrowdProperty { resolver: None }));
         registry.register(Arc::new(FormatVmadObjectAlias { resolver: None }));
         registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
+        registry.register(Arc::new(FormatLinkedQuestStage { resolver: None }));
         registry.register(Arc::new(FormatCtdaVariableName { resolver: None }));
         registry.register(Arc::new(FormatCtdaQuestObjective { resolver: None }));
         registry.register(Arc::new(OverlayCtdaQuest { resolver: None }));
@@ -1370,6 +1371,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatCtdaQuestStage {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatLinkedQuestStage {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatCtdaVariableName {
@@ -2886,6 +2890,10 @@ struct FormatCtdaQuestStage {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatLinkedQuestStage {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 struct FormatCtdaVariableName {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
@@ -3043,6 +3051,7 @@ impl SemanticHandler for FormatCtdaQuestStage {
             };
             return Ok(HandlerOutput::Value(FieldValue::Int(parse_prefixed_i32(
                 value,
+                self.id(),
             )?)));
         }
         let stage = i64::try_from(callback_integer(
@@ -3070,6 +3079,68 @@ impl SemanticHandler for FormatCtdaQuestStage {
             stage,
             invocation.phase,
             quest.as_ref(),
+        )))
+    }
+}
+
+impl SemanticHandler for FormatLinkedQuestStage {
+    fn id(&self) -> &'static str {
+        "format.linked_quest_stage"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(linked_quest_stage_error(
+                    "linked quest-stage edit parsing requires text",
+                ));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Int(parse_prefixed_i32(
+                value,
+                self.id(),
+            )?)));
+        }
+        let stage = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                linked_quest_stage_error("linked quest-stage formatting requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| linked_quest_stage_error("linked quest stage exceeds i64"))?;
+        let quest_path =
+            configured_text(self.id(), invocation.context.configuration, "quest_path")?;
+        let source_name =
+            configured_text(self.id(), invocation.context.configuration, "source_name")?;
+        let allow_none =
+            configured_bool(self.id(), invocation.context.configuration, "allow_none")?;
+        let include_objectives = configured_bool(
+            self.id(),
+            invocation.context.configuration,
+            "include_objectives",
+        )?;
+        let quest = invocation
+            .value_scope
+            .and_then(|scope| scoped_form_id(scope, quest_path))
+            .and_then(|(form_id, targets)| {
+                self.resolver.as_deref().and_then(|resolver| {
+                    resolver.resolve_form_id(
+                        handler_record_context(&invocation.context),
+                        form_id,
+                        targets,
+                    )
+                })
+            });
+        Ok(HandlerOutput::Text(format_linked_quest_stage(
+            stage,
+            invocation.phase,
+            quest.as_ref(),
+            source_name,
+            allow_none,
+            include_objectives,
         )))
     }
 }
@@ -3652,6 +3723,96 @@ fn format_ctda_quest_stage(
     }
 }
 
+fn format_linked_quest_stage(
+    stage: i64,
+    phase: HandlerPhase,
+    quest: Option<&FormLinkInfo>,
+    source_name: &str,
+    allow_none: bool,
+    include_objectives: bool,
+) -> String {
+    if phase == HandlerPhase::SortKey {
+        return format!("{:08X}", stage as u64);
+    }
+    if allow_none && stage < 0 {
+        return match phase {
+            HandlerPhase::Display | HandlerPhase::Summary => format!("{stage} NONE"),
+            HandlerPhase::EditValue => stage.to_string(),
+            HandlerPhase::Validation => String::new(),
+            _ => String::new(),
+        };
+    }
+    let unresolved = match phase {
+        HandlerPhase::Display => {
+            format!("{stage} <Warning: Could not resolve {source_name}>")
+        }
+        HandlerPhase::Summary | HandlerPhase::EditValue => stage.to_string(),
+        HandlerPhase::Validation => {
+            format!("<Warning: Could not resolve {source_name}>")
+        }
+        _ => String::new(),
+    };
+    let Some(quest) = quest else {
+        return unresolved;
+    };
+    let Some(stages) = quest.quest_stages() else {
+        return match phase {
+            HandlerPhase::Display => format!(
+                "{stage} <Warning: \"{}\" is not a Quest record>",
+                quest.short_name()
+            ),
+            HandlerPhase::Summary | HandlerPhase::EditValue => stage.to_string(),
+            HandlerPhase::Validation => {
+                format!(
+                    "<Warning: \"{}\" is not a Quest record>",
+                    quest.short_name()
+                )
+            }
+            _ => unresolved,
+        };
+    };
+    if let Some(found) = stages.iter().find(|candidate| candidate.index() == stage) {
+        return match phase {
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+                format_quest_stage_label(found)
+            }
+            HandlerPhase::Validation => String::new(),
+            _ => unresolved,
+        };
+    }
+    if include_objectives {
+        if let Some(found) = quest.quest_objectives().and_then(|objectives| {
+            objectives
+                .iter()
+                .find(|candidate| candidate.index() == stage)
+        }) {
+            return match phase {
+                HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+                    format_indexed_label(found.index(), found.display_text())
+                }
+                HandlerPhase::Validation => String::new(),
+                _ => unresolved,
+            };
+        }
+    }
+    let value_kind = if include_objectives {
+        "Quest Stage/Objective"
+    } else {
+        "Quest Stage"
+    };
+    match phase {
+        HandlerPhase::Display => format!(
+            "{stage} <Warning: {value_kind} not found in \"{}\">",
+            quest.value()
+        ),
+        HandlerPhase::Summary | HandlerPhase::EditValue => stage.to_string(),
+        HandlerPhase::Validation => {
+            format!("<Warning: {value_kind} not found in \"{}\">", quest.value())
+        }
+        _ => unresolved,
+    }
+}
+
 fn resolve_ctda_parameter_link(
     invocation: &HandlerInvocation<'_>,
     resolver: Option<&dyn FormLinkResolver>,
@@ -3911,7 +4072,7 @@ fn callback_form_id(value: &FieldValue<'_>, handler: &str) -> Result<FormId> {
     }
 }
 
-fn parse_prefixed_i32(value: &str) -> Result<i64> {
+fn parse_prefixed_i32(value: &str, handler: &str) -> Result<i64> {
     let value = value.trim();
     let end = value
         .char_indices()
@@ -3922,7 +4083,10 @@ fn parse_prefixed_i32(value: &str) -> Result<i64> {
     value[..end]
         .parse::<i32>()
         .map(i64::from)
-        .map_err(|error| ctda_quest_stage_error(format!("invalid quest stage: {error}")))
+        .map_err(|error| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("invalid quest stage: {error}"),
+        })
 }
 
 fn parse_prefixed_u32(value: &str, handler: &str) -> Result<u32> {
@@ -3941,6 +4105,13 @@ fn parse_prefixed_u32(value: &str, handler: &str) -> Result<u32> {
 fn ctda_quest_stage_error(message: impl Into<String>) -> SemanticError {
     SemanticError::Handler {
         handler: "format.ctda_quest_stage".to_owned(),
+        message: message.into(),
+    }
+}
+
+fn linked_quest_stage_error(message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: "format.linked_quest_stage".to_owned(),
         message: message.into(),
     }
 }
@@ -15820,6 +15991,7 @@ mod tests {
                     .with_quest_objectives(vec![
                         QuestObjectiveInfo::new(10, " Reach the target "),
                         QuestObjectiveInfo::new(20, ""),
+                        QuestObjectiveInfo::new(25, " Optional objective "),
                     ]),
                 ),
                 _ => None,
@@ -18251,6 +18423,98 @@ mod tests {
                 None,
             )?,
             HandlerOutput::Value(FieldValue::Int(10))
+        ));
+        Ok(())
+    }
+
+    /// Formats PERK and SPCH quest stages through their materialized quest link.
+    #[test]
+    fn linked_quest_stage_formatter_matches_xedit() -> TestResult {
+        // given
+        let quest_path = "TEST/Quest";
+        let perk_binding = test_metadata_binding(
+            "integer.formatter",
+            "format.linked_quest_stage",
+            serde_json::json!({
+                "quest_path": quest_path,
+                "source_name": "Quest",
+                "allow_none": false,
+                "include_objectives": true
+            }),
+        );
+        let speech_binding = test_metadata_binding(
+            "integer.formatter",
+            "format.linked_quest_stage",
+            serde_json::json!({
+                "quest_path": quest_path,
+                "source_name": "Quest",
+                "allow_none": true,
+                "include_objectives": false
+            }),
+        );
+        let scope = FieldValue::Struct(vec![crate::NamedValue {
+            node_id: bethkit_schema::SchemaNodeId(1),
+            path: quest_path.to_owned(),
+            effective_path: None,
+            name: "Quest".to_owned(),
+            span: crate::ByteSpan { start: 0, end: 4 },
+            value: FieldValue::FormId {
+                value: FormId(0x5678),
+                targets: vec![Signature(*b"QUST")],
+            },
+        }]);
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let record =
+            HandlerRecordContext::new(Signature(*b"TEST"), FormId::NULL, 0, SchemaGame::Fallout76);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &perk_binding,
+                record,
+                HandlerPhase::Display,
+                Some(&FieldValue::Int(25)),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "025 Optional objective"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &speech_binding,
+                record,
+                HandlerPhase::Summary,
+                Some(&FieldValue::Int(-1)),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text) if text == "-1 NONE"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_value_scope(
+                &speech_binding,
+                record,
+                HandlerPhase::Display,
+                Some(&FieldValue::Int(30)),
+                None,
+                Some(&scope),
+            )?,
+            HandlerOutput::Text(text)
+                if text
+                    == "30 <Warning: Quest Stage not found in \
+                        \"Example Quest [QUST:00005678]\">"
+        ));
+        let edit = FieldValue::String(Cow::Borrowed("025 Optional objective"));
+        assert!(matches!(
+            handlers.invoke(
+                &perk_binding,
+                record,
+                HandlerPhase::ParseEditValue,
+                Some(&edit),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(25))
         ));
         Ok(())
     }
