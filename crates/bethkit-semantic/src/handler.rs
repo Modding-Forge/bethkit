@@ -1306,6 +1306,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatLegendaryFilterMod { resolver: None }));
         registry.register(Arc::new(FormatNpcAppearanceIndex { resolver: None }));
         registry.register(Arc::new(FormatCombinedMeshId { resolver: None }));
+        registry.register(Arc::new(FormatObjectModProperty));
         registry.register(Arc::new(FormatColorOrFloat));
         registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
         registry.register(Arc::new(FormatLinkedQuestStage { resolver: None }));
@@ -3095,6 +3096,8 @@ struct FormatNpcAppearanceIndex {
 struct FormatCombinedMeshId {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
+
+struct FormatObjectModProperty;
 
 struct FormatColorOrFloat;
 
@@ -5245,6 +5248,72 @@ impl SemanticHandler for FormatCombinedMeshId {
             }
             HandlerPhase::SortKey | HandlerPhase::NativeValue => raw,
             HandlerPhase::Validation => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+impl SemanticHandler for FormatObjectModProperty {
+    fn id(&self) -> &'static str {
+        "format.object_mod_property"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let values = object_mod_property_values(&invocation, self.id())?;
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(input)) = invocation.value else {
+                return Err(indexed_record_error(
+                    self.id(),
+                    "object-mod property edit parsing requires text",
+                ));
+            };
+            let value = values
+                .as_ref()
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .find(|(_, name)| *name == input.as_ref())
+                        .map(|(value, _)| *value)
+                })
+                .unwrap_or_else(|| parse_delphi_integer(input, self.id()).unwrap_or(0));
+            return Ok(HandlerOutput::Value(FieldValue::Int(value)));
+        }
+        let value = i64::try_from(callback_integer(
+            invocation.value.ok_or_else(|| {
+                indexed_record_error(self.id(), "object-mod property requires an integer")
+            })?,
+            self.id(),
+        )?)
+        .map_err(|_| indexed_record_error(self.id(), "object-mod property exceeds i64"))?;
+        let Some(values) = values else {
+            let text = match invocation.phase {
+                HandlerPhase::Display
+                | HandlerPhase::Summary
+                | HandlerPhase::SortKey
+                | HandlerPhase::EditValue => value.to_string(),
+                HandlerPhase::Validation | HandlerPhase::NativeValue => String::new(),
+                _ => return Ok(HandlerOutput::None),
+            };
+            return Ok(HandlerOutput::Text(text));
+        };
+        let name = values
+            .iter()
+            .find(|(candidate, _)| *candidate == value)
+            .map(|(_, name)| *name);
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary => {
+                name.map_or_else(|| format!("<Unknown: {value}>"), str::to_owned)
+            }
+            HandlerPhase::SortKey | HandlerPhase::NativeValue => String::new(),
+            HandlerPhase::EditValue => name.map_or_else(|| value.to_string(), str::to_owned),
+            HandlerPhase::Validation => {
+                name.map_or_else(|| format!("<Unknown: {value}>"), |_| String::new())
+            }
             _ => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Text(text))
@@ -16462,6 +16531,44 @@ fn integer_lookup_values<'a>(
     Ok(output)
 }
 
+fn object_mod_property_values<'a>(
+    invocation: &HandlerInvocation<'a>,
+    handler: &str,
+) -> Result<Option<Vec<(i64, &'a str)>>> {
+    let tables = invocation
+        .context
+        .configuration
+        .get("tables")
+        .and_then(serde_json::Value::as_object)
+        .filter(|tables| !tables.is_empty())
+        .ok_or_else(|| indexed_record_error(handler, "object-mod property requires tables"))?;
+    for table in tables.values() {
+        integer_lookup_values(table, handler)?;
+    }
+    let signature = if invocation.context.record_signature == Signature(*b"OMOD") {
+        let offset = configured_u64(
+            handler,
+            invocation.context.configuration,
+            "form_type_offset",
+        )?;
+        let offset = usize::try_from(offset)
+            .map_err(|_| indexed_record_error(handler, "form-type offset exceeds usize"))?;
+        source_subrecord_bytes_anywhere(invocation, Signature(*b"DATA"), handler)?
+            .and_then(|bytes| bytes.get(offset..offset.saturating_add(4)))
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(Signature)
+    } else {
+        Some(invocation.context.record_signature)
+    };
+    let Some(signature) = signature else {
+        return Ok(None);
+    };
+    tables
+        .get(&signature.to_string())
+        .map(|table| integer_lookup_values(table, handler))
+        .transpose()
+}
+
 struct EventFunctionMemberValues<'a> {
     functions: Vec<(i64, &'a str)>,
     members: Vec<(i64, &'a str)>,
@@ -20664,6 +20771,96 @@ mod tests {
             HandlerOutput::Value(FieldValue::UInt(0x89ab_cdef))
         ));
         assert_eq!(parse_combined_mesh_id("invalid.nif"), 0);
+        Ok(())
+    }
+
+    /// Selects object-mod property names from the record or OMOD form type.
+    #[test]
+    fn object_mod_property_formatter_matches_xedit() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.object_mod_property",
+            serde_json::json!({
+                "form_type_offset": 10,
+                "tables": {
+                    "ARMO": {
+                        "values": [
+                            { "value": 0, "name": "Enchantments" },
+                            { "value": 4, "name": "Weight" }
+                        ]
+                    },
+                    "NPC_": {
+                        "values": [{ "value": 0, "name": "Keywords" }]
+                    },
+                    "WEAP": {
+                        "values": [{ "value": 0, "name": "Speed" }]
+                    }
+                }
+            }),
+        );
+        let handlers = SemanticHandlerRegistry::builtin();
+        let armor =
+            HandlerRecordContext::new(Signature(*b"ARMO"), FormId::NULL, 0, SchemaGame::Fallout4);
+        let furniture =
+            HandlerRecordContext::new(Signature(*b"FURN"), FormId::NULL, 0, SchemaGame::Fallout4);
+        let omod =
+            HandlerRecordContext::new(Signature(*b"OMOD"), FormId::NULL, 0, SchemaGame::Fallout4);
+        let value = FieldValue::UInt(4);
+        let mut data = vec![0_u8; 14];
+        data[10..14].copy_from_slice(b"ARMO");
+        let record = test_record(*b"OMOD", &[(*b"DATA", data)])?;
+
+        // when / then
+        for (context, access) in [
+            (armor, HandlerInvocationAccess::default()),
+            (
+                omod,
+                HandlerInvocationAccess::read_only_subrecord_with_scope(&record, 0, None),
+            ),
+        ] {
+            assert!(matches!(
+                handlers.invoke_with_records(
+                    &binding,
+                    context,
+                    access,
+                    HandlerPhase::Display,
+                    Some(&value),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == "Weight"
+            ));
+        }
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                furniture,
+                HandlerPhase::Display,
+                Some(&value),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "4"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                armor,
+                HandlerPhase::Validation,
+                Some(&FieldValue::UInt(99)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "<Unknown: 99>"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                armor,
+                HandlerPhase::ParseEditValue,
+                Some(&FieldValue::String(Cow::Borrowed("Weight"))),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(4))
+        ));
         Ok(())
     }
 
