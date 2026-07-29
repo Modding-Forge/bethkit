@@ -1227,6 +1227,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatNavmeshVertex));
         registry.register(Arc::new(FormatNavmeshEdge { resolver: None }));
         registry.register(Arc::new(FormatNavmeshTriangleReference { resolver: None }));
+        registry.register(Arc::new(FormatLegacyNavmeshEdge { resolver: None }));
         registry.register(Arc::new(ResolveNavmeshEdge { resolver: None }));
         registry.register(Arc::new(CtdaRunOnAfterSet));
         registry.register(Arc::new(CtdaTypeAfterSet));
@@ -1448,6 +1449,9 @@ impl SemanticHandlerRegistry {
             resolver: self.form_link_resolver.clone(),
         }));
         self.register(Arc::new(FormatNavmeshTriangleReference {
+            resolver: self.form_link_resolver.clone(),
+        }));
+        self.register(Arc::new(FormatLegacyNavmeshEdge {
             resolver: self.form_link_resolver.clone(),
         }));
         self.register(Arc::new(ResolveNavmeshEdge {
@@ -6505,6 +6509,10 @@ struct FormatNavmeshTriangleReference {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatLegacyNavmeshEdge {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 struct FormatNavmeshVertex;
 
 struct ResolveNavmeshEdge {
@@ -6516,6 +6524,13 @@ struct NavmeshEdgeState {
     triangle_index: Option<usize>,
     triangles_path: String,
     local_triangle_count: usize,
+    external_navmesh: Option<ResolvedNavmeshInfo>,
+}
+
+struct LegacyNavmeshEdgeState {
+    external: bool,
+    connection_exists: bool,
+    triangle_index: Option<i128>,
     external_navmesh: Option<ResolvedNavmeshInfo>,
 }
 
@@ -6735,6 +6750,182 @@ impl SemanticHandler for FormatNavmeshTriangleReference {
             navmesh.name()
         )))
     }
+}
+
+impl SemanticHandler for FormatLegacyNavmeshEdge {
+    fn id(&self) -> &'static str {
+        "format.legacy_navmesh_edge"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(input)) = invocation.value else {
+                return Err(indexed_record_error(
+                    self.id(),
+                    "legacy navmesh edge edit parsing requires text",
+                ));
+            };
+            let parsed = parse_delphi_integer(input, self.id())?;
+            return Ok(HandlerOutput::Value(FieldValue::Int(parsed)));
+        }
+        let raw = callback_integer(
+            invocation.value.ok_or_else(|| {
+                indexed_record_error(self.id(), "legacy navmesh edge requires an integer")
+            })?,
+            self.id(),
+        )?;
+        let Some(state) = legacy_navmesh_edge_state(&invocation, self.resolver.as_deref())? else {
+            return Ok(HandlerOutput::Text(String::new()));
+        };
+        if !state.external {
+            let text = match invocation.phase {
+                HandlerPhase::Display | HandlerPhase::Summary => raw.to_string(),
+                HandlerPhase::SortKey | HandlerPhase::EditValue | HandlerPhase::Validation => {
+                    String::new()
+                }
+                _ => return Ok(HandlerOutput::None),
+            };
+            return Ok(HandlerOutput::Text(text));
+        }
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary => {
+                let mut text = raw.to_string();
+                if let Some((triangle, navmesh)) =
+                    state.triangle_index.zip(state.external_navmesh.as_ref())
+                {
+                    text.push_str(&format!(" (Triangle #{triangle} in {})", navmesh.name()));
+                } else if !state.connection_exists && invocation.phase == HandlerPhase::Display {
+                    text.push_str(&format!(" <Error: NVEX\\Connection #{raw} is missing>"));
+                }
+                text
+            }
+            HandlerPhase::SortKey => state
+                .triangle_index
+                .zip(state.external_navmesh.as_ref())
+                .map_or_else(String::new, |(triangle, navmesh)| {
+                    format!(
+                        "{:08X}|{:04X}",
+                        navmesh.load_order_form_id(),
+                        triangle as i16 as u16
+                    )
+                }),
+            HandlerPhase::Validation => {
+                if state.connection_exists {
+                    String::new()
+                } else {
+                    format!("NVEX\\Connection #{raw} is missing")
+                }
+            }
+            HandlerPhase::EditValue => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+fn legacy_navmesh_edge_state(
+    invocation: &HandlerInvocation<'_>,
+    resolver: Option<&dyn FormLinkResolver>,
+) -> Result<Option<LegacyNavmeshEdgeState>> {
+    let Some(scope) = invocation.value_scope else {
+        return Ok(None);
+    };
+    let [.., triangle_position, edge] = invocation.array_indices else {
+        return Ok(None);
+    };
+    if *edge > 2 {
+        return Ok(None);
+    }
+    let handler = "format.legacy_navmesh_edge";
+    let triangles_path =
+        configured_text(handler, invocation.context.configuration, "triangles_path")?;
+    let flags_path = configured_text(handler, invocation.context.configuration, "flags_path")?;
+    let connections_path = configured_text(
+        handler,
+        invocation.context.configuration,
+        "connections_path",
+    )?;
+    let connection_navmesh_path = configured_text(
+        handler,
+        invocation.context.configuration,
+        "connection_navmesh_path",
+    )?;
+    let connection_triangle_path = configured_text(
+        handler,
+        invocation.context.configuration,
+        "connection_triangle_path",
+    )?;
+    let Some(triangles) = scoped_named_value(scope, triangles_path) else {
+        return Ok(None);
+    };
+    let FieldValue::Array(triangle_values) = &triangles.value else {
+        return Err(indexed_record_error(
+            handler,
+            "legacy Triangles target is not an array",
+        ));
+    };
+    let Some(FieldValue::Struct(triangle_fields)) = triangle_values.get(*triangle_position) else {
+        return Ok(None);
+    };
+    let flags = triangle_fields
+        .iter()
+        .find(|field| field.path == flags_path)
+        .map(|field| callback_integer(&field.value, handler))
+        .transpose()?
+        .unwrap_or(0);
+    if flags & (1_i128 << edge) == 0 {
+        return Ok(Some(LegacyNavmeshEdgeState {
+            external: false,
+            connection_exists: false,
+            triangle_index: None,
+            external_navmesh: None,
+        }));
+    }
+    let raw = callback_integer(
+        invocation
+            .value
+            .ok_or_else(|| indexed_record_error(handler, "legacy edge requires an integer"))?,
+        handler,
+    )?;
+    let connection = usize::try_from(raw).ok().and_then(|index| {
+        scoped_named_value(scope, connections_path).and_then(|field| match &field.value {
+            FieldValue::Array(values) => values.get(index),
+            _ => None,
+        })
+    });
+    let Some(FieldValue::Struct(connection_fields)) = connection else {
+        return Ok(Some(LegacyNavmeshEdgeState {
+            external: true,
+            connection_exists: false,
+            triangle_index: None,
+            external_navmesh: None,
+        }));
+    };
+    let triangle_index = connection_fields
+        .iter()
+        .find(|field| field.path == connection_triangle_path)
+        .map(|field| callback_integer(&field.value, handler))
+        .transpose()?;
+    let navmesh_form_id = connection_fields
+        .iter()
+        .find(|field| field.path == connection_navmesh_path)
+        .map(|field| callback_form_id(&field.value, handler))
+        .transpose()?;
+    let external_navmesh = navmesh_form_id.and_then(|form_id| {
+        resolver.and_then(|resolver| {
+            resolver.resolve_navmesh(handler_record_context(&invocation.context), form_id)
+        })
+    });
+    Ok(Some(LegacyNavmeshEdgeState {
+        external: true,
+        connection_exists: true,
+        triangle_index,
+        external_navmesh,
+    }))
 }
 
 fn navmesh_vertex<'a>(
@@ -17000,6 +17191,159 @@ mod tests {
             )?,
             HandlerOutput::Text(text) if text.is_empty()
         ));
+        Ok(())
+    }
+
+    /// Matches Fallout 3 and New Vegas NVEX edge presentation and validation.
+    #[test]
+    fn legacy_navmesh_edge_formatter_matches_xedit() -> TestResult {
+        // given
+        let triangles_path = "NAVM/4:Triangles/payload";
+        let flags_path = "NAVM/4:Triangles/payload/element/2:Flags";
+        let connections_path = "NAVM/8:External Connections/payload";
+        let connection_navmesh_path =
+            "NAVM/8:External Connections/payload/element/1:Navigation Mesh";
+        let connection_triangle_path = "NAVM/8:External Connections/payload/element/2:Triangle";
+        let field =
+            |id: u32, path: &str, name: &str, value: FieldValue<'static>| crate::NamedValue {
+                node_id: bethkit_schema::SchemaNodeId(id),
+                path: path.to_owned(),
+                effective_path: None,
+                name: name.to_owned(),
+                span: crate::ByteSpan { start: 0, end: 0 },
+                value,
+            };
+        let triangle = |flags| {
+            FieldValue::Struct(vec![field(1, flags_path, "Flags", FieldValue::UInt(flags))])
+        };
+        let connection = FieldValue::Struct(vec![
+            field(
+                2,
+                connection_navmesh_path,
+                "Navigation Mesh",
+                FieldValue::FormId {
+                    value: FormId(0x2468),
+                    targets: vec![Signature(*b"NAVM")],
+                },
+            ),
+            field(3, connection_triangle_path, "Triangle", FieldValue::Int(2)),
+        ]);
+        let scope = FieldValue::Struct(vec![
+            field(
+                4,
+                triangles_path,
+                "Triangles",
+                FieldValue::Array(vec![triangle(0), triangle(1)]),
+            ),
+            field(
+                5,
+                connections_path,
+                "External Connections",
+                FieldValue::Array(vec![connection]),
+            ),
+        ]);
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.legacy_navmesh_edge",
+            serde_json::json!({
+                "triangles_path": triangles_path,
+                "flags_path": flags_path,
+                "connections_path": connections_path,
+                "connection_navmesh_path": connection_navmesh_path,
+                "connection_triangle_path": connection_triangle_path
+            }),
+        );
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source =
+            HandlerRecordContext::new(Signature(*b"NAVM"), FormId(0x1234), 0, SchemaGame::Fallout3);
+        let edge = FieldValue::Int(0);
+
+        // when / then
+        for (indices, phase, expected) in [
+            ([0, 0], HandlerPhase::Display, "0"),
+            ([0, 0], HandlerPhase::Summary, "0"),
+            ([0, 0], HandlerPhase::SortKey, ""),
+            ([0, 0], HandlerPhase::EditValue, ""),
+            ([0, 0], HandlerPhase::Validation, ""),
+            (
+                [1, 0],
+                HandlerPhase::Display,
+                "0 (Triangle #2 in Target Navmesh [NAVM:02002468])",
+            ),
+            (
+                [1, 0],
+                HandlerPhase::Summary,
+                "0 (Triangle #2 in Target Navmesh [NAVM:02002468])",
+            ),
+            ([1, 0], HandlerPhase::SortKey, "02002468|0002"),
+            ([1, 0], HandlerPhase::Validation, ""),
+        ] {
+            assert!(matches!(
+                handlers.invoke_with_records(
+                    &binding,
+                    source,
+                    HandlerInvocationAccess {
+                        source: HandlerRecordSource::None,
+                        value_scope: Some(&scope),
+                        source_subrecord_index: None,
+                        array_indices: &indices,
+                    },
+                    phase,
+                    Some(&edge),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
+        let missing = FieldValue::Int(1);
+        for (phase, expected) in [
+            (
+                HandlerPhase::Display,
+                "1 <Error: NVEX\\Connection #1 is missing>",
+            ),
+            (HandlerPhase::Summary, "1"),
+            (HandlerPhase::Validation, "NVEX\\Connection #1 is missing"),
+            (HandlerPhase::SortKey, ""),
+        ] {
+            assert!(matches!(
+                handlers.invoke_with_records(
+                    &binding,
+                    source,
+                    HandlerInvocationAccess {
+                        source: HandlerRecordSource::None,
+                        value_scope: Some(&scope),
+                        source_subrecord_index: None,
+                        array_indices: &[1, 0],
+                    },
+                    phase,
+                    Some(&missing),
+                    None,
+                )?,
+                HandlerOutput::Text(text) if text == expected
+            ));
+        }
+        let input = FieldValue::String(Cow::Borrowed("17"));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                source,
+                HandlerPhase::ParseEditValue,
+                Some(&input),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(17))
+        ));
+        let invalid = FieldValue::String(Cow::Borrowed("invalid"));
+        assert!(handlers
+            .invoke(
+                &binding,
+                source,
+                HandlerPhase::ParseEditValue,
+                Some(&invalid),
+                None,
+            )
+            .is_err());
         Ok(())
     }
 
