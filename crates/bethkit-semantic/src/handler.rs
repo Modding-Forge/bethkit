@@ -1290,6 +1290,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(CtdaTypeFormatter));
         registry.register(Arc::new(IntegerLookupFormatter));
         registry.register(Arc::new(FloatBitsIntegerLookupFormatter));
+        registry.register(Arc::new(LegacyPerkContextualFormatter));
         registry.register(Arc::new(EventFunctionMemberFormatter));
         registry.register(Arc::new(SynchronizeCountAfterSet));
         registry.register(Arc::new(SynchronizeContainerCountsAfterSet));
@@ -2265,6 +2266,48 @@ fn configured_u8_matrix(
                                  must be a byte"
                             ),
                         })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn configured_text_matrix<'a>(
+    handler: &str,
+    configuration: &'a serde_json::Value,
+    key: &str,
+    width: usize,
+) -> Result<Vec<Vec<&'a str>>> {
+    let rows = configuration
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| SemanticError::Handler {
+            handler: handler.to_owned(),
+            message: format!("callback configuration `{key}` must be an array"),
+        })?;
+    rows.iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let values = row
+                .as_array()
+                .filter(|values| values.len() == width)
+                .ok_or_else(|| SemanticError::Handler {
+                    handler: handler.to_owned(),
+                    message: format!(
+                        "callback configuration `{key}[{row_index}]` must contain {width} strings"
+                    ),
+                })?;
+            values
+                .iter()
+                .enumerate()
+                .map(|(column_index, value)| {
+                    value.as_str().ok_or_else(|| SemanticError::Handler {
+                        handler: handler.to_owned(),
+                        message: format!(
+                            "callback configuration `{key}[{row_index}][{column_index}]` \
+                             must be text"
+                        ),
+                    })
                 })
                 .collect()
         })
@@ -14301,6 +14344,535 @@ impl SemanticHandler for FloatBitsIntegerLookupFormatter {
             _ => return Ok(HandlerOutput::None),
         };
         Ok(HandlerOutput::Text(text))
+    }
+}
+
+struct LegacyPerkContextualFormatter;
+
+struct LegacyPerkFormatterMetadata<'a> {
+    entry_point_conditions: Vec<u8>,
+    entry_point_function_types: Vec<u8>,
+    entry_point_function_tables: Vec<u8>,
+    condition_captions: Vec<Vec<&'a str>>,
+    function_types: Vec<u8>,
+    function_names: Vec<Vec<&'a str>>,
+    function_parameter_types: Vec<u8>,
+    parameter_names: Vec<&'a str>,
+}
+
+impl<'a> LegacyPerkFormatterMetadata<'a> {
+    fn from_configuration(handler: &str, configuration: &'a serde_json::Value) -> Result<Self> {
+        let metadata = Self {
+            entry_point_conditions: configured_u8_array(
+                handler,
+                configuration,
+                "entry_point_conditions",
+            )?,
+            entry_point_function_types: configured_u8_array(
+                handler,
+                configuration,
+                "entry_point_function_types",
+            )?,
+            entry_point_function_tables: configured_u8_array(
+                handler,
+                configuration,
+                "entry_point_function_tables",
+            )?,
+            condition_captions: configured_text_matrix(
+                handler,
+                configuration,
+                "condition_captions",
+                3,
+            )?,
+            function_types: configured_u8_array(handler, configuration, "function_types")?,
+            function_names: configured_text_matrix(handler, configuration, "function_names", 10)?,
+            function_parameter_types: configured_u8_array(
+                handler,
+                configuration,
+                "function_parameter_types",
+            )?,
+            parameter_names: configured_text_array(handler, configuration, "parameter_names")?,
+        };
+        let entry_point_count = metadata.entry_point_conditions.len();
+        if entry_point_count == 0
+            || metadata.entry_point_function_types.len() != entry_point_count
+            || metadata.entry_point_function_tables.len() != entry_point_count
+            || metadata.function_types.len() != metadata.function_parameter_types.len()
+            || metadata.function_names.is_empty()
+            || metadata
+                .function_names
+                .iter()
+                .any(|names| names.len() != metadata.function_types.len())
+            || metadata.condition_captions.is_empty()
+            || metadata.parameter_names.is_empty()
+        {
+            return Err(SemanticError::Handler {
+                handler: handler.to_owned(),
+                message: "legacy PERK formatter metadata lengths are inconsistent".to_owned(),
+            });
+        }
+        Ok(metadata)
+    }
+}
+
+impl SemanticHandler for LegacyPerkContextualFormatter {
+    fn id(&self) -> &'static str {
+        "format.legacy_perk_contextual"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        let configuration = invocation.context.configuration;
+        let kind = configured_text(self.id(), configuration, "kind")?;
+        let metadata = LegacyPerkFormatterMetadata::from_configuration(self.id(), configuration)?;
+        let value = if invocation.phase == HandlerPhase::ParseEditValue {
+            let FieldValue::String(input) =
+                invocation.value.ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "legacy PERK edit parsing requires text".to_owned(),
+                })?
+            else {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "legacy PERK edit parsing requires text".to_owned(),
+                });
+            };
+            return Ok(HandlerOutput::Value(FieldValue::Int(
+                parse_legacy_perk_contextual(
+                    self.id(),
+                    kind,
+                    input,
+                    configuration,
+                    &metadata,
+                    &invocation,
+                )?,
+            )));
+        } else {
+            i64::try_from(callback_integer(
+                invocation.value.ok_or_else(|| SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: "legacy PERK formatting requires an integer value".to_owned(),
+                })?,
+                self.id(),
+            )?)
+            .map_err(|_| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "legacy PERK formatter value exceeds i64".to_owned(),
+            })?
+        };
+        if invocation.phase == HandlerPhase::SortKey {
+            return Ok(HandlerOutput::Text(format!("{:02X}", value as u64)));
+        }
+        if invocation.phase == HandlerPhase::NativeValue {
+            return Ok(HandlerOutput::Text(String::new()));
+        }
+        let context = legacy_perk_formatter_context(self.id(), configuration, &invocation)?;
+        let text = match kind {
+            "run_on" => format_legacy_perk_run_on(value, invocation.phase, context, &metadata)?,
+            "function" => format_legacy_perk_function(value, invocation.phase, context, &metadata)?,
+            "parameter_type" => {
+                format_legacy_perk_parameter_type(value, invocation.phase, context, &metadata)?
+            }
+            value => {
+                return Err(SemanticError::Handler {
+                    handler: self.id().to_owned(),
+                    message: format!("unknown legacy PERK formatter kind {value:?}"),
+                });
+            }
+        };
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LegacyPerkFormatterContext {
+    entry_point: i64,
+    function: i64,
+}
+
+fn legacy_perk_formatter_context(
+    handler: &str,
+    configuration: &serde_json::Value,
+    invocation: &HandlerInvocation<'_>,
+) -> Result<Option<LegacyPerkFormatterContext>> {
+    let signature = configured_signature(handler, configuration, "data_signature")?;
+    let Some(bytes) = legacy_perk_data_bytes(invocation, signature)? else {
+        return Ok(None);
+    };
+    Ok(Some(LegacyPerkFormatterContext {
+        entry_point: read_configured_integer(configuration, "entry_point", bytes, handler)?,
+        function: read_configured_integer(configuration, "function", bytes, handler)?,
+    }))
+}
+
+fn legacy_perk_data_bytes<'a>(
+    invocation: &'a HandlerInvocation<'_>,
+    signature: Signature,
+) -> Result<Option<&'a [u8]>> {
+    let Some(source_index) = invocation.source_subrecord_index else {
+        return Ok(None);
+    };
+    if let Some(record) = invocation.source_record {
+        let subrecords = record.subrecords()?;
+        return Ok(subrecords
+            .get(..source_index.saturating_add(1).min(subrecords.len()))
+            .and_then(|subrecords| {
+                subrecords
+                    .iter()
+                    .rev()
+                    .find(|subrecord| subrecord.signature == signature)
+            })
+            .map(bethkit_core::SubRecord::as_bytes));
+    }
+    if let Some(record) = invocation.source_writable_record {
+        return Ok(record
+            .subrecords
+            .get(..source_index.saturating_add(1).min(record.subrecords.len()))
+            .and_then(|subrecords| {
+                subrecords
+                    .iter()
+                    .rev()
+                    .find(|subrecord| subrecord.signature == signature)
+            })
+            .map(|subrecord| subrecord.data.as_slice()));
+    }
+    Ok(None)
+}
+
+fn parse_legacy_perk_contextual(
+    handler: &str,
+    kind: &str,
+    input: &str,
+    configuration: &serde_json::Value,
+    metadata: &LegacyPerkFormatterMetadata<'_>,
+    invocation: &HandlerInvocation<'_>,
+) -> Result<i64> {
+    let input = input.trim();
+    if let Ok(value) = input.parse::<i64>() {
+        return Ok(value);
+    }
+    if kind == "run_on" && input.is_empty() {
+        return Ok(0);
+    }
+    if input.is_empty() {
+        return Err(legacy_perk_formatter_error(
+            handler,
+            "\"\" is not a valid value for this field",
+        ));
+    }
+    let context = legacy_perk_formatter_context(handler, configuration, invocation)?
+        .ok_or_else(|| legacy_perk_formatter_error(handler, legacy_perk_unresolved_name(kind)))?;
+    match kind {
+        "run_on" => {
+            let captions = legacy_perk_condition_captions(handler, context, metadata)?;
+            captions
+                .iter()
+                .position(|caption| !caption.is_empty() && caption.eq_ignore_ascii_case(input))
+                .and_then(|index| i64::try_from(index).ok())
+                .ok_or_else(|| {
+                    legacy_perk_formatter_error(
+                        handler,
+                        format!("{input:?} is not valid for this Entry Point"),
+                    )
+                })
+        }
+        "function" => {
+            let (required_type, names) = legacy_perk_function_context(handler, context, metadata)?;
+            names
+                .iter()
+                .enumerate()
+                .find(|(index, name)| {
+                    !name.is_empty()
+                        && name.eq_ignore_ascii_case(input)
+                        && metadata.function_types.get(*index) == Some(&required_type)
+                })
+                .and_then(|(index, _)| i64::try_from(index).ok())
+                .ok_or_else(|| {
+                    legacy_perk_formatter_error(
+                        handler,
+                        format!("{input:?} is not valid for this Entry Point"),
+                    )
+                })
+        }
+        "parameter_type" => {
+            let function = legacy_perk_function_index(handler, context, metadata)?;
+            let expected = usize::from(metadata.function_parameter_types[function]);
+            let selected = metadata
+                .parameter_names
+                .iter()
+                .position(|name| name.eq_ignore_ascii_case(input))
+                .ok_or_else(|| {
+                    legacy_perk_formatter_error(
+                        handler,
+                        format!("{input:?} is not a valid Parameter Type"),
+                    )
+                })?;
+            if selected != expected {
+                let function_name =
+                    legacy_perk_function_name(context, metadata).unwrap_or_default();
+                return Err(legacy_perk_formatter_error(
+                    handler,
+                    format!(
+                        "{input:?} is not a valid Parameter Type for Function {function_name:?}"
+                    ),
+                ));
+            }
+            i64::try_from(selected).map_err(|_| {
+                legacy_perk_formatter_error(handler, "parameter type index exceeds i64")
+            })
+        }
+        value => Err(legacy_perk_formatter_error(
+            handler,
+            format!("unknown legacy PERK formatter kind {value:?}"),
+        )),
+    }
+}
+
+fn format_legacy_perk_run_on(
+    value: i64,
+    phase: HandlerPhase,
+    context: Option<LegacyPerkFormatterContext>,
+    metadata: &LegacyPerkFormatterMetadata<'_>,
+) -> Result<String> {
+    let Some(context) = context else {
+        return Ok(legacy_perk_unresolved(value, phase, "Entry Point"));
+    };
+    let captions =
+        match legacy_perk_condition_captions("format.legacy_perk_contextual", context, metadata) {
+            Ok(captions) => captions,
+            Err(_) => {
+                return Ok(legacy_perk_unknown_context(
+                    value,
+                    phase,
+                    "Entry Point",
+                    context.entry_point,
+                ));
+            }
+        };
+    let name = usize::try_from(value)
+        .ok()
+        .and_then(|index| captions.get(index))
+        .filter(|name| !name.is_empty());
+    Ok(legacy_perk_named_value(
+        value,
+        phase,
+        name.copied(),
+        "Value out of Bounds for this Entry Point",
+    ))
+}
+
+fn format_legacy_perk_function(
+    value: i64,
+    phase: HandlerPhase,
+    context: Option<LegacyPerkFormatterContext>,
+    metadata: &LegacyPerkFormatterMetadata<'_>,
+) -> Result<String> {
+    let Some(context) = context else {
+        return Ok(legacy_perk_unresolved(value, phase, "Entry Point"));
+    };
+    let (required_type, names) =
+        match legacy_perk_function_context("format.legacy_perk_contextual", context, metadata) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(legacy_perk_unknown_context(
+                    value,
+                    phase,
+                    "Entry Point",
+                    context.entry_point,
+                ));
+            }
+        };
+    let Some(index) = usize::try_from(value)
+        .ok()
+        .filter(|index| *index < metadata.function_types.len())
+    else {
+        return Ok(legacy_perk_unknown_value(value, phase, "Unknown Function"));
+    };
+    let name = names[index];
+    let warning = (metadata.function_types[index] != required_type)
+        .then_some("Value out of Bounds for this Entry Point");
+    Ok(legacy_perk_known_value(value, phase, name, warning))
+}
+
+fn format_legacy_perk_parameter_type(
+    value: i64,
+    phase: HandlerPhase,
+    context: Option<LegacyPerkFormatterContext>,
+    metadata: &LegacyPerkFormatterMetadata<'_>,
+) -> Result<String> {
+    let Some(context) = context else {
+        return Ok(legacy_perk_unresolved(value, phase, "Function"));
+    };
+    let function =
+        match legacy_perk_function_index("format.legacy_perk_contextual", context, metadata) {
+            Ok(function) => function,
+            Err(_) => {
+                return Ok(legacy_perk_unknown_context(
+                    value,
+                    phase,
+                    "Function",
+                    context.function,
+                ));
+            }
+        };
+    let Some(index) = usize::try_from(value)
+        .ok()
+        .filter(|index| *index < metadata.parameter_names.len())
+    else {
+        return Ok(legacy_perk_unknown_value(
+            value,
+            phase,
+            "Unknown Function Param Type",
+        ));
+    };
+    let expected = usize::from(metadata.function_parameter_types[function]);
+    let warning = (index != expected).then_some("Value out of Bounds for this Function");
+    Ok(legacy_perk_known_value(
+        value,
+        phase,
+        metadata.parameter_names[index],
+        warning,
+    ))
+}
+
+fn legacy_perk_condition_captions<'a>(
+    handler: &str,
+    context: LegacyPerkFormatterContext,
+    metadata: &'a LegacyPerkFormatterMetadata<'a>,
+) -> Result<&'a [&'a str]> {
+    let entry_point = usize::try_from(context.entry_point)
+        .ok()
+        .filter(|index| *index < metadata.entry_point_conditions.len())
+        .ok_or_else(|| legacy_perk_formatter_error(handler, "unknown entry point"))?;
+    let condition = usize::from(metadata.entry_point_conditions[entry_point]);
+    metadata
+        .condition_captions
+        .get(condition)
+        .map(Vec::as_slice)
+        .ok_or_else(|| legacy_perk_formatter_error(handler, "unknown entry-point condition"))
+}
+
+fn legacy_perk_function_context<'a>(
+    handler: &str,
+    context: LegacyPerkFormatterContext,
+    metadata: &'a LegacyPerkFormatterMetadata<'a>,
+) -> Result<(u8, &'a [&'a str])> {
+    let entry_point = usize::try_from(context.entry_point)
+        .ok()
+        .filter(|index| *index < metadata.entry_point_function_types.len())
+        .ok_or_else(|| legacy_perk_formatter_error(handler, "unknown entry point"))?;
+    let table = usize::from(metadata.entry_point_function_tables[entry_point]);
+    let names = metadata
+        .function_names
+        .get(table)
+        .map(Vec::as_slice)
+        .ok_or_else(|| legacy_perk_formatter_error(handler, "unknown function-name table"))?;
+    Ok((metadata.entry_point_function_types[entry_point], names))
+}
+
+fn legacy_perk_function_index(
+    handler: &str,
+    context: LegacyPerkFormatterContext,
+    metadata: &LegacyPerkFormatterMetadata<'_>,
+) -> Result<usize> {
+    usize::try_from(context.function)
+        .ok()
+        .filter(|index| *index < metadata.function_types.len())
+        .ok_or_else(|| legacy_perk_formatter_error(handler, "unknown function"))
+}
+
+fn legacy_perk_function_name<'a>(
+    context: LegacyPerkFormatterContext,
+    metadata: &'a LegacyPerkFormatterMetadata<'a>,
+) -> Option<&'a str> {
+    let entry_point = usize::try_from(context.entry_point).ok()?;
+    let table = usize::from(*metadata.entry_point_function_tables.get(entry_point)?);
+    let function = usize::try_from(context.function).ok()?;
+    metadata.function_names.get(table)?.get(function).copied()
+}
+
+fn legacy_perk_unresolved(value: i64, phase: HandlerPhase, context: &str) -> String {
+    match phase {
+        HandlerPhase::Display => {
+            format!("{value} <Warning: Could not resolve {context}>")
+        }
+        HandlerPhase::Summary | HandlerPhase::EditValue => value.to_string(),
+        HandlerPhase::Validation => format!("<Warning: Could not resolve {context}>"),
+        _ => String::new(),
+    }
+}
+
+fn legacy_perk_unknown_context(
+    value: i64,
+    phase: HandlerPhase,
+    context: &str,
+    context_value: i64,
+) -> String {
+    match phase {
+        HandlerPhase::Display => {
+            format!("{value} <Warning: Unknown {context} #{context_value}>")
+        }
+        HandlerPhase::Summary | HandlerPhase::EditValue => value.to_string(),
+        HandlerPhase::Validation => format!("<Warning: Unknown {context} #{context_value}>"),
+        _ => String::new(),
+    }
+}
+
+fn legacy_perk_unknown_value(value: i64, phase: HandlerPhase, warning: &str) -> String {
+    match phase {
+        HandlerPhase::Display => format!("{value} <Warning: {warning}>"),
+        HandlerPhase::Summary | HandlerPhase::EditValue => value.to_string(),
+        HandlerPhase::Validation => format!("<Warning: {warning}>"),
+        _ => String::new(),
+    }
+}
+
+fn legacy_perk_named_value(
+    value: i64,
+    phase: HandlerPhase,
+    name: Option<&str>,
+    warning: &str,
+) -> String {
+    name.map_or_else(
+        || legacy_perk_unknown_value(value, phase, warning),
+        |name| legacy_perk_known_value(value, phase, name, None),
+    )
+}
+
+fn legacy_perk_known_value(
+    value: i64,
+    phase: HandlerPhase,
+    name: &str,
+    warning: Option<&str>,
+) -> String {
+    match phase {
+        HandlerPhase::Display => warning.map_or_else(
+            || name.to_owned(),
+            |warning| format!("{name} <Warning: {warning}>"),
+        ),
+        HandlerPhase::Summary | HandlerPhase::EditValue => name.to_owned(),
+        HandlerPhase::Validation => warning
+            .map(|warning| format!("<Warning: {warning}>"))
+            .unwrap_or_default(),
+        _ => value.to_string(),
+    }
+}
+
+fn legacy_perk_unresolved_name(kind: &str) -> &'static str {
+    if kind == "parameter_type" {
+        "Could not resolve Function"
+    } else {
+        "Could not resolve Entry Point"
+    }
+}
+
+fn legacy_perk_formatter_error(handler: &str, message: impl Into<String>) -> SemanticError {
+    SemanticError::Handler {
+        handler: handler.to_owned(),
+        message: message.into(),
     }
 }
 
@@ -26357,6 +26929,180 @@ mod tests {
             )?,
             HandlerOutput::Value(FieldValue::UInt(value))
                 if value == u64::from(12_f32.to_bits())
+        ));
+        Ok(())
+    }
+
+    /// Formats legacy PERK values through their selected entry point and function.
+    #[test]
+    fn legacy_perk_contextual_formatter_uses_materialized_tables() -> Result<()> {
+        let configuration = |kind: &str| {
+            serde_json::json!({
+                "kind": kind,
+                "data_signature": "DATA",
+                "entry_point_offset": 0,
+                "entry_point_width": 1,
+                "entry_point_signed": false,
+                "entry_point_byte_order": "little",
+                "function_offset": 1,
+                "function_width": 1,
+                "function_signed": false,
+                "function_byte_order": "little",
+                "entry_point_conditions": [3, 4],
+                "entry_point_function_types": [0, 1],
+                "entry_point_function_tables": [0, 1],
+                "condition_captions": [
+                    ["Perk Owner", "", ""],
+                    ["Perk Owner", "Item", ""],
+                    ["Perk Owner", "Weapon", ""],
+                    ["Perk Owner", "Weapon", "Target"],
+                    ["Perk Owner", "Target", ""],
+                    ["Perk Owner", "Attacker", ""],
+                    ["Perk Owner", "Attacker", "Attackee"],
+                    ["Perk Owner", "Attacker", "Attacker Weapon"]
+                ],
+                "function_types": [3, 0, 0, 0, 0, 0, 0, 0, 1, 2],
+                "function_names": [
+                    [
+                        "", "Set Value", "Add Value", "Multiply Value",
+                        "Add Range To Value", "Add Actor Value Mult", "Absolute Value",
+                        "Negative Absolute Value", "Add Leveled List", "Add Activate Choice"
+                    ],
+                    [
+                        "", "Subtract Value", "Add Value", "Multiply Value",
+                        "Add Range To Value", "Add Actor Value Mult", "Absolute Value",
+                        "Negative Absolute Value", "Add Leveled List", "Add Activate Choice"
+                    ]
+                ],
+                "function_parameter_types": [0, 1, 1, 1, 2, 2, 0, 0, 3, 4],
+                "parameter_names": [
+                    "None", "Float", "Float, Float", "Leveled Item", "Script"
+                ]
+            })
+        };
+        let binding = |kind: &str| CallbackBinding {
+            path: format!("PERK/{kind}"),
+            callback_id: "integer.formatter".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: format!("test-legacy-perk-{kind}"),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "format.legacy_perk_contextual".to_owned(),
+                    minimum_version: 1,
+                    configuration: configuration(kind),
+                },
+            },
+        };
+        let subrecord = |signature, data| bethkit_core::WritableSubRecord { signature, data };
+        let record = WritableRecord {
+            signature: Signature(*b"PERK"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![
+                subrecord(Signature(*b"DATA"), vec![0, 1]),
+                subrecord(Signature(*b"PRKC"), vec![2]),
+                subrecord(Signature(*b"EPFT"), vec![1]),
+            ],
+        };
+        let handlers = SemanticHandlerRegistry::builtin();
+        let context =
+            HandlerRecordContext::new(Signature(*b"PERK"), FormId::NULL, 0, SchemaGame::FalloutNv);
+
+        let run_on = binding("run_on");
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &run_on,
+                context,
+                HandlerInvocationAccess::writable_subrecord_with_scope(&record, 1, None),
+                HandlerPhase::Display,
+                Some(&FieldValue::UInt(2)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "Target"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &run_on,
+                context,
+                HandlerInvocationAccess::writable_subrecord_with_scope(&record, 1, None),
+                HandlerPhase::ParseEditValue,
+                Some(&FieldValue::String(Cow::Borrowed("target"))),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(2))
+        ));
+
+        let function = binding("function");
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &function,
+                context,
+                HandlerInvocationAccess::writable_subrecord_with_scope(&record, 0, None),
+                HandlerPhase::Display,
+                Some(&FieldValue::UInt(1)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "Set Value"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &function,
+                context,
+                HandlerInvocationAccess::writable_subrecord_with_scope(&record, 0, None),
+                HandlerPhase::Display,
+                Some(&FieldValue::UInt(8)),
+                None,
+            )?,
+            HandlerOutput::Text(text)
+                if text == "Add Leveled List <Warning: Value out of Bounds for this Entry Point>"
+        ));
+
+        let parameter = binding("parameter_type");
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &parameter,
+                context,
+                HandlerInvocationAccess::writable_subrecord_with_scope(&record, 2, None),
+                HandlerPhase::Summary,
+                Some(&FieldValue::UInt(1)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "Float"
+        ));
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &parameter,
+                context,
+                HandlerInvocationAccess::writable_subrecord_with_scope(&record, 2, None),
+                HandlerPhase::ParseEditValue,
+                Some(&FieldValue::String(Cow::Borrowed("float"))),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::Int(1))
+        ));
+
+        let subtract_record = WritableRecord {
+            signature: Signature(*b"PERK"),
+            flags: RecordFlags::empty(),
+            form_id: FormId::NULL,
+            form_version: 0,
+            subrecords: vec![subrecord(Signature(*b"DATA"), vec![1, 1])],
+        };
+        assert!(matches!(
+            handlers.invoke_with_records(
+                &function,
+                context,
+                HandlerInvocationAccess::writable_subrecord_with_scope(
+                    &subtract_record,
+                    0,
+                    None,
+                ),
+                HandlerPhase::Summary,
+                Some(&FieldValue::UInt(1)),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "Subtract Value"
         ));
         Ok(())
     }
