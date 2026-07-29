@@ -334,6 +334,8 @@ pub enum HandlerOutput {
     IndexKeys(Vec<RecordIndexKey>),
     /// Transactional record edits.
     Mutations(Vec<HandlerMutation>),
+    /// Plugin-level request to sort the containing INFO topic-child group.
+    GroupSortRequested,
     /// Replacement bytes for the active top-level subrecord payload.
     SubrecordPayload(Vec<u8>),
 }
@@ -1040,6 +1042,7 @@ pub struct SemanticHandlerRegistry {
     condition_function_table: Option<Arc<ConditionFunctionTable>>,
     form_link_resolver: Option<Arc<dyn FormLinkResolver>>,
     remove_offset_data: bool,
+    sort_info: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1278,6 +1281,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(ResetSiblingDefault));
         registry.register(Arc::new(MapSiblingIntegerAfterSet));
         registry.register(Arc::new(SelectOptionalSiblingDefaultAfterSet));
+        registry.set_sort_info(true);
         registry.register(Arc::new(RefreshSiblingUnions));
         registry.register(Arc::new(InvalidateConflicts));
         registry.register(Arc::new(CtdaTypeFormatter));
@@ -1326,6 +1330,16 @@ impl SemanticHandlerRegistry {
             remove_offset_data: enabled,
             source_file_load_order: None,
         }));
+    }
+
+    /// Selects whether changed Skyrim INFO PNAM fields request group sorting.
+    ///
+    /// The default is `true`, matching normal xEdit operation. Plugin-level
+    /// editors temporarily disable the callback while applying the record
+    /// mutation and then execute the requested sort transactionally.
+    pub fn set_sort_info(&mut self, enabled: bool) {
+        self.sort_info = enabled;
+        self.register(Arc::new(SortInfoGroupAfterSet { enabled }));
     }
 
     pub(crate) fn set_worldspace_source_file_load_order(&mut self, load_order: u32) {
@@ -13408,6 +13422,42 @@ impl SemanticHandler for SelectOptionalSiblingDefaultAfterSet {
     }
 }
 
+struct SortInfoGroupAfterSet {
+    enabled: bool,
+}
+
+impl SemanticHandler for SortInfoGroupAfterSet {
+    fn id(&self) -> &'static str {
+        "edit.sort_info_group"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase != HandlerPhase::AfterSet || !self.enabled {
+            return Ok(HandlerOutput::None);
+        }
+        let new_value = invocation
+            .value
+            .ok_or_else(|| SemanticError::Handler {
+                handler: self.id().to_owned(),
+                message: "INFO group sorting requires the new PNAM value".to_owned(),
+            })
+            .and_then(|value| callback_form_id(value, self.id()))?;
+        let old_value = invocation
+            .old_value
+            .map(|value| callback_form_id(value, self.id()))
+            .transpose()?;
+        if old_value == Some(new_value) {
+            Ok(HandlerOutput::None)
+        } else {
+            Ok(HandlerOutput::GroupSortRequested)
+        }
+    }
+}
+
 struct RefreshSiblingUnions;
 
 impl SemanticHandler for RefreshSiblingUnions {
@@ -25457,6 +25507,73 @@ mod tests {
                 if mutations == [HandlerMutation::RemoveContainer {
                     path: "TEST/0:Target".to_owned(),
                 }]
+        ));
+        Ok(())
+    }
+
+    /// Requests plugin-level INFO sorting only for enabled changed PNAM edits.
+    #[test]
+    fn info_group_sort_request_matches_xedit_option_and_change_check() -> Result<()> {
+        let binding = CallbackBinding {
+            path: "INFO/0:Previous INFO".to_owned(),
+            callback_id: "def.after_set".to_owned(),
+            callback_slot: None,
+            implementation_fingerprint: "test-info-sort".to_owned(),
+            implementation: CallbackImplementation::BuiltIn {
+                operation: bethkit_schema::BuiltInOperation {
+                    id: "edit.sort_info_group".to_owned(),
+                    minimum_version: 1,
+                    configuration: serde_json::json!({}),
+                },
+            },
+        };
+        let context =
+            HandlerRecordContext::new(Signature(*b"INFO"), FormId(0x12), 44, SchemaGame::SkyrimSe);
+        let handlers = SemanticHandlerRegistry::builtin();
+
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::FormId {
+                    value: FormId(0x11),
+                    targets: Vec::new()
+                }),
+                Some(&FieldValue::FormId {
+                    value: FormId(0x10),
+                    targets: Vec::new()
+                }),
+            )?,
+            HandlerOutput::GroupSortRequested
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                context,
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::FormId {
+                    value: FormId(0x11),
+                    targets: Vec::new()
+                }),
+                Some(&FieldValue::FormId {
+                    value: FormId(0x11),
+                    targets: Vec::new()
+                }),
+            )?,
+            HandlerOutput::None
+        ));
+        let mut disabled = handlers;
+        disabled.set_sort_info(false);
+        assert!(matches!(
+            disabled.invoke(
+                &binding,
+                context,
+                HandlerPhase::AfterSet,
+                Some(&FieldValue::UInt(0x11)),
+                Some(&FieldValue::UInt(0x10)),
+            )?,
+            HandlerOutput::None
         ));
         Ok(())
     }

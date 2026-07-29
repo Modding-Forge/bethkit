@@ -10,6 +10,7 @@ mod editor;
 mod error;
 mod grammar;
 mod handler;
+mod info_sort;
 mod validation;
 mod value;
 mod view;
@@ -32,6 +33,9 @@ pub use handler::{
     RecordGridCell, RecordIndexKey, RecordIndexKeyValue, ResolvedElementInfo, ResolvedNavmeshInfo,
     ResourceHashResolver, ScriptVariableInfo, ScriptVariableMetadata, SemanticHandler,
     SemanticHandlerRegistry, SemanticLink, ValueFormat, WwiseGuidInfo, WwiseGuidResolver,
+};
+pub use info_sort::{
+    edit_info_previous, plan_info_group_sort, InfoGroupSortPlan, InfoPreviousEdit,
 };
 pub use validation::{Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationReport};
 pub use value::{ByteSpan, FieldOrigin, FieldValue, NamedValue, OwnedFieldValue};

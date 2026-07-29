@@ -3385,6 +3385,13 @@ impl RecordEditor {
                         )?;
                     }
                 }
+                HandlerOutput::GroupSortRequested => {
+                    return Err(SemanticError::Handler {
+                        handler: "edit.sort_info_group".to_owned(),
+                        message: "INFO group sorting requires a plugin-level edit transaction"
+                            .to_owned(),
+                    });
+                }
                 _ => {
                     return Err(SemanticError::Handler {
                         handler: binding.callback_id.clone(),
