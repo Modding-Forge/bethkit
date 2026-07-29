@@ -1068,6 +1068,14 @@ pub trait FormLinkResolver: Send + Sync {
         None
     }
 
+    /// Returns the effective master record's plugin filename for generated asset paths.
+    ///
+    /// The default returns `None` when the master is the first loaded file or when
+    /// master-record metadata is unavailable.
+    fn source_master_file_name(&self, _source: HandlerRecordContext) -> Option<String> {
+        None
+    }
+
     /// Returns the source record's immediate parent group type.
     ///
     /// The default returns `None` for resolvers without plugin group metadata.
@@ -1297,6 +1305,7 @@ impl SemanticHandlerRegistry {
         registry.register(Arc::new(FormatStarId { resolver: None }));
         registry.register(Arc::new(FormatLegendaryFilterMod { resolver: None }));
         registry.register(Arc::new(FormatNpcAppearanceIndex { resolver: None }));
+        registry.register(Arc::new(FormatCombinedMeshId { resolver: None }));
         registry.register(Arc::new(FormatColorOrFloat));
         registry.register(Arc::new(FormatCtdaQuestStage { resolver: None }));
         registry.register(Arc::new(FormatLinkedQuestStage { resolver: None }));
@@ -1520,6 +1529,9 @@ impl SemanticHandlerRegistry {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatNpcAppearanceIndex {
+            resolver: Some(Arc::clone(&resolver)),
+        }));
+        self.register(Arc::new(FormatCombinedMeshId {
             resolver: Some(Arc::clone(&resolver)),
         }));
         self.register(Arc::new(FormatCtdaQuestStage {
@@ -3080,6 +3092,10 @@ struct FormatNpcAppearanceIndex {
     resolver: Option<Arc<dyn FormLinkResolver>>,
 }
 
+struct FormatCombinedMeshId {
+    resolver: Option<Arc<dyn FormLinkResolver>>,
+}
+
 struct FormatColorOrFloat;
 
 struct ResolveVmadObjectAliasLink {
@@ -3989,6 +4005,16 @@ fn parse_hex_prefix(value: &str) -> i64 {
     u32::from_str_radix(&value[..end], 16)
         .map(i64::from)
         .unwrap_or(0)
+}
+
+fn parse_combined_mesh_id(value: &str) -> u32 {
+    let file_name = value.rsplit(['\\', '/']).next().unwrap_or(value);
+    let mut parts = file_name.split('_');
+    let _prefix = parts.next();
+    let Some(value) = parts.next().filter(|value| value.len() == 8) else {
+        return 0;
+    };
+    u32::from_str_radix(value, 16).unwrap_or(0)
 }
 
 fn configured_npc_appearance_kind(
@@ -5169,6 +5195,58 @@ impl SemanticHandler for FormatNpcAppearanceIndex {
             invocation.context.configuration,
             self.id(),
         )?;
+        Ok(HandlerOutput::Text(text))
+    }
+}
+
+impl SemanticHandler for FormatCombinedMeshId {
+    fn id(&self) -> &'static str {
+        "format.combined_mesh_id"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn invoke(&self, invocation: HandlerInvocation<'_>) -> Result<HandlerOutput> {
+        if invocation.phase == HandlerPhase::ParseEditValue {
+            let Some(FieldValue::String(value)) = invocation.value else {
+                return Err(indexed_record_error(
+                    self.id(),
+                    "combined-mesh edit parsing requires text",
+                ));
+            };
+            return Ok(HandlerOutput::Value(FieldValue::UInt(u64::from(
+                parse_combined_mesh_id(value),
+            ))));
+        }
+        let value = callback_u32(
+            callback_integer(
+                invocation.value.ok_or_else(|| {
+                    indexed_record_error(self.id(), "combined-mesh ID requires an integer")
+                })?,
+                self.id(),
+            )?,
+            self.id(),
+        )?;
+        let raw = format!("{value:08X}");
+        let text = match invocation.phase {
+            HandlerPhase::Display | HandlerPhase::Summary | HandlerPhase::EditValue => {
+                let source = handler_record_context(&invocation.context);
+                let master_folder = self
+                    .resolver
+                    .as_deref()
+                    .and_then(|resolver| resolver.source_master_file_name(source))
+                    .map_or_else(String::new, |name| format!("{name}\\"));
+                format!(
+                    "Precombined\\{master_folder}{:08X}_{raw}_OC.nif",
+                    source.form_id.object_id()
+                )
+            }
+            HandlerPhase::SortKey | HandlerPhase::NativeValue => raw,
+            HandlerPhase::Validation => String::new(),
+            _ => return Ok(HandlerOutput::None),
+        };
         Ok(HandlerOutput::Text(text))
     }
 }
@@ -17775,6 +17853,10 @@ mod tests {
             Some("Oblivion.esm".to_owned())
         }
 
+        fn source_master_file_name(&self, _source: HandlerRecordContext) -> Option<String> {
+            Some("Fallout4.esm".to_owned())
+        }
+
         fn source_parent_group_type(&self, _source: HandlerRecordContext) -> Option<u32> {
             Some(1)
         }
@@ -20524,6 +20606,64 @@ mod tests {
                 HandlerOutput::Text(text) if text == expected
             ));
         }
+        Ok(())
+    }
+
+    /// Formats and parses combined-mesh IDs using xEdit's generated asset path.
+    #[test]
+    fn combined_mesh_id_formatter_matches_xedit() -> TestResult {
+        // given
+        let binding = test_metadata_binding(
+            "integer.formatter",
+            "format.combined_mesh_id",
+            serde_json::json!({}),
+        );
+        let mut handlers = SemanticHandlerRegistry::builtin();
+        handlers.set_form_link_resolver(Arc::new(TestFormLinkResolver));
+        let source = HandlerRecordContext::new(
+            Signature(*b"CELL"),
+            FormId(0x0100_08a3),
+            0,
+            SchemaGame::Fallout4,
+        );
+        let value = FieldValue::UInt(0x1234_abcd);
+
+        // when / then
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                source,
+                HandlerPhase::Display,
+                Some(&value),
+                None,
+            )?,
+            HandlerOutput::Text(text)
+                if text
+                    == "Precombined\\Fallout4.esm\\000008A3_1234ABCD_OC.nif"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                source,
+                HandlerPhase::NativeValue,
+                Some(&value),
+                None,
+            )?,
+            HandlerOutput::Text(text) if text == "1234ABCD"
+        ));
+        assert!(matches!(
+            handlers.invoke(
+                &binding,
+                source,
+                HandlerPhase::ParseEditValue,
+                Some(&FieldValue::String(Cow::Borrowed(
+                    "Precombined\\Fallout4.esm\\000008A3_89ABCDEF_OC.nif",
+                ))),
+                None,
+            )?,
+            HandlerOutput::Value(FieldValue::UInt(0x89ab_cdef))
+        ));
+        assert_eq!(parse_combined_mesh_id("invalid.nif"), 0);
         Ok(())
     }
 
