@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 bethkit-core = { path = "../bethkit-core" }
-bethkit-schema = { path = "../bethkit-schema" }
+bethkit-schema = { path = "../bethkit-schema", default-features = false }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 encoding_rs = { workspace = true }

@@ -714,7 +714,7 @@ impl RecordEditor {
             SchemaNodeKind::Primitive { primitive } => {
                 encode_primitive(primitive, value, self.localized, &node.path)
             }
-            SchemaNodeKind::Struct { fields } => {
+            SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
                 let OwnedFieldValue::Struct(values) = value else {
                     return Err(encode_error(&node.path, "expected a struct value"));
                 };
@@ -731,7 +731,27 @@ impl RecordEditor {
                 let mut output: Vec<u8> = Vec::new();
                 let mut scope_values: Vec<crate::NamedValue<'static>> =
                     Vec::with_capacity(fields.len());
-                for (field, value) in fields.iter().zip(values) {
+                let optional_from = match &node.kind {
+                    SchemaNodeKind::OptionalStruct { optional_from, .. } => {
+                        Some(*optional_from as usize)
+                    }
+                    _ => None,
+                };
+                for (index, (field, value)) in fields.iter().zip(values).enumerate() {
+                    if optional_from.is_some_and(|start| index >= start)
+                        && matches!(value, OwnedFieldValue::Absent)
+                    {
+                        if values[index..]
+                            .iter()
+                            .any(|value| !matches!(value, OwnedFieldValue::Absent))
+                        {
+                            return Err(encode_error(
+                                &node.path,
+                                "optional struct fields must be absent as a trailing suffix",
+                            ));
+                        }
+                        break;
+                    }
                     let scope = FieldValue::Struct(scope_values.clone());
                     let encoded = self.encode_node_with_scope(
                         field,
@@ -951,7 +971,10 @@ impl RecordEditor {
         source_subrecord_index: Option<usize>,
     ) -> Result<(OwnedFieldValue, Vec<HandlerMutation>)> {
         let (mut updated, mut mutations) = match (&node.kind, value) {
-            (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
+            (
+                SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. },
+                OwnedFieldValue::Struct(values),
+            ) => {
                 if fields.len() != values.len() {
                     return Err(encode_error(
                         &node.path,
@@ -1307,7 +1330,10 @@ impl RecordEditor {
             return Ok(None);
         }
         match (&node.kind, value) {
-            (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
+            (
+                SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. },
+                OwnedFieldValue::Struct(values),
+            ) => {
                 for (field, value) in fields.iter().zip(values) {
                     if let Some(found) = self.nested_value_at_with_fields(
                         field,
@@ -1443,7 +1469,10 @@ impl RecordEditor {
             return Ok(false);
         }
         match (&node.kind, &mut *value) {
-            (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
+            (
+                SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. },
+                OwnedFieldValue::Struct(values),
+            ) => {
                 for (field, value) in fields.iter().zip(values) {
                     if self.set_nested_value_with_fields(
                         field,
@@ -1535,7 +1564,10 @@ impl RecordEditor {
             return Ok(false);
         }
         match (&node.kind, &mut *value) {
-            (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
+            (
+                SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. },
+                OwnedFieldValue::Struct(values),
+            ) => {
                 for (field, value) in fields.iter().zip(values) {
                     if self.reset_nested_value_with_fields(
                         field,
@@ -1637,98 +1669,100 @@ impl RecordEditor {
             ));
         }
         let next_depth = depth.saturating_add(1);
-        let value = match &node.kind {
-            SchemaNodeKind::Primitive { primitive } => self.default_primitive_value(primitive),
-            SchemaNodeKind::Struct { fields } => fields
-                .iter()
-                .map(|field| {
-                    self.default_value_for_node_at(
-                        field,
-                        field_values,
-                        next_depth,
-                        array_indices,
-                        source_record,
-                        source_subrecord_index,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()
-                .map(OwnedFieldValue::Struct)?,
-            SchemaNodeKind::Array { element, count } => {
-                let count = match count {
-                    ArrayCount::Fixed { count } => usize::try_from(*count).map_err(|_| {
-                        encode_error(&node.path, "fixed default array count exceeds usize")
-                    })?,
-                    _ => 0,
-                };
-                (0..count)
-                    .map(|index| {
-                        let mut child_array_indices = array_indices.to_vec();
-                        child_array_indices.push(index);
+        let value =
+            match &node.kind {
+                SchemaNodeKind::Primitive { primitive } => self.default_primitive_value(primitive),
+                SchemaNodeKind::Struct { fields }
+                | SchemaNodeKind::OptionalStruct { fields, .. } => fields
+                    .iter()
+                    .map(|field| {
                         self.default_value_for_node_at(
-                            element,
+                            field,
                             field_values,
                             next_depth,
-                            &child_array_indices,
+                            array_indices,
                             source_record,
                             source_subrecord_index,
                         )
                     })
                     .collect::<Result<Vec<_>>>()
-                    .map(OwnedFieldValue::Array)?
-            }
-            SchemaNodeKind::Union { selector, variants } => {
-                let variant = self.select_default_union_variant(
-                    node,
-                    selector,
-                    variants,
-                    field_values,
-                    source_record,
-                    source_subrecord_index,
-                )?;
-                self.default_value_for_node_at(
-                    variant,
+                    .map(OwnedFieldValue::Struct)?,
+                SchemaNodeKind::Array { element, count } => {
+                    let count = match count {
+                        ArrayCount::Fixed { count } => usize::try_from(*count).map_err(|_| {
+                            encode_error(&node.path, "fixed default array count exceeds usize")
+                        })?,
+                        _ => 0,
+                    };
+                    (0..count)
+                        .map(|index| {
+                            let mut child_array_indices = array_indices.to_vec();
+                            child_array_indices.push(index);
+                            self.default_value_for_node_at(
+                                element,
+                                field_values,
+                                next_depth,
+                                &child_array_indices,
+                                source_record,
+                                source_subrecord_index,
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()
+                        .map(OwnedFieldValue::Array)?
+                }
+                SchemaNodeKind::Union { selector, variants } => {
+                    let variant = self.select_default_union_variant(
+                        node,
+                        selector,
+                        variants,
+                        field_values,
+                        source_record,
+                        source_subrecord_index,
+                    )?;
+                    self.default_value_for_node_at(
+                        variant,
+                        field_values,
+                        next_depth,
+                        array_indices,
+                        source_record,
+                        source_subrecord_index,
+                    )?
+                }
+                SchemaNodeKind::Subrecord { payload, .. } => self.default_value_for_node_at(
+                    payload,
                     field_values,
                     next_depth,
                     array_indices,
                     source_record,
                     source_subrecord_index,
-                )?
-            }
-            SchemaNodeKind::Subrecord { payload, .. } => self.default_value_for_node_at(
-                payload,
-                field_values,
-                next_depth,
-                array_indices,
-                source_record,
-                source_subrecord_index,
-            )?,
-            SchemaNodeKind::Compressed { child, .. } | SchemaNodeKind::Terminated { child, .. } => {
-                self.default_value_for_node_at(
+                )?,
+                SchemaNodeKind::Compressed { child, .. }
+                | SchemaNodeKind::Terminated { child, .. } => self.default_value_for_node_at(
                     child,
                     field_values,
                     next_depth,
                     array_indices,
                     source_record,
                     source_subrecord_index,
-                )?
-            }
-            SchemaNodeKind::Custom { decoder, .. } => {
-                return Err(SemanticError::Encode {
-                    path: node.path.clone(),
-                    message: format!("custom decoder {decoder} has no schema-native default"),
-                });
-            }
-            SchemaNodeKind::Sequence { .. }
-            | SchemaNodeKind::Choice { .. }
-            | SchemaNodeKind::SelectedChoice { .. }
-            | SchemaNodeKind::Repeat { .. }
-            | SchemaNodeKind::Reference { .. } => {
-                return Err(SemanticError::Encode {
-                    path: node.path.clone(),
-                    message: "this schema node has no editable default value".to_owned(),
-                });
-            }
-        };
+                )?,
+                SchemaNodeKind::Custom { decoder, .. } => {
+                    return Err(SemanticError::Encode {
+                        path: node.path.clone(),
+                        message: format!("custom decoder {decoder} has no schema-native default"),
+                    });
+                }
+                SchemaNodeKind::Sequence { .. }
+                | SchemaNodeKind::Unordered { .. }
+                | SchemaNodeKind::Choice { .. }
+                | SchemaNodeKind::SelectedChoice { .. }
+                | SchemaNodeKind::Repeat { .. }
+                | SchemaNodeKind::Reference { .. } => {
+                    return Err(SemanticError::Encode {
+                        path: node.path.clone(),
+                        message: "this schema node has no editable default value".to_owned(),
+                    });
+                }
+            };
         self.apply_default_value_callbacks_at(
             node,
             value,
@@ -2064,7 +2098,10 @@ impl RecordEditor {
         source_record: &WritableRecord,
     ) -> Result<FieldValue<'static>> {
         match (&node.kind, value) {
-            (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values)) => {
+            (
+                SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. },
+                OwnedFieldValue::Struct(values),
+            ) => {
                 if fields.len() != values.len() {
                     return Err(encode_error(
                         &node.path,
@@ -3645,9 +3682,10 @@ fn collect_owned_expression_field_values(
         (SchemaNodeKind::Primitive { .. }, OwnedFieldValue::FormId(value)) => {
             output.insert(node.path.clone(), i64::from(value.0));
         }
-        (SchemaNodeKind::Struct { fields }, OwnedFieldValue::Struct(values))
-            if fields.len() == values.len() =>
-        {
+        (
+            SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. },
+            OwnedFieldValue::Struct(values),
+        ) if fields.len() == values.len() => {
             for (field, value) in fields.iter().zip(values) {
                 collect_owned_expression_field_values(field, value, output);
             }
@@ -3758,6 +3796,7 @@ fn owned_leaf_to_handler_value(value: &OwnedFieldValue) -> FieldValue<'static> {
         OwnedFieldValue::Array(values) => {
             FieldValue::Array(values.iter().map(owned_leaf_to_handler_value).collect())
         }
+        OwnedFieldValue::Absent => FieldValue::Absent,
     }
 }
 
@@ -3765,7 +3804,7 @@ fn top_level_subrecords(root: &SchemaNode) -> Vec<&SchemaNode> {
     fn collect<'a>(node: &'a SchemaNode, output: &mut Vec<&'a SchemaNode>) {
         match &node.kind {
             SchemaNodeKind::Subrecord { .. } => output.push(node),
-            SchemaNodeKind::Sequence { children } => {
+            SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
                 for child in children {
                     collect(child, output);
                 }
@@ -3791,7 +3830,9 @@ fn find_node_by_path<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaN
         return Some(node);
     }
     let children: Vec<&SchemaNode> = match &node.kind {
-        SchemaNodeKind::Sequence { children } => children.iter().collect(),
+        SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
+            children.iter().collect()
+        }
         SchemaNodeKind::Choice { alternatives }
         | SchemaNodeKind::SelectedChoice { alternatives, .. } => alternatives.iter().collect(),
         SchemaNodeKind::Repeat { child, .. }
@@ -3799,7 +3840,9 @@ fn find_node_by_path<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaN
         | SchemaNodeKind::Array { element: child, .. }
         | SchemaNodeKind::Compressed { child, .. }
         | SchemaNodeKind::Terminated { child, .. } => vec![child],
-        SchemaNodeKind::Struct { fields } => fields.iter().collect(),
+        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
+            fields.iter().collect()
+        }
         SchemaNodeKind::Union { variants, .. } => variants.iter().collect(),
         _ => Vec::new(),
     };
@@ -3823,7 +3866,9 @@ fn find_containing_subrecord<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a
             return parent;
         }
         let children: Vec<&SchemaNode> = match &node.kind {
-            SchemaNodeKind::Sequence { children } => children.iter().collect(),
+            SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
+                children.iter().collect()
+            }
             SchemaNodeKind::Choice { alternatives }
             | SchemaNodeKind::SelectedChoice { alternatives, .. } => alternatives.iter().collect(),
             SchemaNodeKind::Repeat { child, .. }
@@ -3831,7 +3876,9 @@ fn find_containing_subrecord<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a
             | SchemaNodeKind::Array { element: child, .. }
             | SchemaNodeKind::Compressed { child, .. }
             | SchemaNodeKind::Terminated { child, .. } => vec![child],
-            SchemaNodeKind::Struct { fields } => fields.iter().collect(),
+            SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
+                fields.iter().collect()
+            }
             SchemaNodeKind::Union { variants, .. } => variants.iter().collect(),
             _ => Vec::new(),
         };
@@ -4228,6 +4275,67 @@ mod tests {
             editor.encode_node(&node, &OwnedFieldValue::UInt(7))?,
             vec![7, 0xff]
         );
+        Ok(())
+    }
+
+    /// Omits only a trailing optional struct suffix during encoding.
+    #[test]
+    fn optional_struct_encoding_omits_trailing_absent_fields() -> Result<()> {
+        // given
+        let editor = editor_with_reused_signature()?;
+        let integer = IntegerType {
+            width: 1,
+            signed: false,
+            byte_order: ByteOrder::LittleEndian,
+        };
+        let fields = (0..3)
+            .map(|index| SchemaNode {
+                id: SchemaNodeId(index + 11),
+                path: format!("TEST/value/{index}"),
+                name: format!("Field {index}"),
+                required: true,
+                conflict_priority: ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Primitive {
+                    primitive: PrimitiveType::Integer { integer },
+                },
+            })
+            .collect();
+        let node = SchemaNode {
+            id: SchemaNodeId(10),
+            path: "TEST/value".to_owned(),
+            name: "Value".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::OptionalStruct {
+                fields,
+                optional_from: 1,
+            },
+        };
+
+        // when
+        let encoded = editor.encode_node(
+            &node,
+            &OwnedFieldValue::Struct(vec![
+                OwnedFieldValue::UInt(7),
+                OwnedFieldValue::Absent,
+                OwnedFieldValue::Absent,
+            ]),
+        )?;
+
+        // then
+        assert_eq!(encoded, vec![7]);
+        assert!(editor
+            .encode_node(
+                &node,
+                &OwnedFieldValue::Struct(vec![
+                    OwnedFieldValue::UInt(7),
+                    OwnedFieldValue::Absent,
+                    OwnedFieldValue::UInt(9),
+                ]),
+            )
+            .is_err());
         Ok(())
     }
 

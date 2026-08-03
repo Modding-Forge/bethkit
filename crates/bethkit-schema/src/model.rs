@@ -603,6 +603,11 @@ pub enum SchemaNodeKind {
         /// Child nodes in declaration order.
         children: Vec<SchemaNode>,
     },
+    /// Child nodes whose subrecord groups may appear in any order.
+    Unordered {
+        /// Child nodes matched at most once unless a child is explicitly repeated.
+        children: Vec<SchemaNode>,
+    },
     /// Exactly one matching child alternative.
     Choice {
         /// Alternative child nodes.
@@ -640,6 +645,13 @@ pub enum SchemaNodeKind {
     Struct {
         /// Struct fields in byte order.
         fields: Vec<SchemaNode>,
+    },
+    /// Packed struct whose trailing fields may be absent.
+    OptionalStruct {
+        /// Struct fields in byte order.
+        fields: Vec<SchemaNode>,
+        /// Zero-based index of the first field that may be absent with all following fields.
+        optional_from: u32,
     },
     /// Homogeneous array.
     Array {

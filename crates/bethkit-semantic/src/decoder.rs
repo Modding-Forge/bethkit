@@ -7,6 +7,37 @@ use std::sync::Arc;
 
 use crate::{FieldValue, OwnedFieldValue, Result, SemanticError};
 
+const XEDIT_DTINTEGER_ID: &str = "xedit.dtinteger";
+
+struct ZeroWidthIntegerDecoder;
+
+impl CustomDecoder for ZeroWidthIntegerDecoder {
+    fn id(&self) -> &'static str {
+        XEDIT_DTINTEGER_ID
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn decode<'a>(&self, _payload: &'a [u8]) -> Result<DecodedPayload<'a>> {
+        Ok(DecodedPayload {
+            value: FieldValue::UInt(0),
+            consumed: 0,
+        })
+    }
+
+    fn encode(&self, value: &OwnedFieldValue) -> Result<Vec<u8>> {
+        if value != &OwnedFieldValue::UInt(0) {
+            return Err(SemanticError::Decoder {
+                decoder: XEDIT_DTINTEGER_ID.to_owned(),
+                message: "zero-width xEdit integer only accepts unsigned value 0".to_owned(),
+            });
+        }
+        Ok(Vec::new())
+    }
+}
+
 /// Value and exact byte consumption reported by a custom payload decoder.
 pub struct DecodedPayload<'a> {
     /// Decoded semantic value.
@@ -55,7 +86,9 @@ impl DecoderRegistry {
     /// Complex decoder implementations are added as their differential test
     /// suites are completed.
     pub fn builtin() -> Self {
-        Self::new()
+        let mut registry = Self::new();
+        registry.register(Arc::new(ZeroWidthIntegerDecoder));
+        registry
     }
 
     /// Registers or replaces a custom decoder.
@@ -85,5 +118,48 @@ impl DecoderRegistry {
     /// Returns a decoder by identifier.
     pub fn get(&self, id: &str) -> Option<&dyn CustomDecoder> {
         self.decoders.get(id).map(Arc::as_ref)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Decodes xEdit's zero-width integer without consuming following bytes.
+    #[test]
+    fn zero_width_integer_decoder_consumes_no_bytes(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let registry = DecoderRegistry::builtin();
+        let decoder = registry
+            .require(XEDIT_DTINTEGER_ID, 1)
+            .expect("built-in zero-width integer decoder must be registered");
+
+        // when
+        let decoded = decoder.decode(&[0xAA, 0xBB])?;
+
+        // then
+        assert!(matches!(decoded.value, FieldValue::UInt(0)));
+        assert_eq!(decoded.consumed, 0);
+        Ok(())
+    }
+
+    /// Encodes only the single value representable by a zero-width integer.
+    #[test]
+    fn zero_width_integer_decoder_encodes_only_zero(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let registry = DecoderRegistry::builtin();
+        let decoder = registry
+            .require(XEDIT_DTINTEGER_ID, 1)
+            .expect("built-in zero-width integer decoder must be registered");
+
+        // when
+        let encoded = decoder.encode(&OwnedFieldValue::UInt(0))?;
+
+        // then
+        assert!(encoded.is_empty());
+        assert!(decoder.encode(&OwnedFieldValue::UInt(1)).is_err());
+        Ok(())
     }
 }

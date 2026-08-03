@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use bethkit_core::{FormId, Record, Signature, SubRecord};
+use bethkit_core::{FormId, Record, RecordFlags, Signature, SubRecord};
 use bethkit_schema::{
     ArrayCount, ByteOrder, CallbackImplementation, EvalContext, EvalValue, IntegerType,
     PrimitiveType, SchemaNode, SchemaNodeKind, SchemaRecord, StringType, UnionSelector,
@@ -16,7 +16,8 @@ use crate::value::float_from_raw;
 use crate::{
     grammar::interpret, ByteSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, FieldOrigin,
     FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, NamedValue, ParsedEditValue,
-    Result, SemanticContext, SemanticError, SemanticLink, ValidationReport, ValueFormat,
+    Result, SemanticContext, SemanticError, SemanticLink, ValidationMode, ValidationReport,
+    ValueFormat,
 };
 
 /// One decoded top-level record field.
@@ -647,8 +648,16 @@ impl<'context, 'record> RecordView<'context, 'record> {
     /// Validates required fields, duplicate constraints, unknown subrecords,
     /// payload decoding, and complete byte coverage.
     pub fn validate(&self) -> ValidationReport {
+        self.validate_with_mode(ValidationMode::Strict)
+    }
+
+    /// Validates the record using the selected compatibility policy.
+    ///
+    /// [`ValidationMode::XEditCompatible`] reports missing required fields as
+    /// warnings because xEdit materializes those fields while loading. Other
+    /// validation diagnostics retain their strict severity.
+    pub fn validate_with_mode(&self, mode: ValidationMode) -> ValidationReport {
         let mut report = ValidationReport::new();
-        let definitions: Vec<&SchemaNode> = top_level_subrecords(&self.schema.root);
         let subrecords: &[SubRecord] = match self.record.subrecords() {
             Ok(value) => value,
             Err(error) => {
@@ -681,33 +690,33 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 return report;
             }
         };
-        for definition in &definitions {
-            let matched = grammar
-                .assignments
-                .iter()
-                .flatten()
-                .any(|assigned| assigned.id == definition.id);
-            if definition.required && !matched {
+        let assignments: Vec<&SchemaNode> = grammar.assignments.iter().flatten().copied().collect();
+        let missing_required_severity = match mode {
+            ValidationMode::Strict => DiagnosticSeverity::Error,
+            ValidationMode::XEditCompatible => DiagnosticSeverity::Warning,
+        };
+        if !self.record.header.flags.contains(RecordFlags::DELETED) {
+            for definition in missing_required_subrecords(&self.schema.root, &assignments) {
                 report.push(self.diagnostic(
-                    DiagnosticSeverity::Error,
+                    missing_required_severity,
                     DiagnosticCode::MissingRequired,
                     format!("required field {} is absent", definition.path),
                     Some(definition),
                     None,
                 ));
             }
-        }
-        for violation in &grammar.violations {
-            report.push(self.diagnostic(
-                DiagnosticSeverity::Error,
-                DiagnosticCode::MissingRequired,
-                format!(
-                    "repeat {} requires at least {} entries, found {}",
-                    violation.path, violation.minimum, violation.actual
-                ),
-                None,
-                None,
-            ));
+            for violation in &grammar.violations {
+                report.push(self.diagnostic(
+                    missing_required_severity,
+                    DiagnosticCode::MissingRequired,
+                    format!(
+                        "repeat {} requires at least {} entries, found {}",
+                        violation.path, violation.minimum, violation.actual
+                    ),
+                    None,
+                    None,
+                ));
+            }
         }
 
         match self.fields() {
@@ -842,7 +851,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     .registry()
                     .get_node(self.record.header.signature, path);
                 report.push(self.diagnostic(
-                    DiagnosticSeverity::Error,
+                    callback_validation_severity(&message),
                     DiagnosticCode::CallbackValidation,
                     message,
                     node,
@@ -896,10 +905,17 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 decode_primitive(primitive, data, self.localized, &node.path)
                     .map(|value| (value, consumed, None))
             }
-            SchemaNodeKind::Struct { fields } => {
+            SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
+                let optional_from = match &node.kind {
+                    SchemaNodeKind::OptionalStruct { optional_from, .. } => {
+                        Some(*optional_from as usize)
+                    }
+                    _ => None,
+                };
                 let mut values: Vec<NamedValue<'a>> = Vec::with_capacity(fields.len());
                 let mut cursor: usize = 0;
-                for field in fields {
+                let mut optional_suffix_absent = false;
+                for (index, field) in fields.iter().enumerate() {
                     if !self.node_applies(field, payload, field_values)? {
                         values.push(NamedValue {
                             node_id: field.id,
@@ -919,6 +935,26 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             path: field.path.clone(),
                             message: "struct cursor exceeded payload".to_owned(),
                         })?;
+                    let field_is_optional = optional_from.is_some_and(|start| index >= start);
+                    let field_does_not_fit =
+                        fixed_node_size(field).is_some_and(|size| size > remaining.len());
+                    if field_is_optional
+                        && (optional_suffix_absent || remaining.is_empty() || field_does_not_fit)
+                    {
+                        optional_suffix_absent = true;
+                        values.push(NamedValue {
+                            node_id: field.id,
+                            path: field.path.clone(),
+                            effective_path: None,
+                            name: field.name.clone(),
+                            span: ByteSpan {
+                                start: frame.offset + cursor,
+                                end: frame.offset + cursor,
+                            },
+                            value: FieldValue::Absent,
+                        });
+                        continue;
+                    }
                     let child_frame = DecodeFrame {
                         offset: frame.offset + cursor,
                         source_subrecord_index: frame.source_subrecord_index,
@@ -1135,6 +1171,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 message: format!("unresolved schema reference {target}"),
             }),
             SchemaNodeKind::Sequence { .. }
+            | SchemaNodeKind::Unordered { .. }
             | SchemaNodeKind::Choice { .. }
             | SchemaNodeKind::SelectedChoice { .. }
             | SchemaNodeKind::Repeat { .. }
@@ -1158,6 +1195,9 @@ impl<'context, 'record> RecordView<'context, 'record> {
             }
             FieldValue::Enumeration { value, .. } => {
                 field_values.insert(node.path.clone(), *value);
+            }
+            FieldValue::FormId { value, .. } => {
+                field_values.insert(node.path.clone(), i64::from(value.0));
             }
             _ => {}
         }
@@ -1433,29 +1473,83 @@ fn array_element_field<'value, 'record>(
     })
 }
 
-fn top_level_subrecords(root: &SchemaNode) -> Vec<&SchemaNode> {
-    fn collect<'a>(node: &'a SchemaNode, output: &mut Vec<&'a SchemaNode>) {
+fn missing_required_subrecords<'a>(
+    root: &'a SchemaNode,
+    assignments: &[&SchemaNode],
+) -> Vec<&'a SchemaNode> {
+    fn is_assigned(node: &SchemaNode, assignments: &[&SchemaNode]) -> bool {
+        assignments
+            .iter()
+            .any(|assignment| assignment.id == node.id)
+    }
+
+    fn subtree_is_assigned(node: &SchemaNode, assignments: &[&SchemaNode]) -> bool {
+        if is_assigned(node, assignments) {
+            return true;
+        }
         match &node.kind {
-            SchemaNodeKind::Subrecord { .. } => output.push(node),
-            SchemaNodeKind::Sequence { children } => {
+            SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
+                children
+                    .iter()
+                    .any(|child| subtree_is_assigned(child, assignments))
+            }
+            SchemaNodeKind::Choice { alternatives }
+            | SchemaNodeKind::SelectedChoice { alternatives, .. } => alternatives
+                .iter()
+                .any(|alternative| subtree_is_assigned(alternative, assignments)),
+            SchemaNodeKind::Repeat { child, .. } => subtree_is_assigned(child, assignments),
+            _ => false,
+        }
+    }
+
+    fn collect<'a>(
+        node: &'a SchemaNode,
+        assignments: &[&SchemaNode],
+        active: bool,
+        root: bool,
+        output: &mut Vec<&'a SchemaNode>,
+    ) {
+        match &node.kind {
+            SchemaNodeKind::Subrecord { .. } => {
+                if active && node.required && !is_assigned(node, assignments) {
+                    output.push(node);
+                }
+            }
+            SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
+                let children_active =
+                    active && (root || node.required || subtree_is_assigned(node, assignments));
                 for child in children {
-                    collect(child, output);
+                    collect(child, assignments, children_active, false, output);
                 }
             }
             SchemaNodeKind::Choice { alternatives }
             | SchemaNodeKind::SelectedChoice { alternatives, .. } => {
-                for alternative in alternatives {
-                    collect(alternative, output);
+                for alternative in alternatives
+                    .iter()
+                    .filter(|alternative| subtree_is_assigned(alternative, assignments))
+                {
+                    collect(alternative, assignments, active, false, output);
                 }
             }
-            SchemaNodeKind::Repeat { child, .. } => collect(child, output),
+            SchemaNodeKind::Repeat { child, .. } => {
+                let child_active = active && subtree_is_assigned(child, assignments);
+                collect(child, assignments, child_active, false, output);
+            }
             _ => {}
         }
     }
 
-    let mut output: Vec<&SchemaNode> = Vec::new();
-    collect(root, &mut output);
-    output
+    let mut missing = Vec::new();
+    collect(root, assignments, true, true, &mut missing);
+    missing
+}
+
+fn callback_validation_severity(message: &str) -> DiagnosticSeverity {
+    if message.starts_with("<Warning:") {
+        DiagnosticSeverity::Warning
+    } else {
+        DiagnosticSeverity::Error
+    }
 }
 
 fn named_from_field<'a>(field: &Field<'a>) -> NamedValue<'a> {
@@ -1959,13 +2053,25 @@ where
             }
             Ok(data.len())
         }
-        SchemaNodeKind::Struct { fields } => {
+        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
             let mut cursor = 0_usize;
-            for field in fields {
+            let optional_from = match &node.kind {
+                SchemaNodeKind::OptionalStruct { optional_from, .. } => {
+                    Some(*optional_from as usize)
+                }
+                _ => None,
+            };
+            for (index, field) in fields.iter().enumerate() {
                 let remaining = data.get(cursor..).ok_or_else(|| SemanticError::Decode {
                     path: field.path.clone(),
                     message: "struct size cursor exceeded payload".to_owned(),
                 })?;
+                if optional_from.is_some_and(|start| index >= start)
+                    && (remaining.is_empty()
+                        || fixed_node_size(field).is_some_and(|size| size > remaining.len()))
+                {
+                    break;
+                }
                 let consumed =
                     node_data_size_with_resolver(field, remaining, localized, resolve_count)?;
                 cursor = cursor
@@ -2107,6 +2213,7 @@ fn fixed_node_size(node: &SchemaNode) -> Option<usize> {
         SchemaNodeKind::Struct { fields } => fields.iter().try_fold(0_usize, |total, field| {
             total.checked_add(fixed_node_size(field)?)
         }),
+        SchemaNodeKind::OptionalStruct { .. } => None,
         SchemaNodeKind::Array { element, count } => {
             let size: usize = fixed_node_size(element)?;
             match count {
@@ -2169,13 +2276,214 @@ mod tests {
     use bethkit_core::{GameContext, Record};
     use bethkit_io::SliceCursor;
     use bethkit_schema::{
-        BuiltInOperation, CallbackBinding, CallbackImplementation, HandlerRequirement,
+        BuiltInOperation, CallbackBinding, CallbackImplementation, Expression, HandlerRequirement,
         SchemaManifest, SchemaPackage, SchemaSignature, StringLengthPrefix, StringType,
         ValidationStatus, PACKAGE_FORMAT_VERSION,
     };
 
     use super::*;
     use crate::SemanticHandlerRegistry;
+
+    /// Preserves xEdit validation warnings as non-fatal diagnostics.
+    #[test]
+    fn callback_validation_preserves_warning_severity(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // then
+        assert_eq!(
+            callback_validation_severity("<Warning: Could not resolve alias>"),
+            DiagnosticSeverity::Warning
+        );
+        assert_eq!(
+            callback_validation_severity("invalid value"),
+            DiagnosticSeverity::Error
+        );
+        Ok(())
+    }
+
+    /// Ignores required descendants while their optional container is absent.
+    #[test]
+    fn required_validation_ignores_absent_optional_container(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let required_top = test_subrecord_node(1, "TEST/0:Top", *b"TOP_", true);
+        let required_nested = test_subrecord_node(3, "TEST/1:Optional/0:End", *b"END_", true);
+        let optional_container = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(2),
+            path: "TEST/1:Optional".to_owned(),
+            name: "Optional".to_owned(),
+            required: false,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![required_nested],
+            },
+        };
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![required_top, optional_container],
+            },
+        };
+
+        // when
+        let missing = missing_required_subrecords(&root, &[]);
+
+        // then
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].path, "TEST/0:Top");
+        Ok(())
+    }
+
+    /// Enforces required descendants after an optional container becomes active.
+    #[test]
+    fn required_validation_checks_active_optional_container(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let marker = test_subrecord_node(2, "TEST/0:Optional/0:Marker", *b"MARK", false);
+        let required_end = test_subrecord_node(3, "TEST/0:Optional/1:End", *b"END_", true);
+        let optional_container = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(1),
+            path: "TEST/0:Optional".to_owned(),
+            name: "Optional".to_owned(),
+            required: false,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![marker.clone(), required_end],
+            },
+        };
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![optional_container],
+            },
+        };
+
+        // when
+        let missing = missing_required_subrecords(&root, &[&marker]);
+
+        // then
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].path, "TEST/0:Optional/1:End");
+        Ok(())
+    }
+
+    /// Downgrades missing required fields only in xEdit-compatible validation.
+    #[test]
+    fn xedit_compatible_validation_warns_about_missing_required_fields(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![test_subrecord_node(1, "TEST/0:Top", *b"TOP_", true)],
+            },
+        };
+        let package = SchemaPackage::new(
+            test_manifest(),
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root,
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let record_bytes = test_record_with_subrecords(b"TEST", &[]);
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::sse())?;
+        let view = context.view(&record, false)?;
+
+        // when
+        let strict = view.validate();
+        let compatible = view.validate_with_mode(ValidationMode::XEditCompatible);
+
+        // then
+        assert!(strict.has_errors());
+        assert!(!compatible.has_errors());
+        assert!(compatible.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::MissingRequired
+                && diagnostic.severity == DiagnosticSeverity::Warning
+        }));
+        Ok(())
+    }
+
+    /// Accepts the reduced payload used by deleted records.
+    #[test]
+    fn required_validation_ignores_deleted_records(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Sequence {
+                children: vec![test_subrecord_node(1, "TEST/0:Top", *b"TOP_", true)],
+            },
+        };
+        let package = SchemaPackage::new(
+            test_manifest(),
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root,
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let mut record_bytes = test_record_with_subrecords(b"TEST", &[]);
+        record_bytes[8..12].copy_from_slice(&RecordFlags::DELETED.bits().to_le_bytes());
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::sse())?;
+
+        let report = context.view(&record, false)?.validate();
+
+        assert!(!report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == DiagnosticCode::MissingRequired));
+        Ok(())
+    }
+
+    fn test_subrecord_node(id: u32, path: &str, signature: [u8; 4], required: bool) -> SchemaNode {
+        SchemaNode {
+            id: bethkit_schema::SchemaNodeId(id),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            required,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Subrecord {
+                signature: SchemaSignature(signature),
+                payload: Box::new(SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(id + 100),
+                    path: format!("{path}/payload"),
+                    name: "Payload".to_owned(),
+                    required: false,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Bytes { length: None },
+                    },
+                }),
+            },
+        }
+    }
 
     struct TestRecordIndexResolver;
 
@@ -2800,6 +3108,118 @@ mod tests {
                 if matches!(items.as_slice(), [FieldValue::UInt(10), FieldValue::UInt(11)])
         ));
         assert!(matches!(values[2].value, FieldValue::UInt(99)));
+        Ok(())
+    }
+
+    /// Uses an earlier FormID field when selecting a later union variant.
+    #[test]
+    fn record_view_exposes_form_ids_to_field_expressions(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let form_id_path = "TEST/0:Data/payload/0:Parent Worldspace";
+        let union_path = "TEST/0:Data/payload/1:Parent";
+        let integer = |id, width| SchemaNode {
+            id: bethkit_schema::SchemaNodeId(id),
+            path: format!("{union_path}/variants/{id}"),
+            name: format!("Variant {id}"),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::Integer {
+                    integer: IntegerType {
+                        width,
+                        signed: false,
+                        byte_order: ByteOrder::LittleEndian,
+                    },
+                },
+            },
+        };
+        let payload = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(2),
+            path: "TEST/0:Data/payload".to_owned(),
+            name: "Payload".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Struct {
+                fields: vec![
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(3),
+                        path: form_id_path.to_owned(),
+                        name: "Parent Worldspace".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Primitive {
+                            primitive: PrimitiveType::FormId {
+                                targets: Vec::new(),
+                            },
+                        },
+                    },
+                    SchemaNode {
+                        id: bethkit_schema::SchemaNodeId(4),
+                        path: union_path.to_owned(),
+                        name: "Parent".to_owned(),
+                        required: true,
+                        conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                        condition: None,
+                        kind: SchemaNodeKind::Union {
+                            selector: UnionSelector::Expression(Expression::Select {
+                                condition: Box::new(Expression::Equal {
+                                    left: Box::new(Expression::ReadField {
+                                        path: form_id_path.to_owned(),
+                                    }),
+                                    right: Box::new(Expression::Int { value: 0 }),
+                                }),
+                                if_true: Box::new(Expression::Int { value: 1 }),
+                                if_false: Box::new(Expression::Int { value: 0 }),
+                            }),
+                            variants: vec![integer(5, 1), integer(6, 2)],
+                        },
+                    },
+                ],
+            },
+        };
+        let package = SchemaPackage::new(
+            test_manifest(),
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: SchemaNode {
+                    id: bethkit_schema::SchemaNodeId(0),
+                    path: "TEST".to_owned(),
+                    name: "Test".to_owned(),
+                    required: true,
+                    conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                    condition: None,
+                    kind: SchemaNodeKind::Sequence {
+                        children: vec![SchemaNode {
+                            id: bethkit_schema::SchemaNodeId(1),
+                            path: "TEST/0:Data".to_owned(),
+                            name: "Data".to_owned(),
+                            required: true,
+                            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                            condition: None,
+                            kind: SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"DATA"),
+                                payload: Box::new(payload),
+                            },
+                        }],
+                    },
+                },
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let record_bytes = test_record_bytes(b"TEST", b"DATA", &[0, 0, 0, 0, 7, 0]);
+        let mut cursor = SliceCursor::new(&record_bytes);
+        let record = Record::parse_header(&mut cursor, &GameContext::sse())?;
+
+        let fields = context.view(&record, false)?.fields()?;
+
+        let FieldValue::Struct(values) = &fields[0].value else {
+            return Err("expected decoded struct".into());
+        };
+        assert!(matches!(values[1].value, FieldValue::UInt(7)));
         Ok(())
     }
 
@@ -4553,6 +4973,52 @@ mod tests {
             node_data_size(&node, b"\x02\x03abc\x01\0\x02de\x02\0tail", false)?,
             12
         );
+        Ok(())
+    }
+
+    /// Stops sizing a packed struct when its optional trailing suffix is absent.
+    #[test]
+    fn optional_struct_size_accepts_truncated_suffix(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let integer = IntegerType {
+            width: 1,
+            signed: false,
+            byte_order: ByteOrder::LittleEndian,
+        };
+        let fields = (0..3)
+            .map(|index| SchemaNode {
+                id: bethkit_schema::SchemaNodeId(index + 1),
+                path: format!("TEST/value/{index}"),
+                name: format!("Field {index}"),
+                required: true,
+                conflict_priority: bethkit_schema::ConflictPriority::Normal,
+                condition: None,
+                kind: SchemaNodeKind::Primitive {
+                    primitive: PrimitiveType::Integer { integer },
+                },
+            })
+            .collect();
+        let node = SchemaNode {
+            id: bethkit_schema::SchemaNodeId(0),
+            path: "TEST/value".to_owned(),
+            name: "Value".to_owned(),
+            required: true,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::OptionalStruct {
+                fields,
+                optional_from: 1,
+            },
+        };
+
+        // when
+        let required_only = node_data_size(&node, &[7], false)?;
+        let one_optional = node_data_size(&node, &[7, 8], false)?;
+
+        // then
+        assert_eq!(required_only, 1);
+        assert_eq!(one_optional, 2);
         Ok(())
     }
 

@@ -23,7 +23,7 @@ pub const PACKAGE_MAGIC: [u8; 4] = *b"BKSC";
 pub const BUNDLE_MAGIC: [u8; 4] = *b"BKCT";
 
 /// Current binary package format version.
-pub const PACKAGE_FORMAT_VERSION: u16 = 2;
+pub const PACKAGE_FORMAT_VERSION: u16 = 3;
 
 const PACKAGE_HEADER_LENGTH: usize = 48;
 const BUNDLE_HEADER_LENGTH: usize = 12;
@@ -458,7 +458,9 @@ fn validate_semantic_selector_bindings(
         }
     }
     let children: Vec<&SchemaNode> = match &node.kind {
-        SchemaNodeKind::Sequence { children } => children.iter().collect(),
+        SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
+            children.iter().collect()
+        }
         SchemaNodeKind::Choice { alternatives }
         | SchemaNodeKind::SelectedChoice { alternatives, .. } => alternatives.iter().collect(),
         SchemaNodeKind::Repeat { child, .. }
@@ -466,7 +468,9 @@ fn validate_semantic_selector_bindings(
         | SchemaNodeKind::Compressed { child, .. }
         | SchemaNodeKind::Terminated { child, .. }
         | SchemaNodeKind::Array { element: child, .. } => vec![child],
-        SchemaNodeKind::Struct { fields } => fields.iter().collect(),
+        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
+            fields.iter().collect()
+        }
         SchemaNodeKind::Union { variants, .. } => variants.iter().collect(),
         SchemaNodeKind::Primitive { .. }
         | SchemaNodeKind::Custom { .. }
@@ -825,9 +829,24 @@ fn validate_node(
             )));
         }
     }
+    if let SchemaNodeKind::OptionalStruct {
+        fields,
+        optional_from,
+    } = &node.kind
+    {
+        if *optional_from as usize > fields.len() {
+            return Err(SchemaError::InvalidGraph(format!(
+                "optional struct index {optional_from} exceeds {} fields at {}",
+                fields.len(),
+                node.path
+            )));
+        }
+    }
 
     let children: Vec<&SchemaNode> = match &node.kind {
-        SchemaNodeKind::Sequence { children } => children.iter().collect(),
+        SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
+            children.iter().collect()
+        }
         SchemaNodeKind::Choice { alternatives }
         | SchemaNodeKind::SelectedChoice { alternatives, .. } => alternatives.iter().collect(),
         SchemaNodeKind::Repeat { child, .. }
@@ -835,7 +854,9 @@ fn validate_node(
         | SchemaNodeKind::Compressed { child, .. }
         | SchemaNodeKind::Terminated { child, .. }
         | SchemaNodeKind::Array { element: child, .. } => vec![child],
-        SchemaNodeKind::Struct { fields } => fields.iter().collect(),
+        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
+            fields.iter().collect()
+        }
         SchemaNodeKind::Union { variants, .. } => variants.iter().collect(),
         SchemaNodeKind::Primitive { .. }
         | SchemaNodeKind::Custom { .. }
@@ -861,6 +882,15 @@ fn validate_expression_field_order(
             for child in children {
                 validate_expression_field_order(child, &local_fields, limits)?;
                 collect_expression_field_paths(child, &mut local_fields);
+            }
+        }
+        SchemaNodeKind::Unordered { children } => {
+            let mut local_fields = visible_fields.clone();
+            for child in children {
+                collect_expression_field_paths(child, &mut local_fields);
+            }
+            for child in children {
+                validate_expression_field_order(child, &local_fields, limits)?;
             }
         }
         SchemaNodeKind::Choice { alternatives } => {
@@ -891,7 +921,7 @@ fn validate_expression_field_order(
             }
             validate_expression_field_order(element, visible_fields, limits)?;
         }
-        SchemaNodeKind::Struct { fields } => {
+        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
             let mut local_fields = visible_fields.clone();
             for field in fields {
                 validate_expression_field_order(field, &local_fields, limits)?;
@@ -916,7 +946,7 @@ fn validate_expression_field_order(
 fn collect_expression_field_paths(node: &SchemaNode, paths: &mut BTreeSet<String>) {
     paths.insert(node.path.clone());
     match &node.kind {
-        SchemaNodeKind::Sequence { children } => {
+        SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
             for child in children {
                 collect_expression_field_paths(child, paths);
             }
@@ -934,7 +964,7 @@ fn collect_expression_field_paths(node: &SchemaNode, paths: &mut BTreeSet<String
         | SchemaNodeKind::Terminated { child, .. } => {
             collect_expression_field_paths(child, paths);
         }
-        SchemaNodeKind::Struct { fields } => {
+        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
             for field in fields {
                 collect_expression_field_paths(field, paths);
             }

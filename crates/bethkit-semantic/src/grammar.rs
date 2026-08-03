@@ -143,6 +143,42 @@ fn match_node<'schema, T: GrammarInput>(
             }
             Ok(current)
         }
+        SchemaNodeKind::Unordered { children } => {
+            let mut current = state;
+            let mut matched_children = BTreeSet::new();
+            loop {
+                let mut best: Option<(usize, MatchState<'schema>)> = None;
+                for (index, child) in children.iter().enumerate() {
+                    if matched_children.contains(&index) {
+                        continue;
+                    }
+                    let candidate = match_node(
+                        child,
+                        current.clone(),
+                        record_signature,
+                        form_version,
+                        subrecords,
+                        declared,
+                    )?;
+                    if candidate.assigned == current.assigned {
+                        continue;
+                    }
+                    if best.as_ref().is_none_or(|(_, best_state)| {
+                        candidate.assigned > best_state.assigned
+                            || (candidate.assigned == best_state.assigned
+                                && candidate.cursor > best_state.cursor)
+                    }) {
+                        best = Some((index, candidate));
+                    }
+                }
+                let Some((index, candidate)) = best else {
+                    break;
+                };
+                matched_children.insert(index);
+                current = candidate;
+            }
+            Ok(current)
+        }
         SchemaNodeKind::Choice { alternatives } => {
             let mut best = state.clone();
             for alternative in alternatives {
@@ -331,7 +367,7 @@ fn collect_numeric_payload_fields(
         values.insert(node.path.clone(), value);
     }
     match &node.kind {
-        SchemaNodeKind::Struct { fields } => {
+        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
             let mut cursor = offset;
             for field in fields {
                 let Some(consumed) =
@@ -424,7 +460,7 @@ fn skip_unknown<T: GrammarInput>(
 
 fn collect_signatures(node: &SchemaNode, output: &mut BTreeSet<Signature>) {
     match &node.kind {
-        SchemaNodeKind::Sequence { children } => {
+        SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
             for child in children {
                 collect_signatures(child, output);
             }
@@ -442,7 +478,7 @@ fn collect_signatures(node: &SchemaNode, output: &mut BTreeSet<Signature>) {
         SchemaNodeKind::Subrecord { signature, .. } => {
             output.insert(Signature::from(*signature));
         }
-        SchemaNodeKind::Struct { fields } => {
+        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
             for field in fields {
                 collect_signatures(field, output);
             }
@@ -534,6 +570,49 @@ mod tests {
         assert!(matched.assignments[2].is_none());
         assert!(!matched.declared_signatures.contains(&Signature(*b"XXXX")));
         assert!(matched.violations.is_empty());
+        Ok(())
+    }
+
+    /// Matches declared children in source order when xEdit marks their container unordered.
+    #[test]
+    fn unordered_match_accepts_reordered_children_once(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let root = SchemaNode {
+            id: SchemaNodeId(0),
+            path: "TEST".to_owned(),
+            name: "Test".to_owned(),
+            required: true,
+            conflict_priority: ConflictPriority::Normal,
+            condition: None,
+            kind: SchemaNodeKind::Unordered {
+                children: vec![
+                    subrecord_node(1, *b"AAAA", true),
+                    subrecord_node(2, *b"BBBB", true),
+                ],
+            },
+        };
+        let subrecords = vec![
+            subrecord(*b"BBBB"),
+            subrecord(*b"XXXX"),
+            subrecord(*b"AAAA"),
+            subrecord(*b"AAAA"),
+        ];
+
+        // when
+        let matched = interpret(&root, Signature(*b"TEST"), 44, &subrecords)?;
+
+        // then
+        assert_eq!(
+            matched.assignments[0].map(|node| node.id),
+            Some(SchemaNodeId(2))
+        );
+        assert!(matched.assignments[1].is_none());
+        assert_eq!(
+            matched.assignments[2].map(|node| node.id),
+            Some(SchemaNodeId(1))
+        );
+        assert!(matched.assignments[3].is_none());
         Ok(())
     }
 

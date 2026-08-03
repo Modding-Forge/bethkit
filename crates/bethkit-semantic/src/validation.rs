@@ -18,6 +18,16 @@ pub enum DiagnosticSeverity {
     Error,
 }
 
+/// Policy used when validating schema requirements against existing records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ValidationMode {
+    /// Reports every schema violation as its strict diagnostic severity.
+    #[default]
+    Strict,
+    /// Matches xEdit's tolerant loading of missing required fields.
+    XEditCompatible,
+}
+
 /// Stable machine-readable diagnostic code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticCode {

@@ -38,6 +38,8 @@ pub use handler::{
 pub use info_sort::{
     edit_info_previous, plan_info_group_sort, InfoGroupSortPlan, InfoPreviousEdit,
 };
-pub use validation::{Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationReport};
+pub use validation::{
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationMode, ValidationReport,
+};
 pub use value::{ByteSpan, FieldOrigin, FieldValue, NamedValue, OwnedFieldValue};
 pub use view::{Field, RecordView};
