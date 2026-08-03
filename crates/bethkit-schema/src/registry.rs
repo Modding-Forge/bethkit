@@ -72,7 +72,9 @@ fn find_node<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaNode> {
         return Some(node);
     }
     match &node.kind {
-        SchemaNodeKind::Sequence { children } => find_in_nodes(children, path),
+        SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
+            find_in_nodes(children, path)
+        }
         SchemaNodeKind::Choice { alternatives }
         | SchemaNodeKind::SelectedChoice { alternatives, .. } => find_in_nodes(alternatives, path),
         SchemaNodeKind::Repeat { child, .. }
@@ -80,7 +82,9 @@ fn find_node<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaNode> {
         | SchemaNodeKind::Array { element: child, .. }
         | SchemaNodeKind::Compressed { child, .. }
         | SchemaNodeKind::Terminated { child, .. } => find_node(child, path),
-        SchemaNodeKind::Struct { fields } => find_in_nodes(fields, path),
+        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
+            find_in_nodes(fields, path)
+        }
         SchemaNodeKind::Union { variants, .. } => find_in_nodes(variants, path),
         SchemaNodeKind::Primitive { .. }
         | SchemaNodeKind::Custom { .. }
@@ -108,12 +112,21 @@ impl SchemaCatalog {
     ///
     /// # Errors
     ///
-    /// Returns [`SchemaError::EmbeddedUnavailable`] when this source build
-    /// was not compiled with `BETHKIT_SCHEMA_BUNDLE`, or another
-    /// [`SchemaError`] when the embedded bundle is invalid.
+    /// Returns [`SchemaError::EmbeddedUnavailable`] when the build has no
+    /// embedded package, or another [`SchemaError`] when embedded data is
+    /// invalid.
     pub fn embedded() -> Result<Self> {
-        let bytes: &[u8] = EMBEDDED_BUNDLE.ok_or(SchemaError::EmbeddedUnavailable)?;
-        Self::from_bundle_bytes(bytes)
+        if let Some(bytes) = EMBEDDED_BUNDLE {
+            return Self::from_bundle_bytes(bytes);
+        }
+        if EMBEDDED_PACKAGES.is_empty() {
+            return Err(SchemaError::EmbeddedUnavailable);
+        }
+        let mut catalog = Self::new();
+        for bytes in EMBEDDED_PACKAGES {
+            catalog.insert(SchemaPackage::from_bytes(bytes)?)?;
+        }
+        Ok(catalog)
     }
 
     /// Loads a catalog bundle from disk.
@@ -184,5 +197,38 @@ impl SchemaCatalog {
     /// Returns whether the catalog contains no packages.
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
+    }
+}
+
+#[cfg(all(test, feature = "schema-skyrim-se"))]
+mod tests {
+    use bethkit_core::Game;
+
+    use super::*;
+    use crate::ValidationStatus;
+
+    /// Confirms that a Skyrim-only build embeds no other game package.
+    #[test]
+    fn embedded_catalog_contains_only_skyrim_special_edition(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // when
+        let catalog = SchemaCatalog::embedded()?;
+
+        // then
+        assert_eq!(catalog.len(), 1);
+        let package = catalog.require(Game::SkyrimSE)?;
+        assert_eq!(package.manifest().package_version, "0.1.0");
+        assert_eq!(package.manifest().source_tag, "xedit-4.1.5f");
+        assert_eq!(
+            package.manifest().source_commit,
+            "f5c00f3fa3ee39511185515802647246c807f759"
+        );
+        assert_eq!(
+            package.manifest().validation_status,
+            ValidationStatus::Candidate
+        );
+        assert_eq!(package.records().len(), 134);
+        assert!(catalog.get(Game::SkyrimLE).is_none());
+        Ok(())
     }
 }

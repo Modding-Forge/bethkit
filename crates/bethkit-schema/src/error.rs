@@ -46,7 +46,7 @@ pub enum SchemaError {
     MissingGame(String),
 
     /// No schema bundle was embedded in this build.
-    #[error("this build has no embedded schema catalog; set BETHKIT_SCHEMA_BUNDLE at build time")]
+    #[error("this build has no embedded schemas")]
     EmbeddedUnavailable,
 
     /// An expression is invalid for its current evaluation context.

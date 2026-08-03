@@ -162,7 +162,7 @@ pub struct BethkitRecordEditor(Option<RecordEditor>);
 /// Loads the release-time embedded schema catalog.
 ///
 /// Returns null and sets the last error when this library was built without
-/// `BETHKIT_SCHEMA_BUNDLE` or the embedded bundle is invalid.
+/// an embedded schema source or the embedded data is invalid.
 #[no_mangle]
 pub extern "C" fn bethkit_schema_catalog_embedded() -> *mut BethkitSchemaCatalog {
     let catalog = ffi_try!(SchemaCatalog::embedded(), std::ptr::null_mut());

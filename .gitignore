@@ -1,4 +1,4 @@
-# Compiled test data — real plugin files are copyright their respective authors
+# Compiled test data - real plugin files are copyright their respective authors
 # and must not be committed to this repository.
 # Place test files manually in this directory before running integration tests.
 tests/testdata/*.esp
@@ -7,11 +7,14 @@ tests/testdata/*.esl
 tests/testdata/*.bsa
 tests/testdata/*.ba2
 
-# Rust build artefacts
+# Rust build artifacts
 /target/
 /schemas/generated/
+/schemas/**/*.bkschema
+/schemas/**/*.bkschemas
+/.pytest_cache/
 
-# Planning notes — local only
+# Planning notes - local only
 planning/
 
 # IDE and editor

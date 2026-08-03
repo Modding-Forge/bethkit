@@ -1476,7 +1476,7 @@ void bethkit_zstring_free(char *ptr);
  * Loads the release-time embedded schema catalog.
  *
  * Returns null and sets the last error when this library was built without
- * `BETHKIT_SCHEMA_BUNDLE` or the embedded bundle is invalid.
+ * an embedded schema source or the embedded data is invalid.
  */
 struct BethkitSchemaCatalog *bethkit_schema_catalog_embedded(void);
 

@@ -11,9 +11,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # -------------------------------------------------------------------------
-  # Lint: rustfmt check + clippy on Linux only (fast, no matrix needed).
-  # -------------------------------------------------------------------------
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -38,14 +35,17 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Clippy
-        run: cargo clippy --workspace --tests -- --deny warnings
+      - name: Download pinned Skyrim Special Edition schema
+        shell: pwsh
+        run: |
+          $schema = ./scripts/Get-SkyrimSeSchema.ps1
+          "BETHKIT_SKYRIM_SE_SCHEMA=$schema" >> $env:GITHUB_ENV
 
-  # -------------------------------------------------------------------------
-  # Build + unit tests on all supported platforms.
-  # Integration tests are excluded because they require real game files that
-  # cannot be committed to the repository (see .gitignore / tests/testdata/).
-  # -------------------------------------------------------------------------
+      - name: Clippy
+        run: >-
+          cargo clippy --workspace --all-targets --features bethkit-ffi/schema-skyrim-se -- --deny warnings
+
+
   build:
     needs: lint
     name: Build (${{ matrix.os }})
@@ -69,7 +69,6 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      # Cache the cargo registry and build artefacts to speed up subsequent runs.
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -80,23 +79,33 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # Unit tests and integration tests (live tests self-skip when game files
-      # are absent, so --all-targets is safe on CI).
-      - name: Run tests
-        run: cargo test --workspace --all-targets
+      - name: Download pinned Skyrim Special Edition schema
+        shell: pwsh
+        run: |
+          $schema = ./scripts/Get-SkyrimSeSchema.ps1
+          "BETHKIT_SKYRIM_SE_SCHEMA=$schema" >> $env:GITHUB_ENV
 
-      # Doc tests run only on Linux to keep the matrix lean.
+      - name: Run tests
+        run: >-
+          cargo test --workspace --all-targets --features bethkit-ffi/schema-skyrim-se
+
+
       - name: Run doc tests
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test --doc --workspace
+        run: >-
+          cargo test --doc --workspace --features bethkit-ffi/schema-skyrim-se
 
-      # Verify that all public items compile with rustdoc (Linux only).
+
       - name: Check documentation
         if: matrix.os == 'ubuntu-latest'
-        run: cargo doc --workspace --no-deps
+        run: >-
+          cargo doc --workspace --no-deps --features bethkit-ffi/schema-skyrim-se
+
 
       - name: Build release DLL
-        run: cargo build --release -p bethkit-ffi --features generate-header
+        run: >-
+          cargo build --release -p bethkit-ffi --features schema-skyrim-se,generate-header
+
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -106,12 +115,9 @@ jobs:
             ${{ matrix.dll }}
             ${{ matrix.lib }}
             crates/bethkit-ffi/bethkit.h
+            target/release-schemas/skyrim_se.bkschema
           if-no-files-found: error
 
-  # -------------------------------------------------------------------------
-  # Create a GitHub Release when a version tag (v*) is pushed and attach all
-  # platform artifacts.
-  # -------------------------------------------------------------------------
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -133,16 +139,17 @@ jobs:
           name: bethkit-linux-x64
           path: dist/linux
 
-      # Zip each platform bundle for the release page with a flat structure.
       - name: Package artifacts
         run: |
           mkdir -p staging/windows staging/linux
           cp dist/windows/target/release/bethkit_ffi.dll staging/windows/
           cp dist/windows/target/release/bethkit_ffi.lib staging/windows/
           cp dist/windows/crates/bethkit-ffi/bethkit.h   staging/windows/
+          cp dist/windows/target/release-schemas/skyrim_se.bkschema staging/windows/
           cp dist/linux/target/release/libbethkit_ffi.so staging/linux/
           cp dist/linux/target/release/libbethkit_ffi.a  staging/linux/
           cp dist/linux/crates/bethkit-ffi/bethkit.h     staging/linux/
+          cp dist/linux/target/release-schemas/skyrim_se.bkschema staging/linux/
           (cd staging/windows && zip -r ../../bethkit-${{ github.ref_name }}-windows-x64.zip .)
           (cd staging/linux   && zip -r ../../bethkit-${{ github.ref_name }}-linux-x64.zip .)
 

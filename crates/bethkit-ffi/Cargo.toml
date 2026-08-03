@@ -8,13 +8,15 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 bethkit-core = { path = "../bethkit-core" }
-bethkit-schema = { path = "../bethkit-schema" }
+bethkit-schema = { path = "../bethkit-schema", default-features = false }
 bethkit-semantic = { path = "../bethkit-semantic" }
 bethkit-bsa  = { path = "../bethkit-bsa" }
 bethkit-io   = { path = "../bethkit-io" }
 thiserror    = { workspace = true }
 
 [features]
+default = []
+schema-skyrim-se = ["bethkit-schema/schema-skyrim-se"]
 # Enable to regenerate bethkit.h from the FFI source.
 # cargo build -p bethkit-ffi --features generate-header
 generate-header = ["dep:cbindgen"]
