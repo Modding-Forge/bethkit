@@ -86,10 +86,10 @@ impl LoadOrder {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::LoadOrderIndexFull`] when adding a regular plugin
+    /// Returns [`crate::CoreError::LoadOrderIndexFull`] when adding a regular plugin
     /// would consume file index `0xFE` (reserved for the ESL sentinel).
     ///
-    /// Returns [`CoreError::LightSlotOverflow`] when the ESL slot counter
+    /// Returns [`crate::CoreError::LightSlotOverflow`] when the ESL slot counter
     /// would exceed `0xFFF`.
     pub fn push(&mut self, name: &str, kind: PluginKind) -> crate::error::Result<&LoadOrderEntry> {
         let canonical: String = name.to_lowercase();

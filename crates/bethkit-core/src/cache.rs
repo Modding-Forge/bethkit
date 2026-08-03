@@ -122,8 +122,8 @@ impl PluginCache {
     /// * `plugin` - The fully parsed plugin to add.
     /// # Errors
     ///
-    /// Returns [`CoreError::LoadOrderIndexFull`] or
-    /// [`CoreError::LightSlotOverflow`] if the load-order index is exhausted.
+    /// Returns [`crate::CoreError::LoadOrderIndexFull`] or
+    /// [`crate::CoreError::LightSlotOverflow`] if the load-order index is exhausted.
     pub fn add(&mut self, name: &str, plugin: Plugin) -> crate::error::Result<()> {
         let kind: PluginKind = plugin.kind();
         let masters: Vec<String> = plugin.masters().to_vec();

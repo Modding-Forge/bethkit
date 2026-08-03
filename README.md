@@ -1,81 +1,61 @@
 # bethkit
 
-[![Build](https://img.shields.io/github/actions/workflow/status/Modding-Forge/bethkit/build.yml?branch=master&label=CI)](https://github.com/Modding-Forge/bethkit/actions/workflows/build.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE) [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org) [![Version](https://img.shields.io/badge/version-0.4.0-yellow)](CHANGELOG.md)
+[![Build](https://img.shields.io/github/actions/workflow/status/Modding-Forge/bethkit/build.yml?branch=master&label=CI)](https://github.com/Modding-Forge/bethkit/actions/workflows/build.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE) [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org)
 
-> **⚠️ Beta** — APIs may change before the first stable release.
+Bethkit is a Rust workspace for reading, writing, and inspecting Bethesda plugin and archive formats. The project is in active development, and its public APIs may still change before a stable release.
 
-A fast, zero-copy Rust library for reading and writing Bethesda game plugin and archive files. Callable from any language via a stable C ABI (`bethkit-ffi`).
+Skyrim Special Edition is the current schema-backed target. The lower-level format APIs also model other Bethesda games, but Bethkit release builds currently include only the Skyrim Special Edition schema.
 
-## What it does
+## Components
 
-- **Zero-copy plugin parsing** — plugins are memory-mapped; records borrow bytes directly from the mapping without extra allocations
-- **Versioned semantic schemas** — deterministic CBOR packages are generated
-  from a pinned, provenance-checked xEdit exporter. Runtime builds never
-  download or invoke xEdit.
-- **BSA / BA2 archives** — read and extract all major formats (BSA TES3/TES4/FO3/SSE, BA2 GNRL/DX10); write new archives with parallel compression
-- **Streaming record replace** — `PluginPatcher` rewrites arbitrary records in-place; cost is O(edits), not O(plugin size)
-- **Writer** — build new plugins from scratch; eslify existing plugins; set the `LOCALIZED` flag
-- **Localized strings** — read, edit, and write `.STRINGS` / `.DLSTRINGS` / `.ILSTRINGS` files; apply translation patches without touching the plugin binary
-- **Load-order utilities** — `LoadOrder`, `GlobalFormId`, `PluginCache` for winning-override lookups and EditorID search across multiple plugins
-- **C ABI** — `bethkit-ffi` exposes ~110 `extern "C"` functions with a pre-generated `bethkit.h` included in the repository
+- `bethkit-io` provides bounded cursors, memory-mapped input, and compression support.
+- `bethkit-core` provides schema-independent plugin parsing, writing, patching, string tables, load-order handling, and record caches.
+- `bethkit-schema` loads versioned schema packages and optional build-time catalogs.
+- `bethkit-semantic` provides schema-guided views, editing, validation, references, conflicts, and cleaning operations.
+- `bethkit-bsa` reads and writes supported BSA and BA2 archive variants.
+- `bethkit-ffi` exposes the Rust functionality through a C ABI and the checked-in `bethkit.h` header.
 
-## Crates
+## Skyrim Special Edition schema
 
-- **`bethkit-io`** — memory-mapped I/O, `SliceCursor`, zlib/LZ4 decompression
-- **`bethkit-core`** — schema-free ESP/ESL/ESM parser, writer, patcher, and string tables
-- **`bethkit-schema`** — CBOR packages, catalogs, schema grammar, and bounded expression VM
-- **`bethkit-semantic`** — semantic views, editing, validation, references, conflicts, and cleaning
-- **`bethkit-bsa`** — BSA and BA2 archive reader and writer
-- **`bethkit-ffi`** — C ABI wrapper and `bethkit.h` header
+Bethkit does not store generated schema packages in Git. The release workflow downloads only `skyrim_se.bkschema` from [xDump v0.1.0](https://github.com/Modding-Forge/xDump/releases/tag/v0.1.0), verifies its pinned SHA-256 value, embeds it in the release FFI libraries, and includes the standalone package in each platform archive. Ordinary local workspace builds remain schema-free unless the Skyrim schema feature and a verified package path are supplied explicitly.
 
-## Supported games
+The definitions originate in the [xEdit project](https://github.com/TES5Edit/TES5Edit). [Modding-Forge/xDump](https://github.com/Modding-Forge/xDump) pins the upstream xEdit source, builds the exporter, audits the conversion rules, validates the result, and publishes the package consumed by Bethkit.
 
-The public game model covers Skyrim LE/SE/VR, Fallout 3/NV/4/4VR/76,
-Oblivion, Morrowind, and Starfield. Schema packages are embedded only after
-all release gates pass for the corresponding game.
+See [SCHEMA.md](SCHEMA.md) for provenance, measured coverage, validation results, and current limitations.
 
 ## Documentation
 
-- [Quick Start](docs/modules/ROOT/pages/quick-start.adoc)
-- [Reading Plugins](docs/modules/ROOT/pages/reading-plugins.adoc)
-- [Writing &amp; Patching Plugins](docs/modules/ROOT/pages/writing-plugins.adoc)
-- [BSA / BA2 Archives](docs/modules/ROOT/pages/archives.adoc)
-- [Record Schema](docs/modules/ROOT/pages/schema.adoc)
-- [Localized Strings](docs/modules/ROOT/pages/string-tables.adoc)
-- [Load Order &amp; FormID Resolution](docs/modules/ROOT/pages/load-order.adoc)
-- [C ABI / Language Bindings](docs/modules/ROOT/pages/language-bindings.adoc)
-- [Architecture](docs/modules/ROOT/pages/architecture.adoc)
+- [Schema provenance and coverage](SCHEMA.md)
 - [Local build setup](docs/local-build.md)
+- Generate the Rust API reference locally with `cargo doc --workspace --no-deps`.
+- The C ABI is declared in [`crates/bethkit-ffi/bethkit.h`](crates/bethkit-ffi/bethkit.h).
 
-## Compared to alternatives
+Python bindings are maintained separately in [Modding-Forge/bethkit.py](https://github.com/Modding-Forge/bethkit.py).
 
-|                              | bethkit      | sse-plugin-interface | xEdit      | Mutagen         |
-| ---------------------------- | ------------ | -------------------- | ---------- | --------------- |
-| Language                     | Rust + C ABI | Python               | Delphi     | C#              |
-| License                      | Apache-2.0   | MIT                  | MPL 2.0    | GPL-3.0         |
-| Embeddable library           | ✅           | ✅                   | ❌ GUI/CLI | ✅              |
-| Schema-typed record access   | ✅ runtime   | ❌                   | ✅ full    | ✅ compile-time |
-| BSA / BA2 write              | ✅           | ❌                   | ✅         | read only       |
-| Streaming record replace     | ✅           | ❌                   | ✅         | ❌              |
-| Conflict detection           | ❌           | ❌                   | ✅         | ❌              |
-| C ABI for cross-language use | ✅           | ❌                   | ❌         | ❌              |
+## Related projects
 
-bethkit's niche is a fast, embeddable, language-agnostic library for direct binary access. **xEdit** is the authoritative reference tool with full conflict detection, a GUI, and schema definitions for every field across every game. **Mutagen** offers compile-time-typed record schemas for C# patcher authors, with the Synthesis framework on top; its GPL-3.0 licence restricts embedding in proprietary tools. **sse-plugin-interface** is minimal by design — purpose-built for SSE-Auto-Translator.
+The projects below solve overlapping problems with different APIs and tradeoffs. This table is intended as orientation, not as a ranking.
 
-## Status
+| Project | Primary form | Schema approach | Practical focus |
+| --- | --- | --- | --- |
+| Bethkit | Rust crates and C ABI | Runtime schema packages; release builds currently embed Skyrim Special Edition only | Embeddable plugin, archive, and semantic operations |
+| [xEdit](https://github.com/TES5Edit/TES5Edit) | Delphi desktop application and command-line modes | Upstream definitions covering Bethesda record formats and editor behavior | Interactive inspection, conflict analysis, cleaning, editing, and reference behavior |
+| [Mutagen](https://github.com/Mutagen-Modding/Mutagen) | .NET libraries | Generated, statically typed record APIs | C# mod inspection and patcher development |
+| [sse-plugin-interface](https://github.com/Cutleast/sse-plugin-interface) | Python package | Skyrim Special Edition-oriented Python model | Lightweight Python access for Skyrim plugin workflows |
 
-| Milestone                                           | Status      |
-| --------------------------------------------------- | ----------- |
-| Parser + writer + tests (SSE)                       | ✅          |
-| String tables                                       | ✅          |
-| Streaming rewrite (`PluginPatcher`)                 | ✅          |
-| BSA / BA2 reader + writer                           | ✅          |
-| `PluginCache` (winning override, EditorID lookup)   | ✅          |
-| Versioned CBOR schema runtime                       | ✅          |
-| xEdit exporter patch and audited conversion rules  | 🚧 WIP      |
-| Eleven-game differential corpus                     | 🚧 WIP      |
-| C ABI v2 (`bethkit-ffi`)                            | 🚧 WIP      |
-| Python 2.0 bindings — [bethkit.py](https://github.com/Modding-Forge/bethkit.py) | 🚧 WIP |
+Bethkit does not replace xEdit as a reference implementation or interactive modding tool. Its current schema-backed Skyrim support exists because xEdit's definitions can be exported and consumed by a smaller embeddable runtime.
+
+## Build and test
+
+Bethkit targets stable Rust and edition 2021.
+
+```text
+cargo build --workspace
+cargo lint
+cargo test --workspace
+```
+
+Tests that require installed game data skip automatically when their local fixtures are unavailable. See [local build setup](docs/local-build.md) for the optional live-test configuration.
 
 ## License
 

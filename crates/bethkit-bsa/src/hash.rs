@@ -3,9 +3,9 @@
 //! Hashing algorithms used to index files in Bethesda archives.
 //!
 //! Three distinct algorithms are used across the supported formats:
-//! - [`hash_tes3`] — Morrowind BSA (simple XOR/rotate scheme).
-//! - [`hash_tes4`] — Oblivion/FO3/Skyrim/SSE BSA (split name+extension hash).
-//! - [`hash_fo4`] — Fallout 4 / Starfield BA2 (standard CRC-32).
+//! - [`hash_tes3`] - Morrowind BSA (simple XOR/rotate scheme).
+//! - [`hash_tes4_dir`] and [`hash_tes4_file`] - Oblivion/FO3/Skyrim/SSE BSA.
+//! - [`hash_fo4`] - Fallout 4 / Starfield BA2 (standard CRC-32).
 
 use std::sync::OnceLock;
 
