@@ -22,7 +22,7 @@ use bethkit_core::PluginCache;
 use crate::load_order::BethkitGlobalFormId;
 use crate::plugin::BethkitPlugin;
 use crate::record::BethkitRecord;
-use crate::{cstr_to_str, null_check, set_last_error};
+use crate::{cstr_to_str, ffi_try, null_check};
 
 /// An opaque handle to a multi-plugin record cache.
 ///
@@ -63,6 +63,8 @@ pub extern "C" fn bethkit_plugin_cache_free(cache: *mut BethkitPluginCache) {
 ///
 /// This function **takes ownership** of `plugin`.  The caller must not use
 /// or free `plugin` after this call.
+/// A valid nonnull plugin is consumed on every return path, including null
+/// cache/name, invalid UTF-8, exhausted load-order slots, and internal errors.
 ///
 /// Returns 0 on success or -1 on error.
 ///
@@ -75,33 +77,37 @@ pub extern "C" fn bethkit_plugin_cache_free(cache: *mut BethkitPluginCache) {
 /// # Errors
 ///
 /// Returns -1 and sets the last error if `cache`, `name`, or `plugin` is
-/// null, or `name` contains invalid UTF-8.
+/// null, `name` contains invalid UTF-8, the load order is full, or a panic occurs.
+///
+/// # Safety
+///
+/// `plugin`, if nonnull, must be an owned live handle that has not been
+/// transferred before. `cache` must be exclusively borrowed and `name`
+/// must be a readable NUL-terminated string when they are nonnull.
 #[no_mangle]
 pub extern "C" fn bethkit_plugin_cache_add(
     cache: *mut BethkitPluginCache,
     name: *const c_char,
     plugin: *mut BethkitPlugin,
 ) -> i32 {
+    null_check!(plugin, "bethkit_plugin_cache_add/plugin", -1);
+    // SAFETY: ownership transfers at entry for every valid nonnull plugin.
+    let boxed_plugin = unsafe { Box::from_raw(plugin) };
     null_check!(cache, "bethkit_plugin_cache_add", -1);
     null_check!(name, "bethkit_plugin_cache_add/name", -1);
-    null_check!(plugin, "bethkit_plugin_cache_add/plugin", -1);
 
     let name_str = match cstr_to_str(name, "bethkit_plugin_cache_add") {
         Some(s) => s,
         None => return -1,
     };
 
-    // SAFETY: plugin is non-null and was produced by bethkit_plugin_open*.
-    // SAFETY: We take ownership by reconstructing the Box, then extract
-    // SAFETY: the inner Plugin and move it into the cache.
-    let boxed_plugin = unsafe { Box::from_raw(plugin) };
     let inner_plugin = boxed_plugin.inner;
 
-    // SAFETY: cache is non-null.
-    if let Err(e) = unsafe { &mut *cache }.inner.add(name_str, inner_plugin) {
-        set_last_error(format!("bethkit_plugin_cache_add: {e}"));
-        return -1;
-    }
+    ffi_try!(
+        // SAFETY: cache is live and exclusively borrowed for this call.
+        unsafe { &mut *cache }.inner.add(name_str, inner_plugin),
+        -1
+    );
     0
 }
 
@@ -126,6 +132,8 @@ pub extern "C" fn bethkit_plugin_cache_record_count(cache: *const BethkitPluginC
 }
 
 /// Resolves a global FormID (plugin name + object ID) to the winning record.
+///
+/// Plugin filenames are matched case-insensitively using the core's canonical form.
 ///
 /// Returns a borrowed pointer to the record on success, or null if not found.
 /// The returned pointer is valid until the cache is freed.
@@ -159,7 +167,7 @@ pub extern "C" fn bethkit_plugin_cache_resolve(
     };
 
     let gfid = bethkit_core::GlobalFormId {
-        plugin_name: name_str.to_owned(),
+        plugin_name: name_str.to_lowercase(),
         object_id,
     };
 
@@ -244,4 +252,52 @@ pub extern "C" fn bethkit_plugin_cache_find_by_editor_id(
         }
     }
     record_ptr
+}
+
+#[cfg(test)]
+mod tests {
+    use bethkit_core::{FormId, GameContext, PluginWriter, RecordFlags, Signature};
+    use bethkit_core::{WritableGroup, WritableGroupChild, WritableRecord};
+
+    use super::*;
+    use crate::plugin::bethkit_plugin_open_from_bytes;
+    use crate::record::bethkit_record_form_id;
+    use crate::types::BethkitGame;
+
+    /// Checks that repeated additions do not invalidate previously borrowed records.
+    #[test]
+    fn borrowed_records_survive_cache_growth() -> Result<(), Box<dyn std::error::Error>> {
+        let mut writer = PluginWriter::new(GameContext::sse(), 1.7);
+        writer.add_group(WritableGroup {
+            label: *b"STAT",
+            group_type: 0,
+            children: vec![WritableGroupChild::Record(WritableRecord {
+                signature: Signature(*b"STAT"),
+                flags: RecordFlags::empty(),
+                form_id: FormId(0x800),
+                form_version: 44,
+                subrecords: Vec::new(),
+            })],
+        });
+        let bytes = writer.write_to_vec()?;
+        let cache = bethkit_plugin_cache_new();
+        let mut borrowed = std::ptr::null();
+        for index in 0..32 {
+            let plugin =
+                bethkit_plugin_open_from_bytes(bytes.as_ptr(), bytes.len(), BethkitGame::SkyrimSe);
+            assert!(!plugin.is_null());
+            assert_eq!(
+                bethkit_plugin_cache_add(cache, c"Example.esp".as_ptr(), plugin),
+                0
+            );
+            if index == 0 {
+                borrowed = bethkit_plugin_cache_resolve(cache, c"EXAMPLE.esp".as_ptr(), 0x800);
+                assert!(!borrowed.is_null());
+            }
+            assert_eq!(bethkit_record_form_id(borrowed), 0x800);
+        }
+        assert_eq!(bethkit_plugin_cache_len(cache), 32);
+        bethkit_plugin_cache_free(cache);
+        Ok(())
+    }
 }

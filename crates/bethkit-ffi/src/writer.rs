@@ -83,6 +83,102 @@ pub extern "C" fn bethkit_plugin_writer_free(pw: *mut BethkitPluginWriter) {
     drop(unsafe { Box::from_raw(pw) });
 }
 
+/// Appends a master filename to a borrowed plugin writer.
+///
+/// Returns 0 on success. The filename is copied; neither pointer is consumed.
+///
+/// # Errors
+///
+/// Returns -1 and sets the last error for null pointers, invalid UTF-8, or panics.
+///
+/// # Safety
+///
+/// `pw` must be a live exclusively borrowed writer. `name` must point to a
+/// readable NUL-terminated UTF-8 filename.
+#[no_mangle]
+pub extern "C" fn bethkit_plugin_writer_add_master(
+    pw: *mut BethkitPluginWriter,
+    name: *const c_char,
+) -> i32 {
+    null_check!(pw, "bethkit_plugin_writer_add_master", -1);
+    null_check!(name, "bethkit_plugin_writer_add_master/name", -1);
+    let Some(name) = cstr_to_str(name, "bethkit_plugin_writer_add_master") else {
+        return -1;
+    };
+    ffi_try!(
+        {
+            // SAFETY: pw is a live exclusively borrowed writer.
+            unsafe { &mut *pw }.0.add_master(name);
+            Ok::<_, FfiError>(0)
+        },
+        -1
+    )
+}
+
+/// Replaces a borrowed plugin writer's description with a copied string.
+///
+/// Returns 0 on success. Neither pointer is consumed.
+///
+/// # Errors
+///
+/// Returns -1 and sets the last error for null pointers, invalid UTF-8, or panics.
+///
+/// # Safety
+///
+/// `pw` must be a live exclusively borrowed writer. `description` must point
+/// to a readable NUL-terminated UTF-8 string.
+#[no_mangle]
+pub extern "C" fn bethkit_plugin_writer_set_description(
+    pw: *mut BethkitPluginWriter,
+    description: *const c_char,
+) -> i32 {
+    null_check!(pw, "bethkit_plugin_writer_set_description", -1);
+    null_check!(
+        description,
+        "bethkit_plugin_writer_set_description/description",
+        -1
+    );
+    let Some(description) = cstr_to_str(description, "bethkit_plugin_writer_set_description")
+    else {
+        return -1;
+    };
+    ffi_try!(
+        {
+            // SAFETY: pw is a live exclusively borrowed writer.
+            unsafe { &mut *pw }.0.set_description(description);
+            Ok::<_, FfiError>(0)
+        },
+        -1
+    )
+}
+
+/// Sets the localized-plugin header flag on a borrowed writer.
+///
+/// Returns 0 on success. This does not convert record payloads or string tables.
+///
+/// # Errors
+///
+/// Returns -1 and sets the last error for a null writer or an internal panic.
+///
+/// # Safety
+///
+/// `pw` must be a live exclusively borrowed writer.
+#[no_mangle]
+pub extern "C" fn bethkit_plugin_writer_set_localized(
+    pw: *mut BethkitPluginWriter,
+    localized: bool,
+) -> i32 {
+    null_check!(pw, "bethkit_plugin_writer_set_localized", -1);
+    ffi_try!(
+        {
+            // SAFETY: pw is a live exclusively borrowed writer.
+            unsafe { &mut *pw }.0.set_localized(localized);
+            Ok::<_, FfiError>(0)
+        },
+        -1
+    )
+}
+
 /// Adds a top-level group to the plugin writer.
 ///
 /// This function **takes ownership** of `group`.  The caller must not use
@@ -399,5 +495,39 @@ pub extern "C" fn bethkit_writable_record_add_subrecord(
 fn game_to_context(game: BethkitGame) -> GameContext {
     GameContext {
         game: crate::types::game_to_core(game),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ensures writer metadata reaches serialized TES4 fields and flags.
+    #[test]
+    fn writer_metadata_roundtrips() -> Result<(), Box<dyn std::error::Error>> {
+        let writer = bethkit_plugin_writer_new(BethkitGame::SkyrimSe, 1.7);
+        assert!(!writer.is_null());
+        assert_eq!(
+            bethkit_plugin_writer_add_master(writer, c"Skyrim.esm".as_ptr()),
+            0
+        );
+        assert_eq!(
+            bethkit_plugin_writer_set_description(writer, c"Typed API test".as_ptr()),
+            0
+        );
+        assert_eq!(bethkit_plugin_writer_set_localized(writer, true), 0);
+        let mut length = 0;
+        let data = bethkit_plugin_writer_write_to_bytes(writer, &mut length);
+        assert!(!data.is_null());
+        bethkit_plugin_writer_free(writer);
+        // SAFETY: data points to length owned bytes until the matching free below.
+        let bytes = unsafe { std::slice::from_raw_parts(data, length) }.to_vec();
+        // SAFETY: data is the live allocation with the exact returned length.
+        unsafe { crate::bethkit_bytes_free(data, length) };
+        let plugin = bethkit_core::Plugin::from_bytes(&bytes, GameContext::sse())?;
+        assert_eq!(plugin.masters(), ["Skyrim.esm"]);
+        assert_eq!(plugin.header.description.as_deref(), Some("Typed API test"));
+        assert!(plugin.is_localized());
+        Ok(())
     }
 }

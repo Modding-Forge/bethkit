@@ -78,10 +78,8 @@ pub extern "C" fn bethkit_record_form_version(record: *const BethkitRecord) -> u
 /// Returns a pointer to the NUL-terminated editor ID (EDID subrecord) of
 /// `record`, or null if the record has no EDID.
 ///
-/// The returned string is heap-allocated for this call and remains valid only
-/// until this function is called again for the same record (or until the
-/// plugin is freed).  For long-lived access, the caller should copy the
-/// string.
+/// The returned string is independently owned and must be freed with
+/// [`bethkit_record_editor_id_free`], even after its plugin is freed.
 ///
 /// Returns null on error (null record, I/O error, or encoding error).
 ///
@@ -91,23 +89,51 @@ pub extern "C" fn bethkit_record_form_version(record: *const BethkitRecord) -> u
 /// subrecord cannot be decoded.
 #[no_mangle]
 pub extern "C" fn bethkit_record_editor_id(record: *const BethkitRecord) -> *const c_char {
-    null_check!(record, "bethkit_record_editor_id", std::ptr::null());
-    // SAFETY: record is non-null.
-    let rec = unsafe { &*record };
-    let edid = ffi_try!(rec.0.editor_id().map_err(FfiError::Core), std::ptr::null());
-    match edid {
-        None => std::ptr::null(),
-        Some(s) => {
-            let sanitized: Vec<u8> = s.bytes().map(|b| if b == 0 { b'?' } else { b }).collect();
-            match CString::new(sanitized) {
-                Ok(cs) => cs.into_raw(),
-                Err(e) => {
-                    set_last_error(e.to_string());
-                    std::ptr::null()
-                }
-            }
-        }
-    }
+    let mut result = std::ptr::null_mut();
+    bethkit_record_editor_id_status(record, &mut result);
+    result
+}
+
+/// Reads an editor ID, distinguishing a missing EDID from a decoding error.
+///
+/// Returns 0 and an owned string, 1 if absent, or -1 on error. Release the
+/// result using [`bethkit_record_editor_id_free`]. A valid `out` is initialized
+/// to null before validation. Not-found does not change the last error.
+///
+/// # Errors
+///
+/// Returns -1 for null arguments, decoding errors, interior NULs, or panics.
+///
+/// # Safety
+///
+/// `record` must be a live borrowed record. `out` must point to writable
+/// pointer storage that does not alias the record.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_id_status(
+    record: *const BethkitRecord,
+    out: *mut *mut c_char,
+) -> i32 {
+    null_check!(out, "bethkit_record_editor_id_status/out", -1);
+    // SAFETY: out is caller-owned writable pointer storage.
+    unsafe { *out = std::ptr::null_mut() };
+    null_check!(record, "bethkit_record_editor_id_status/record", -1);
+    let result = ffi_try!(
+        (|| {
+            // SAFETY: record is a live borrowed handle.
+            let record = unsafe { &*record };
+            record
+                .0
+                .editor_id()?
+                .map(CString::new)
+                .transpose()
+                .map_err(FfiError::Nul)
+        })(),
+        -1
+    );
+    let Some(value) = result else { return 1 };
+    // SAFETY: out is writable and ownership of this CString passes to the caller.
+    unsafe { *out = value.into_raw() };
+    0
 }
 
 /// Frees an editor ID string previously returned by [`bethkit_record_editor_id`].
@@ -116,8 +142,8 @@ pub extern "C" fn bethkit_record_editor_id(record: *const BethkitRecord) -> *con
 ///
 /// # Safety
 ///
-/// `ptr` must have been returned by [`bethkit_record_editor_id`] and not yet
-/// freed.
+/// `ptr` must have been returned by [`bethkit_record_editor_id`] or
+/// [`bethkit_record_editor_id_status`] and not yet freed.
 #[no_mangle]
 pub unsafe extern "C" fn bethkit_record_editor_id_free(ptr: *mut c_char) {
     if ptr.is_null() {
@@ -368,4 +394,76 @@ pub unsafe extern "C" fn bethkit_zstring_free(ptr: *mut c_char) {
     }
     // SAFETY: ptr was produced by CString::into_raw.
     drop(unsafe { CString::from_raw(ptr) });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CStr;
+
+    use bethkit_core::{FormId, GameContext, Plugin, PluginWriter, RecordFlags, Signature};
+    use bethkit_core::{WritableGroup, WritableGroupChild, WritableRecord, WritableSubRecord};
+
+    use super::*;
+
+    /// Creates a parsed record with an optional EDID payload.
+    fn fixture(data: Option<&[u8]>) -> Result<Plugin, Box<dyn std::error::Error>> {
+        let mut writer = PluginWriter::new(GameContext::sse(), 1.7);
+        let subrecords = data
+            .into_iter()
+            .map(|bytes| WritableSubRecord {
+                signature: Signature::EDID,
+                data: bytes.to_vec(),
+            })
+            .collect();
+        writer.add_group(WritableGroup {
+            label: *b"STAT",
+            group_type: 0,
+            children: vec![WritableGroupChild::Record(WritableRecord {
+                signature: Signature(*b"STAT"),
+                flags: RecordFlags::empty(),
+                form_id: FormId(0x800),
+                form_version: 44,
+                subrecords,
+            })],
+        });
+        Ok(Plugin::from_bytes(
+            &writer.write_to_vec()?,
+            GameContext::sse(),
+        )?)
+    }
+
+    /// Distinguishes missing and malformed EDIDs without depending on stale errors.
+    #[test]
+    fn editor_id_status_distinguishes_absent_and_invalid() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for (data, status) in [
+            (None, 1),
+            (Some(&[0xff, 0][..]), -1),
+            (Some(&b"valid\0"[..]), 0),
+        ] {
+            let plugin = fixture(data)?;
+            let record = plugin
+                .find_record(FormId(0x800))
+                .expect("fixture record exists");
+            let mut result = std::ptr::dangling_mut();
+            set_last_error("previous unrelated failure");
+            assert_eq!(
+                bethkit_record_editor_id_status(
+                    record as *const _ as *const BethkitRecord,
+                    &mut result
+                ),
+                status
+            );
+            drop(plugin);
+            if status == 0 {
+                // SAFETY: the successful result is owned independently of the dropped plugin.
+                assert_eq!(unsafe { CStr::from_ptr(result) }.to_str()?, "valid");
+                // SAFETY: result is a live CString allocation returned by the status API.
+                unsafe { bethkit_record_editor_id_free(result) };
+            } else {
+                assert!(result.is_null());
+            }
+        }
+        Ok(())
+    }
 }

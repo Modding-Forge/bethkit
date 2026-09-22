@@ -286,6 +286,14 @@ typedef struct BethkitPlugin BethkitPlugin;
 typedef struct BethkitPluginCache BethkitPluginCache;
 
 /**
+ * An owned patch session whose source bytes outlive the original plugin handle.
+ *
+ * Release with [`bethkit_plugin_patcher_free`]. Replacements are copied and do
+ * not consume their writable record handles. Unchanged records remain verbatim.
+ */
+typedef struct BethkitPluginPatcher BethkitPluginPatcher;
+
+/**
  * An opaque handle to a plugin writer.
  *
  * Created by [`bethkit_plugin_writer_new`].  Must be freed with
@@ -417,9 +425,9 @@ typedef struct BethkitSlice {
 /**
  * A typed FormID with its allowed target record-type signatures.
  *
- * `allowed_sigs` points to a static array of 4-byte signatures; the slice is
- * `allowed_count` entries long.  The array lives in static memory and must
- * never be freed by the caller.
+ * `allowed_sigs` points to an array of 4-byte signatures; the slice is
+ * `allowed_count` entries long. The owning record view retains the array
+ * until that view is freed. Never free it separately.
  */
 typedef struct BethkitTypedFormId {
     /**
@@ -581,6 +589,48 @@ typedef struct BethkitNamedField {
 } BethkitNamedField;
 
 /**
+ * Stable identity and byte provenance for a decoded field.
+ *
+ * String pointers are borrowed from the owning view and expire when it is freed.
+ * The layout of [`BethkitNamedField`] remains unchanged; retrieve this metadata
+ * with [`bethkit_record_view_field_metadata`] or [`bethkit_field_entries_metadata`].
+ */
+typedef struct BethkitFieldMetadata {
+    /**
+     * Stable schema node identifier, or `UINT32_MAX` for an unknown subrecord.
+     */
+    uint32_t node_id;
+    /**
+     * Stable schema path, borrowed from the owning view.
+     */
+    const char *path;
+    /**
+     * Selected union-node path, or null when no alternative path applies.
+     */
+    const char *effective_path;
+    /**
+     * Zero-based top-level occurrence containing this field.
+     */
+    uintptr_t occurrence;
+    /**
+     * Inclusive payload byte offset.
+     */
+    uintptr_t span_start;
+    /**
+     * Exclusive payload byte offset.
+     */
+    uintptr_t span_end;
+    /**
+     * Provenance: 0 schema, 1 unknown, 2 unmatched known, 3 custom decoder.
+     */
+    uint32_t origin;
+    /**
+     * Four-byte signature of the containing subrecord.
+     */
+    uint8_t subrecord_signature[4];
+} BethkitFieldMetadata;
+
+/**
  * Returns the major C ABI version implemented by this library.
  */
 uint32_t bethkit_abi_version(void);
@@ -720,6 +770,29 @@ uint32_t bethkit_archive_entry_uncompressed_size(const BethkitArchiveEntry *entr
 uint8_t *bethkit_archive_extract(const struct BethkitArchive *archive,
                                  const char *path,
                                  uintptr_t *out_len);
+
+/**
+ * Extracts an archive member with an unambiguous status code.
+ *
+ * Returns 0 and an owned buffer on success (including empty files), 1 for a
+ * missing path, or -1 for an error. Release a successful buffer using
+ * [`crate::bethkit_bytes_free`] and its exact length. Valid outputs are
+ * initialized to null/zero before validation; not-found leaves the last error unchanged.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for null pointers, invalid UTF-8,
+ * extraction errors, or an internal panic.
+ *
+ * # Safety
+ *
+ * `archive` must be live, `path` must be NUL-terminated, and outputs must
+ * point to separate writable pointer/length slots. The archive is borrowed.
+ */
+int32_t bethkit_archive_extract_status(const struct BethkitArchive *archive,
+                                       const char *path,
+                                       uint8_t **out_data,
+                                       uintptr_t *out_len);
 
 /**
  * Extracts the file at virtual `path` from `archive` and writes it to
@@ -923,6 +996,8 @@ void bethkit_plugin_cache_free(struct BethkitPluginCache *cache);
  *
  * This function **takes ownership** of `plugin`.  The caller must not use
  * or free `plugin` after this call.
+ * A valid nonnull plugin is consumed on every return path, including null
+ * cache/name, invalid UTF-8, exhausted load-order slots, and internal errors.
  *
  * Returns 0 on success or -1 on error.
  *
@@ -935,7 +1010,13 @@ void bethkit_plugin_cache_free(struct BethkitPluginCache *cache);
  * # Errors
  *
  * Returns -1 and sets the last error if `cache`, `name`, or `plugin` is
- * null, or `name` contains invalid UTF-8.
+ * null, `name` contains invalid UTF-8, the load order is full, or a panic occurs.
+ *
+ * # Safety
+ *
+ * `plugin`, if nonnull, must be an owned live handle that has not been
+ * transferred before. `cache` must be exclusively borrowed and `name`
+ * must be a readable NUL-terminated string when they are nonnull.
  */
 int32_t bethkit_plugin_cache_add(struct BethkitPluginCache *cache,
                                  const char *name,
@@ -957,6 +1038,8 @@ uintptr_t bethkit_plugin_cache_record_count(const struct BethkitPluginCache *cac
 
 /**
  * Resolves a global FormID (plugin name + object ID) to the winning record.
+ *
+ * Plugin filenames are matched case-insensitively using the core's canonical form.
  *
  * Returns a borrowed pointer to the record on success, or null if not found.
  * The returned pointer is valid until the cache is freed.
@@ -1108,6 +1191,9 @@ uintptr_t bethkit_load_order_len(const struct BethkitLoadOrder *lo);
  * Resolves `form_id` (as seen in `source_plugin`) to a
  * [`BethkitGlobalFormId`] and writes it into `*out`.
  *
+ * This compatibility endpoint assumes no masters. For plugins with masters,
+ * use [`bethkit_load_order_resolve_with_plugin`]. Names are returned lowercase.
+ *
  * Returns 0 on success, or -1 if the FormID cannot be resolved (e.g.
  * master index out of range).
  *
@@ -1129,6 +1215,114 @@ int32_t bethkit_load_order_resolve(const struct BethkitLoadOrder *lo,
                                    uint32_t form_id,
                                    const char *source_plugin,
                                    struct BethkitGlobalFormId *out);
+
+/**
+ * Resolves a file-local FormID using the source plugin's ordered masters.
+ *
+ * Borrows `lo` and `plugin`; `source_plugin` is the source filename. Writes
+ * `out` and returns 0 on success. Its name is borrowed until `lo` is freed.
+ *
+ * # Errors
+ *
+ * Returns -1 for null pointers, invalid UTF-8, unregistered source or owner,
+ * invalid master indexes, or an internal panic. The output remains unchanged.
+ *
+ * # Safety
+ *
+ * Handles must be live, `source_plugin` must be a readable NUL-terminated
+ * string, and `out` must point to writable storage for one global ID.
+ */
+int32_t bethkit_load_order_resolve_with_plugin(const struct BethkitLoadOrder *lo,
+                                               uint32_t form_id,
+                                               const char *source_plugin,
+                                               const struct BethkitPlugin *plugin,
+                                               struct BethkitGlobalFormId *out);
+
+/**
+ * Copies a plugin into an independently owned patch session.
+ *
+ * Borrows `plugin` only during this call. Returns an owned handle to free with
+ * [`bethkit_plugin_patcher_free`], or null on failure.
+ *
+ * # Errors
+ *
+ * Returns null and sets the last error for a null plugin, parse errors, or panics.
+ *
+ * # Safety
+ *
+ * `plugin` must be a live borrowed plugin handle.
+ */
+struct BethkitPluginPatcher *bethkit_plugin_patcher_new(const struct BethkitPlugin *plugin);
+
+/**
+ * Frees a patch session. A null pointer is a no-op.
+ *
+ * # Safety
+ *
+ * A nonnull `patcher` must be an owned handle from
+ * [`bethkit_plugin_patcher_new`] that has not already been freed.
+ */
+void bethkit_plugin_patcher_free(struct BethkitPluginPatcher *patcher);
+
+/**
+ * Copies a writable record as the replacement for an existing `form_id`.
+ *
+ * Returns 0 on success. Borrows both handles without consuming them. The
+ * replacement must retain the original FormID and record signature. Repeated
+ * calls for the same ID replace the previous edit. Compressed input flags are
+ * cleared because writable payloads are serialized uncompressed.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for null handles, a missing source record,
+ * mismatching identity/signature, unsupported source games, or panics.
+ *
+ * # Safety
+ *
+ * `patcher` must be live and exclusively borrowed. `record` must be a live
+ * writable record and must not alias `patcher`.
+ */
+int32_t bethkit_plugin_patcher_replace_record(struct BethkitPluginPatcher *patcher,
+                                              uint32_t form_id,
+                                              const struct BethkitWritableRecord *record);
+
+/**
+ * Serializes a patch session into an owned byte buffer without consuming it.
+ *
+ * Returns 0 on success or -1 on failure. Free the successful buffer using
+ * [`crate::bethkit_bytes_free`] with the exact returned length. Valid outputs
+ * are initialized to null/zero before validation.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for null pointers, encoding errors, or panics.
+ *
+ * # Safety
+ *
+ * `patcher` must be a live borrowed handle. Outputs must point to distinct
+ * writable pointer and length slots without aliasing the handle.
+ */
+int32_t bethkit_plugin_patcher_write_to_bytes(const struct BethkitPluginPatcher *patcher,
+                                              uint8_t **out_data,
+                                              uintptr_t *out_len);
+
+/**
+ * Serializes a patch session to a destination file without consuming it.
+ *
+ * Returns 0 on success. The session owns its input bytes, so overwriting the
+ * original path cannot invalidate it. The destination is replaced, not appended.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for null arguments, invalid UTF-8,
+ * serialization or file I/O errors, or panics.
+ *
+ * # Safety
+ *
+ * `patcher` must be a live borrowed handle. `path` must be NUL-terminated UTF-8.
+ */
+int32_t bethkit_plugin_patcher_write_to_file(const struct BethkitPluginPatcher *patcher,
+                                             const char *path);
 
 /**
  * Opens a plugin file from `path` for the specified `game`.
@@ -1305,10 +1499,8 @@ uint16_t bethkit_record_form_version(const BethkitRecord *record);
  * Returns a pointer to the NUL-terminated editor ID (EDID subrecord) of
  * `record`, or null if the record has no EDID.
  *
- * The returned string is heap-allocated for this call and remains valid only
- * until this function is called again for the same record (or until the
- * plugin is freed).  For long-lived access, the caller should copy the
- * string.
+ * The returned string is independently owned and must be freed with
+ * [`bethkit_record_editor_id_free`], even after its plugin is freed.
  *
  * Returns null on error (null record, I/O error, or encoding error).
  *
@@ -1320,14 +1512,32 @@ uint16_t bethkit_record_form_version(const BethkitRecord *record);
 const char *bethkit_record_editor_id(const BethkitRecord *record);
 
 /**
+ * Reads an editor ID, distinguishing a missing EDID from a decoding error.
+ *
+ * Returns 0 and an owned string, 1 if absent, or -1 on error. Release the
+ * result using [`bethkit_record_editor_id_free`]. A valid `out` is initialized
+ * to null before validation. Not-found does not change the last error.
+ *
+ * # Errors
+ *
+ * Returns -1 for null arguments, decoding errors, interior NULs, or panics.
+ *
+ * # Safety
+ *
+ * `record` must be a live borrowed record. `out` must point to writable
+ * pointer storage that does not alias the record.
+ */
+int32_t bethkit_record_editor_id_status(const BethkitRecord *record, char **out);
+
+/**
  * Frees an editor ID string previously returned by [`bethkit_record_editor_id`].
  *
  * Passing a null pointer is a no-op.
  *
  * # Safety
  *
- * `ptr` must have been returned by [`bethkit_record_editor_id`] and not yet
- * freed.
+ * `ptr` must have been returned by [`bethkit_record_editor_id`] or
+ * [`bethkit_record_editor_id_status`] and not yet freed.
  */
 void bethkit_record_editor_id_free(char *ptr);
 
@@ -1512,6 +1722,78 @@ struct BethkitSchemaPackage *bethkit_schema_package_open(const char *path);
 void bethkit_schema_package_free(struct BethkitSchemaPackage *package);
 
 /**
+ * Returns an owned UTF-8 JSON representation of the package manifest.
+ *
+ * `package` is borrowed for this call. Free the result with [`bethkit_string_free`].
+ * Field names and enum values match the serialized schema manifest.
+ *
+ * # Errors
+ *
+ * Returns null and sets the last error for a null package or serialization failure.
+ *
+ * # Safety
+ *
+ * A non-null `package` must point to a live package handle.
+ */
+char *bethkit_schema_package_manifest_json(const struct BethkitSchemaPackage *package);
+
+/**
+ * Returns an owned JSON document containing the complete serializable schema graph.
+ *
+ * The document contains `format_version` (1), `manifest`, `records`,
+ * `callback_bindings`, `condition_function_table`, and `payload_sha256`.
+ * Schema signatures retain their four-byte JSON array representation. Node order
+ * matches the package and serialization is deterministic for the same package.
+ * Free the returned string with [`bethkit_string_free`].
+ *
+ * # Errors
+ *
+ * Returns null and sets the last error for a null package or serialization failure.
+ *
+ * # Safety
+ *
+ * A non-null `package` must point to a live package handle.
+ */
+char *bethkit_schema_package_graph_json(const struct BethkitSchemaPackage *package);
+
+/**
+ * Frees an owned string returned by a function that names this release function.
+ *
+ * Passing null is a no-op. The pointer becomes invalid after this call.
+ *
+ * # Safety
+ *
+ * `ptr` must be null or an allocation returned by a compatible Bethkit function
+ * that has not already been freed. Borrowed strings must never be passed here.
+ */
+void bethkit_string_free(char *ptr);
+
+/**
+ * Returns structured validation diagnostics as an owned UTF-8 JSON document.
+ *
+ * `context` and `record` are borrowed for this call. Set `localized` from the
+ * containing plugin. `mode` is 0 for strict validation or 1 for xEdit-compatible
+ * missing-required-field warnings. Free the result with [`bethkit_string_free`].
+ * The document contains `format_version` (1), `has_errors`, and `diagnostics`.
+ * Each diagnostic includes severity, code, message, record_signature, form_id,
+ * and nullable node_id, path, and span. Severity and code use snake_case strings.
+ *
+ * # Errors
+ *
+ * Returns null and sets the last error for null handles, an unsupported mode,
+ * a missing record schema, or serialization failure. Record validation errors
+ * are reported in the JSON document, not as an API failure.
+ *
+ * # Safety
+ *
+ * Both non-null handles must remain valid for this call.
+ */
+char *bethkit_semantic_validate_json(const struct BethkitSemanticContext *context,
+                                     const BethkitRecord *record,
+                                     bool localized,
+                                     uint32_t mode);
+
+/**
  * Creates a semantic context for `package` and the built-in decoders.
  */
 struct BethkitSemanticContext *bethkit_semantic_context_new(const struct BethkitSchemaPackage *package);
@@ -1592,10 +1874,12 @@ int32_t bethkit_record_editor_remove(struct BethkitRecordEditor *editor,
                                      uintptr_t occurrence);
 
 /**
- * Consumes an editor and returns an owned writable record.
+ * Consumes an editor's contents and returns an owned writable record.
  *
  * The returned record must be freed with `bethkit_writable_record_free` or
- * transferred to a writable group.
+ * transferred to a writable group. The editor handle itself remains allocated
+ * and must still be freed with [`bethkit_record_editor_free`]. Further editing
+ * or finishing calls fail because its contents have already been consumed.
  */
 struct BethkitWritableRecord *bethkit_record_editor_finish(struct BethkitRecordEditor *editor);
 
@@ -1613,13 +1897,18 @@ struct BethkitWritableRecord *bethkit_record_editor_finish(struct BethkitRecordE
  *
  * # Arguments
  *
- * * `record`    — Record to inspect. Borrows.
- * * `sig`       — 4-byte record signature used for schema lookup. Borrows.
- * * `localized` — Whether the parent plugin is localized.
+ * * `context` - Semantic context used to decode the record. Borrows.
+ * * `record` - Record to inspect. Borrows.
+ * * `localized` - Whether the parent plugin is localized.
  *
  * # Errors
  *
  * Returns null and sets the last error if a handle is null or decoding fails.
+ *
+ * # Safety
+ *
+ * Both handles must remain valid for this call. The returned snapshot owns all
+ * decoded data and does not retain either handle.
  */
 struct BethkitRecordView *bethkit_record_view_new(const struct BethkitSemanticContext *context,
                                                   const BethkitRecord *record,
@@ -1656,6 +1945,46 @@ uintptr_t bethkit_record_view_field_count(const struct BethkitRecordView *view);
  */
 const struct BethkitNamedField *bethkit_record_view_field_get(const struct BethkitRecordView *view,
                                                               uintptr_t index);
+
+/**
+ * Copies the metadata for top-level field `index` into caller-owned `out`.
+ *
+ * Returns 0 on success. Strings in `out` are borrowed from `view` and remain
+ * valid until the view is freed. The output remains unchanged on failure.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for a null pointer or an invalid index.
+ *
+ * # Safety
+ *
+ * `view` must be a live view and `out` must point to writable, aligned storage
+ * for one [`BethkitFieldMetadata`].
+ */
+int32_t bethkit_record_view_field_metadata(const struct BethkitRecordView *view,
+                                           uintptr_t index,
+                                           struct BethkitFieldMetadata *out);
+
+/**
+ * Copies metadata for nested field `index` into caller-owned `out`.
+ *
+ * Returns 0 on success. Paths retain their schema identity and union selection;
+ * occurrence, provenance, and subrecord signature identify the containing
+ * top-level field. Array positions are represented by traversal of the value
+ * tree. Strings belong to the owning view. Output remains unchanged on failure.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for a null pointer or an invalid index.
+ *
+ * # Safety
+ *
+ * `entries` and its owning view must remain alive. `out` must point to writable,
+ * aligned storage for one [`BethkitFieldMetadata`].
+ */
+int32_t bethkit_field_entries_metadata(const struct BethkitFieldEntries *entries,
+                                       uintptr_t index,
+                                       struct BethkitFieldMetadata *out);
 
 /**
  * Returns the number of entries in a struct field list.
@@ -1718,6 +2047,100 @@ const struct BethkitFieldValue *bethkit_field_values_get(const struct BethkitFie
  * Passing a null pointer is a no-op.
  */
 void bethkit_field_values_free(struct BethkitFieldValues *values);
+
+/**
+ * Returns an owned, structurally addressed snapshot as a UTF-8 JSON document.
+ *
+ * Borrow `context` and `record` for this call and set `localized` from the plugin.
+ * Free the result with `bethkit_string_free`. The document contains version 1,
+ * schema and structure hashes, record identity, and ordered fields. Every value,
+ * including array items, carries its exact native address.
+ *
+ * # Errors
+ *
+ * Returns null and sets the last error for null handles, decoding failure, or
+ * serialization failure.
+ *
+ * # Safety
+ *
+ * Non-null handles must remain valid for this call.
+ */
+char *bethkit_semantic_snapshot_json(const struct BethkitSemanticContext *context,
+                                     const BethkitRecord *record,
+                                     bool localized);
+
+/**
+ * Returns an owned JSON snapshot of an editor's current normalized record state.
+ *
+ * Free the result with `bethkit_string_free`. Obtain fresh addresses after a
+ * structural edit; addresses from before after-load normalization may be stale.
+ *
+ * # Errors
+ *
+ * Returns null and sets the last error for null or consumed editors, decoding
+ * failure, or serialization failure.
+ *
+ * # Safety
+ *
+ * A non-null editor must remain valid for this call.
+ */
+char *bethkit_record_editor_snapshot_json(const struct BethkitRecordEditor *editor);
+
+/**
+ * Replaces the exact value selected by a native snapshot address.
+ *
+ * Both JSON strings are borrowed NUL-terminated UTF-8. `value_json` uses the
+ * snapshot's tagged value representation; extra snapshot metadata is accepted.
+ * Returns 0 on success; the editor retains ownership of all copied values.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for invalid JSON, a null or consumed editor,
+ * a stale address, or a schema-invalid edit. Failed edits leave the editor unchanged.
+ *
+ * # Safety
+ *
+ * The editor must be live and both strings must be valid for this call.
+ */
+int32_t bethkit_record_editor_set_at_json(struct BethkitRecordEditor *editor,
+                                          const char *address_json,
+                                          const char *value_json);
+
+/**
+ * Inserts a value before an array item or appends to an addressed array.
+ *
+ * A whole non-array subrecord address inserts a same-path occurrence before it
+ * when grammar permits. Both JSON strings are borrowed. Returns 0 on success.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for malformed JSON, null or consumed handles,
+ * stale addresses, or invalid insertion. The editor remains unchanged on failure.
+ *
+ * # Safety
+ *
+ * The editor and NUL-terminated UTF-8 strings must remain valid for this call.
+ */
+int32_t bethkit_record_editor_insert_at_json(struct BethkitRecordEditor *editor,
+                                             const char *address_json,
+                                             const char *value_json);
+
+/**
+ * Removes an addressed subrecord, array item, or optional packed member.
+ *
+ * `address_json` is borrowed NUL-terminated UTF-8. Returns 0 on success.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for invalid JSON, stale addresses, a null or
+ * consumed editor, or schema-invalid removal. Failure leaves the editor unchanged.
+ *
+ * # Safety
+ *
+ * The editor and address string must remain valid for this call.
+ */
+int32_t bethkit_record_editor_remove_at_json(struct BethkitRecordEditor *editor,
+                                             const char *address_json);
 
 /**
  * Creates a new, empty string table for the given `kind`.
@@ -1876,6 +2299,83 @@ int32_t bethkit_string_table_write_to_file(const struct BethkitStringTable *st, 
 struct BethkitLocalizationSet *bethkit_localization_set_new(void);
 
 /**
+ * Copies all string payloads into an independent, owned localization set.
+ *
+ * Borrows `ls` during the call. The returned handle must be freed with
+ * [`bethkit_localization_set_free`]. Later mutations affect only the copy.
+ *
+ * # Errors
+ *
+ * Returns null and sets the last error for a null handle or an internal panic.
+ *
+ * # Safety
+ *
+ * `ls` must be a live borrowed localization-set handle.
+ */
+struct BethkitLocalizationSet *bethkit_localization_set_clone(const struct BethkitLocalizationSet *ls);
+
+/**
+ * Inserts a payload under a fresh nonzero ID in the selected table.
+ *
+ * Returns 0 and writes the assigned ID to `out_id`, or -1 without modifying
+ * the table or output on failure. Existing IDs are never overwritten, including
+ * when the table already contains `UINT32_MAX`. Borrows all pointers.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for null pointers, exhausted IDs, or panics.
+ *
+ * # Safety
+ *
+ * `ls` must be a live exclusively borrowed set. `data` must point to `len`
+ * readable bytes. `out_id` must be writable and must not alias the set or data.
+ */
+int32_t bethkit_localization_set_insert_new(struct BethkitLocalizationSet *ls,
+                                            enum BethkitStringFileKind kind,
+                                            const uint8_t *data,
+                                            uintptr_t len,
+                                            uint32_t *out_id);
+
+/**
+ * Removes an entry from a borrowed localization set.
+ *
+ * Returns 0 if removed, 1 if absent, or -1 on error. Does not remove references
+ * from plugins; callers must ensure no live field still uses the entry.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for a null handle or an internal panic.
+ *
+ * # Safety
+ *
+ * `ls` must be a live exclusively borrowed localization set.
+ */
+int32_t bethkit_localization_set_remove(struct BethkitLocalizationSet *ls,
+                                        enum BethkitStringFileKind kind,
+                                        uint32_t id);
+
+/**
+ * Serializes one selected table into an independently owned byte buffer.
+ *
+ * Returns 0 on success or -1 on failure. Release the result with
+ * [`crate::bethkit_bytes_free`] and the exact returned length. Outputs are
+ * initialized to null/zero before handle validation; the set is not consumed.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for null pointers, encoding errors, or panics.
+ *
+ * # Safety
+ *
+ * `ls` must be a live borrowed set. Outputs must be distinct writable slots
+ * that do not alias the set.
+ */
+int32_t bethkit_localization_set_table_to_bytes(const struct BethkitLocalizationSet *ls,
+                                                enum BethkitStringFileKind kind,
+                                                uint8_t **out_data,
+                                                uintptr_t *out_len);
+
+/**
  * Opens and parses the three sibling string tables for `plugin_path` and
  * `language`.
  *
@@ -1991,6 +2491,54 @@ struct BethkitPluginWriter *bethkit_plugin_writer_new(enum BethkitGame game, flo
  * Frees a plugin writer handle.  Passing a null pointer is a no-op.
  */
 void bethkit_plugin_writer_free(struct BethkitPluginWriter *pw);
+
+/**
+ * Appends a master filename to a borrowed plugin writer.
+ *
+ * Returns 0 on success. The filename is copied; neither pointer is consumed.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for null pointers, invalid UTF-8, or panics.
+ *
+ * # Safety
+ *
+ * `pw` must be a live exclusively borrowed writer. `name` must point to a
+ * readable NUL-terminated UTF-8 filename.
+ */
+int32_t bethkit_plugin_writer_add_master(struct BethkitPluginWriter *pw, const char *name);
+
+/**
+ * Replaces a borrowed plugin writer's description with a copied string.
+ *
+ * Returns 0 on success. Neither pointer is consumed.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for null pointers, invalid UTF-8, or panics.
+ *
+ * # Safety
+ *
+ * `pw` must be a live exclusively borrowed writer. `description` must point
+ * to a readable NUL-terminated UTF-8 string.
+ */
+int32_t bethkit_plugin_writer_set_description(struct BethkitPluginWriter *pw,
+                                              const char *description);
+
+/**
+ * Sets the localized-plugin header flag on a borrowed writer.
+ *
+ * Returns 0 on success. This does not convert record payloads or string tables.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for a null writer or an internal panic.
+ *
+ * # Safety
+ *
+ * `pw` must be a live exclusively borrowed writer.
+ */
+int32_t bethkit_plugin_writer_set_localized(struct BethkitPluginWriter *pw, bool localized);
 
 /**
  * Adds a top-level group to the plugin writer.

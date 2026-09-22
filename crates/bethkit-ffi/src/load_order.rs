@@ -17,6 +17,7 @@ use std::ffi::c_char;
 use bethkit_core::LoadOrder;
 
 use crate::error::FfiError;
+use crate::plugin::BethkitPlugin;
 use crate::types::BethkitPluginKind;
 use crate::{cstr_to_str, ffi_try, null_check, set_last_error};
 
@@ -100,6 +101,7 @@ pub extern "C" fn bethkit_load_order_push(
 
     // Intern a stable CString so resolve can return borrowed plugin_name ptrs.
     let sanitized: Vec<u8> = name_str
+        .to_lowercase()
         .bytes()
         .map(|b| if b == 0 { b'?' } else { b })
         .collect();
@@ -120,6 +122,9 @@ pub extern "C" fn bethkit_load_order_len(lo: *const BethkitLoadOrder) -> usize {
 
 /// Resolves `form_id` (as seen in `source_plugin`) to a
 /// [`BethkitGlobalFormId`] and writes it into `*out`.
+///
+/// This compatibility endpoint assumes no masters. For plugins with masters,
+/// use [`bethkit_load_order_resolve_with_plugin`]. Names are returned lowercase.
 ///
 /// Returns 0 on success, or -1 if the FormID cannot be resolved (e.g.
 /// master index out of range).
@@ -160,9 +165,7 @@ pub extern "C" fn bethkit_load_order_resolve(
     // SAFETY: lo is non-null.
     let handle = unsafe { &*lo };
 
-    // The LoadOrder::resolve method requires the list of masters from the
-    // source plugin, which we do not have here. Resolve with empty masters
-    // for now — the caller is expected to pass a top-level plugin name.
+    // This compatibility endpoint assumes a source plugin with no masters.
     let gfid = match handle
         .inner
         .resolve(bethkit_core::FormId(form_id), src, &[])
@@ -182,8 +185,11 @@ pub extern "C" fn bethkit_load_order_resolve(
         .name_cstrings
         .iter()
         .find(|cs| cs.to_str().ok() == Some(gfid.plugin_name.as_str()))
-        .map(|cs| cs.as_ptr())
-        .unwrap_or(std::ptr::null());
+        .map(|cs| cs.as_ptr());
+    let Some(name_ptr) = name_ptr else {
+        set_last_error("bethkit_load_order_resolve: owner is not registered in the load order");
+        return -1;
+    };
 
     // SAFETY: out is non-null.
     unsafe {
@@ -193,4 +199,144 @@ pub extern "C" fn bethkit_load_order_resolve(
         };
     }
     0
+}
+
+/// Resolves a file-local FormID using the source plugin's ordered masters.
+///
+/// Borrows `lo` and `plugin`; `source_plugin` is the source filename. Writes
+/// `out` and returns 0 on success. Its name is borrowed until `lo` is freed.
+///
+/// # Errors
+///
+/// Returns -1 for null pointers, invalid UTF-8, unregistered source or owner,
+/// invalid master indexes, or an internal panic. The output remains unchanged.
+///
+/// # Safety
+///
+/// Handles must be live, `source_plugin` must be a readable NUL-terminated
+/// string, and `out` must point to writable storage for one global ID.
+#[no_mangle]
+pub extern "C" fn bethkit_load_order_resolve_with_plugin(
+    lo: *const BethkitLoadOrder,
+    form_id: u32,
+    source_plugin: *const c_char,
+    plugin: *const BethkitPlugin,
+    out: *mut BethkitGlobalFormId,
+) -> i32 {
+    null_check!(lo, "bethkit_load_order_resolve_with_plugin", -1);
+    null_check!(plugin, "bethkit_load_order_resolve_with_plugin/plugin", -1);
+    null_check!(
+        source_plugin,
+        "bethkit_load_order_resolve_with_plugin/source",
+        -1
+    );
+    null_check!(out, "bethkit_load_order_resolve_with_plugin/out", -1);
+    let Some(source) = cstr_to_str(source_plugin, "bethkit_load_order_resolve_with_plugin") else {
+        return -1;
+    };
+    let resolved = ffi_try!(
+        (|| {
+            // SAFETY: handles are live and borrowed for the duration of this call.
+            let (handle, source_handle) = unsafe { (&*lo, &*plugin) };
+            let invalid = || FfiError::InvalidArgument {
+                context: "load-order FormID resolution",
+                message: format!("cannot resolve {form_id:#010x} from '{source}'"),
+            };
+            let canonical = source.to_lowercase();
+            if !handle
+                .inner
+                .entries()
+                .iter()
+                .any(|entry| entry.name == canonical)
+            {
+                return Err(invalid());
+            }
+            let global = handle
+                .inner
+                .resolve(
+                    bethkit_core::FormId(form_id),
+                    source,
+                    source_handle.inner.masters(),
+                )
+                .ok_or_else(invalid)?;
+            let name = handle
+                .name_cstrings
+                .iter()
+                .find(|name| name.as_bytes() == global.plugin_name.as_bytes())
+                .ok_or_else(invalid)?;
+            Ok::<_, FfiError>(BethkitGlobalFormId {
+                plugin_name: name.as_ptr(),
+                object_id: global.object_id,
+            })
+        })(),
+        -1
+    );
+    // SAFETY: out is valid writable storage and does not alias either handle.
+    unsafe { *out = resolved };
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CStr;
+
+    use bethkit_core::{GameContext, PluginWriter};
+
+    use super::*;
+    use crate::plugin::{bethkit_plugin_free, bethkit_plugin_open_from_bytes};
+    use crate::types::BethkitGame;
+
+    /// Checks canonical names and file-local master and source indexes.
+    #[test]
+    fn resolves_master_and_source_names() -> Result<(), Box<dyn std::error::Error>> {
+        let mut writer = PluginWriter::new(GameContext::sse(), 1.7);
+        writer.add_master("Skyrim.esm");
+        let bytes = writer.write_to_vec()?;
+        let plugin =
+            bethkit_plugin_open_from_bytes(bytes.as_ptr(), bytes.len(), BethkitGame::SkyrimSe);
+        assert!(!plugin.is_null());
+        let lo = bethkit_load_order_new();
+        assert_eq!(
+            bethkit_load_order_push(lo, c"Skyrim.esm".as_ptr(), BethkitPluginKind::Full),
+            0
+        );
+        assert_eq!(
+            bethkit_load_order_push(lo, c"MyMod.esp".as_ptr(), BethkitPluginKind::Full),
+            0
+        );
+        let mut result = BethkitGlobalFormId {
+            plugin_name: std::ptr::null(),
+            object_id: 0,
+        };
+        for (form_id, expected) in [(0x1234, "skyrim.esm"), (0x0100_1234, "mymod.esp")] {
+            assert_eq!(
+                bethkit_load_order_resolve_with_plugin(
+                    lo,
+                    form_id,
+                    c"MYMOD.ESP".as_ptr(),
+                    plugin,
+                    &mut result
+                ),
+                0
+            );
+            // SAFETY: result refers to the still-live load order's interned C string.
+            assert_eq!(
+                unsafe { CStr::from_ptr(result.plugin_name) }.to_str()?,
+                expected
+            );
+            assert_eq!(result.object_id, 0x1234);
+        }
+        assert_eq!(
+            bethkit_load_order_resolve(lo, 0x1234, c"Skyrim.esm".as_ptr(), &mut result),
+            0
+        );
+        assert!(!result.plugin_name.is_null());
+        assert_eq!(
+            bethkit_load_order_resolve(lo, 0x1234, c"Missing.esm".as_ptr(), &mut result),
+            -1
+        );
+        bethkit_plugin_free(plugin);
+        bethkit_load_order_free(lo);
+        Ok(())
+    }
 }

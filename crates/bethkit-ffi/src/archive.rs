@@ -111,23 +111,20 @@ pub extern "C" fn bethkit_archive_free(archive: *mut BethkitArchive) {
 #[no_mangle]
 pub extern "C" fn bethkit_archive_format_name(archive: *const BethkitArchive) -> *const c_char {
     null_check!(archive, "bethkit_archive_format_name", c"".as_ptr());
-    // SAFETY: archive is non-null.
-    let name = unsafe { &*archive }.0.format_name();
-    // SAFETY: format_name() returns a 'static str which is always NUL-terminated
-    // SAFETY: only when stored as a C string literal. We use as_ptr on a leaked
-    // SAFETY: CString backed by static data as a workaround.
-    // NOTE: format_name is 'static ASCII — safe to return its ptr directly if
-    // NOTE: we leak a CString once per unique value. Simpler: use a match.
-    static BSA: &[u8] = b"BSA\0";
-    static BA2_GNRL: &[u8] = b"BA2-GNRL\0";
-    static BA2_DX10: &[u8] = b"BA2-DX10\0";
-    static UNKNOWN: &[u8] = b"UNKNOWN\0";
-    match name {
-        "BSA" => BSA.as_ptr().cast(),
-        "BA2-GNRL" => BA2_GNRL.as_ptr().cast(),
-        "BA2-DX10" => BA2_DX10.as_ptr().cast(),
-        _ => UNKNOWN.as_ptr().cast(),
-    }
+    ffi_try!(
+        {
+            // SAFETY: archive is a live borrowed archive handle.
+            let name = unsafe { &*archive }.0.format_name();
+            let value = match name {
+                "BSA" | "BSA TES3" | "BSA TES4/FO3/SSE" => c"BSA",
+                "BA2-GNRL" | "BA2 GNRL" => c"BA2-GNRL",
+                "BA2-DX10" | "BA2 DX10" => c"BA2-DX10",
+                _ => c"UNKNOWN",
+            };
+            Ok::<_, FfiError>(value.as_ptr())
+        },
+        c"UNKNOWN".as_ptr()
+    )
 }
 
 /// Returns the number of files contained in `archive`.
@@ -249,41 +246,67 @@ pub extern "C" fn bethkit_archive_extract(
     path: *const c_char,
     out_len: *mut usize,
 ) -> *mut u8 {
-    null_check!(archive, "bethkit_archive_extract", std::ptr::null_mut());
-    null_check!(path, "bethkit_archive_extract/path", std::ptr::null_mut());
-    null_check!(
-        out_len,
-        "bethkit_archive_extract/out_len",
-        std::ptr::null_mut()
-    );
+    let mut data = std::ptr::null_mut();
+    bethkit_archive_extract_status(archive, path, &mut data, out_len);
+    data
+}
 
-    let path_str = match cstr_to_str(path, "bethkit_archive_extract") {
-        Some(s) => s,
-        None => return std::ptr::null_mut(),
-    };
-
-    // SAFETY: out_len is non-null (checked above); zero it before any early-return
-    // so the caller always reads a defined value.
+/// Extracts an archive member with an unambiguous status code.
+///
+/// Returns 0 and an owned buffer on success (including empty files), 1 for a
+/// missing path, or -1 for an error. Release a successful buffer using
+/// [`crate::bethkit_bytes_free`] and its exact length. Valid outputs are
+/// initialized to null/zero before validation; not-found leaves the last error unchanged.
+///
+/// # Errors
+///
+/// Returns -1 and sets the last error for null pointers, invalid UTF-8,
+/// extraction errors, or an internal panic.
+///
+/// # Safety
+///
+/// `archive` must be live, `path` must be NUL-terminated, and outputs must
+/// point to separate writable pointer/length slots. The archive is borrowed.
+#[no_mangle]
+pub extern "C" fn bethkit_archive_extract_status(
+    archive: *const BethkitArchive,
+    path: *const c_char,
+    out_data: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    null_check!(out_data, "bethkit_archive_extract_status/out_data", -1);
+    // SAFETY: out_data points to caller-owned writable pointer storage.
+    unsafe { *out_data = std::ptr::null_mut() };
+    null_check!(out_len, "bethkit_archive_extract_status/out_len", -1);
+    // SAFETY: out_len points to caller-owned writable length storage.
     unsafe { *out_len = 0 };
-
-    // SAFETY: archive is non-null.
-    let arc = unsafe { &*archive };
-    let result = match arc.0.extract(path_str) {
-        // Not found is not an error — return null without touching last_error.
-        None => return std::ptr::null_mut(),
-        Some(r) => r,
+    null_check!(archive, "bethkit_archive_extract_status/archive", -1);
+    null_check!(path, "bethkit_archive_extract_status/path", -1);
+    let Some(path_str) = cstr_to_str(path, "bethkit_archive_extract_status") else {
+        return -1;
     };
-
-    let cow = ffi_try!(result.map_err(FfiError::Bsa), std::ptr::null_mut());
-    let mut vec: Vec<u8> = cow.into_owned();
-    let len = vec.len();
-    vec.shrink_to_fit();
-    let ptr = vec.as_mut_ptr();
-    // Transfer ownership to the caller via Box<[u8]>.
-    std::mem::forget(vec);
-    // SAFETY: out_len is non-null.
-    unsafe { *out_len = len };
-    ptr
+    let extracted = ffi_try!(
+        {
+            // SAFETY: archive is live and borrowed for the duration of extraction.
+            let archive = unsafe { &*archive };
+            archive
+                .0
+                .extract(path_str)
+                .transpose()
+                .map(|value| value.map(|bytes| bytes.into_owned().into_boxed_slice()))
+                .map_err(FfiError::Bsa)
+        },
+        -1
+    );
+    let Some(bytes) = extracted else { return 1 };
+    let len = bytes.len();
+    let data = Box::into_raw(bytes).cast::<u8>();
+    // SAFETY: outputs are valid, distinct writable slots checked above.
+    unsafe {
+        *out_data = data;
+        *out_len = len;
+    }
+    0
 }
 
 /// Extracts the file at virtual `path` from `archive` and writes it to
@@ -702,5 +725,80 @@ pub extern "C" fn bethkit_ba2_dx10_writer_write_to(
             );
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use std::borrow::Cow;
+
+    use super::*;
+
+    /// Deterministic archive exposing empty, missing, and corrupt members.
+    struct StatusArchive(&'static str);
+
+    impl Archive for StatusArchive {
+        fn entries(&self) -> &[ArchiveEntry] {
+            &[]
+        }
+
+        fn extract(&self, path: &str) -> Option<bethkit_bsa::Result<Cow<'_, [u8]>>> {
+            match path {
+                "empty" => Some(Ok(Cow::Borrowed(&[]))),
+                "bad" => Some(Err(bethkit_bsa::BsaError::Corrupt(
+                    "invalid member".to_owned(),
+                ))),
+                _ => None,
+            }
+        }
+
+        fn format_name(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    /// Checks empty-file success, missing paths, extraction errors, and output initialization.
+    #[test]
+    fn extraction_status_is_unambiguous() -> Result<(), Box<dyn std::error::Error>> {
+        let archive = BethkitArchive(Box::new(StatusArchive("test")));
+        for (path, status) in [(c"empty", 0), (c"missing", 1), (c"bad", -1)] {
+            let mut data = std::ptr::dangling_mut();
+            let mut length = usize::MAX;
+            set_last_error("previous unrelated failure");
+            assert_eq!(
+                bethkit_archive_extract_status(&archive, path.as_ptr(), &mut data, &mut length),
+                status
+            );
+            assert_eq!(length, 0);
+            if status == 0 {
+                assert!(!data.is_null());
+                // SAFETY: successful empty extraction still returns an owned zero-length box.
+                unsafe { crate::bethkit_bytes_free(data, length) };
+            } else {
+                assert!(data.is_null());
+            }
+        }
+        Ok(())
+    }
+
+    /// Maps every actual Rust archive format name to the stable C ABI spelling.
+    #[test]
+    fn archive_format_names_match_core_variants() -> Result<(), Box<dyn std::error::Error>> {
+        for (native, expected) in [
+            ("BSA TES3", "BSA"),
+            ("BSA TES4/FO3/SSE", "BSA"),
+            ("BA2 GNRL", "BA2-GNRL"),
+            ("BA2 DX10", "BA2-DX10"),
+        ] {
+            let archive = BethkitArchive(Box::new(StatusArchive(native)));
+            let value = bethkit_archive_format_name(&archive);
+            drop(archive);
+            // SAFETY: the format-name API returns a nonnull static C string.
+            assert_eq!(
+                unsafe { std::ffi::CStr::from_ptr(value) }.to_str()?,
+                expected
+            );
+        }
+        Ok(())
     }
 }

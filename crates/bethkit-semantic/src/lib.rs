@@ -2,6 +2,7 @@
 //!
 //! Schema-guided semantic operations over losslessly parsed Bethesda plugins.
 
+mod address;
 mod analysis;
 mod cleaning;
 mod context;
@@ -15,6 +16,7 @@ mod validation;
 mod value;
 mod view;
 
+pub use address::{schema_hash_hex, structure_hash, FieldAddress, RepeatScope, ValueStep};
 pub use analysis::{
     analyze_conflicts, build_reference_graph, Conflict, ConflictClass, ConflictReport, PluginInput,
     ReferenceEdge, ReferenceGraph,

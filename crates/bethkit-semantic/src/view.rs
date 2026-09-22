@@ -23,10 +23,16 @@ use crate::{
 /// One decoded top-level record field.
 #[derive(Debug)]
 pub struct Field<'a> {
+    /// Source subrecord index in the containing record's ordered payload.
+    pub subrecord_index: usize,
+    /// Actual nested grammar-repeat occurrences containing this subrecord.
+    pub repeat_scopes: Vec<crate::RepeatScope>,
     /// Stable schema node identifier.
     pub node_id: bethkit_schema::SchemaNodeId,
     /// Stable schema path.
     pub path: String,
+    /// Effective selected payload path for a dynamic union, when available.
+    pub effective_path: Option<String>,
     /// Human-readable name.
     pub name: String,
     /// Source subrecord signature.
@@ -265,8 +271,11 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         sibling_values: &[],
                         array_indices: &[],
                     };
-                    let (value, consumed, _): (FieldValue<'record>, usize, Option<String>) =
-                        self.decode_node(payload, data, data, frame, &mut field_values)?;
+                    let (value, consumed, effective_path): (
+                        FieldValue<'record>,
+                        usize,
+                        Option<String>,
+                    ) = self.decode_node(payload, data, data, frame, &mut field_values)?;
                     if consumed != data.len() {
                         return Err(SemanticError::Decode {
                             path: payload.path.clone(),
@@ -277,8 +286,11 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         });
                     }
                     fields.push(Field {
+                        subrecord_index: index,
+                        repeat_scopes: grammar.repeat_scopes[index].clone(),
                         node_id: node.id,
                         path: node.path.clone(),
+                        effective_path,
                         name: node.name.clone(),
                         subrecord_signature: subrecord.signature,
                         occurrence,
@@ -297,6 +309,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     let data: &'record [u8] = subrecord.as_bytes();
                     let declared = grammar.declared_signatures.contains(&subrecord.signature);
                     fields.push(Field {
+                        subrecord_index: index,
+                        repeat_scopes: grammar.repeat_scopes[index].clone(),
                         node_id: bethkit_schema::SchemaNodeId(u32::MAX),
                         path: format!(
                             "{}.{}.{}",
@@ -304,6 +318,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             subrecord.signature,
                             signature_occurrence
                         ),
+                        effective_path: None,
                         name: if declared {
                             "Out-of-order known subrecord".to_owned()
                         } else {

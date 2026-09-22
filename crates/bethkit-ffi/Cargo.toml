@@ -13,6 +13,7 @@ bethkit-semantic = { path = "../bethkit-semantic" }
 bethkit-bsa  = { path = "../bethkit-bsa" }
 bethkit-io   = { path = "../bethkit-io" }
 thiserror    = { workspace = true }
+serde_json   = { workspace = true }
 
 [features]
 default = []

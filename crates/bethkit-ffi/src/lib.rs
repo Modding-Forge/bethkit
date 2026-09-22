@@ -26,6 +26,7 @@ mod cache;
 mod error;
 mod group;
 mod load_order;
+mod patcher;
 mod plugin;
 mod record;
 mod schema;

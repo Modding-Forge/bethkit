@@ -109,6 +109,7 @@ dependencies = [
  "bethkit-schema",
  "bethkit-semantic",
  "cbindgen",
+ "serde_json",
  "thiserror",
 ]
 
@@ -143,7 +144,9 @@ dependencies = [
  "bethkit-io",
  "bethkit-schema",
  "encoding_rs",
+ "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 

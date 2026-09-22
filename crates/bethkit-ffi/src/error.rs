@@ -53,6 +53,23 @@ pub extern "C" fn bethkit_last_error() -> *const c_char {
 /// All errors that can arise in FFI function implementations.
 #[derive(Debug, thiserror::Error)]
 pub enum FfiError {
+    /// An argument failed validation before the requested operation began.
+    #[error("invalid argument in {context}: {message}")]
+    InvalidArgument {
+        /// Name of the operation validating the argument.
+        context: &'static str,
+        /// Description of the invalid input.
+        message: String,
+    },
+
+    /// Serialization or deserialization of an ABI JSON document failed.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// A schema-guided operation failed.
+    #[error("semantic error: {0}")]
+    Semantic(#[from] bethkit_semantic::SemanticError),
+
     /// A null pointer was passed to an FFI function that requires a valid pointer.
     #[error("null pointer passed to FFI function: {context}")]
     NullPointer { context: &'static str },

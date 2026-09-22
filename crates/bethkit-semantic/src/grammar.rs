@@ -10,19 +10,13 @@ use bethkit_schema::{
     UnionSelector,
 };
 
-use crate::{Result, SemanticError};
+use crate::{RepeatScope, Result, SemanticError};
 
 pub(crate) struct GrammarMatch<'schema> {
     pub(crate) assignments: Vec<Option<&'schema SchemaNode>>,
     pub(crate) repeat_scopes: Vec<Vec<RepeatScope>>,
     pub(crate) declared_signatures: BTreeSet<Signature>,
     pub(crate) violations: Vec<GrammarViolation>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RepeatScope {
-    pub(crate) path: String,
-    pub(crate) occurrence: u32,
 }
 
 #[derive(Clone)]

@@ -207,9 +207,19 @@ pub extern "C" fn bethkit_string_table_insert_new(
     null_check!(st, "bethkit_string_table_insert_new", -1);
     null_check!(data, "bethkit_string_table_insert_new/data", -1);
     null_check!(out_id, "bethkit_string_table_insert_new/out_id", -1);
-    // SAFETY: st, data, and out_id are non-null; data is valid for len bytes.
-    let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
-    let id = unsafe { &mut *st }.0.insert_new(bytes);
+    let id = ffi_try!(
+        {
+            // SAFETY: data is valid for len bytes and copied before mutating st.
+            let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
+            // SAFETY: st is a live exclusively borrowed table.
+            unsafe { &mut *st }
+                .0
+                .try_insert_new(bytes)
+                .map_err(FfiError::Core)
+        },
+        -1
+    );
+    // SAFETY: out_id is writable caller-owned storage.
     unsafe { *out_id = id };
     0
 }
@@ -284,6 +294,177 @@ pub struct BethkitLocalizationSet(LocalizationSet);
 #[no_mangle]
 pub extern "C" fn bethkit_localization_set_new() -> *mut BethkitLocalizationSet {
     Box::into_raw(Box::new(BethkitLocalizationSet(LocalizationSet::new())))
+}
+
+/// Copies all string payloads into an independent, owned localization set.
+///
+/// Borrows `ls` during the call. The returned handle must be freed with
+/// [`bethkit_localization_set_free`]. Later mutations affect only the copy.
+///
+/// # Errors
+///
+/// Returns null and sets the last error for a null handle or an internal panic.
+///
+/// # Safety
+///
+/// `ls` must be a live borrowed localization-set handle.
+#[no_mangle]
+pub extern "C" fn bethkit_localization_set_clone(
+    ls: *const BethkitLocalizationSet,
+) -> *mut BethkitLocalizationSet {
+    null_check!(ls, "bethkit_localization_set_clone", std::ptr::null_mut());
+    ffi_try!(
+        {
+            // SAFETY: ls is a live borrowed localization set.
+            let source = &unsafe { &*ls }.0;
+            let mut copied = LocalizationSet::new();
+            for kind in [
+                bethkit_core::StringFileKind::Strings,
+                bethkit_core::StringFileKind::DLStrings,
+                bethkit_core::StringFileKind::ILStrings,
+            ] {
+                for (id, value) in source.table(kind).iter() {
+                    copied.set(kind, id, value.to_vec());
+                }
+            }
+            Ok::<_, FfiError>(Box::into_raw(Box::new(BethkitLocalizationSet(copied))))
+        },
+        std::ptr::null_mut()
+    )
+}
+
+/// Inserts a payload under a fresh nonzero ID in the selected table.
+///
+/// Returns 0 and writes the assigned ID to `out_id`, or -1 without modifying
+/// the table or output on failure. Existing IDs are never overwritten, including
+/// when the table already contains `UINT32_MAX`. Borrows all pointers.
+///
+/// # Errors
+///
+/// Returns -1 and sets the last error for null pointers, exhausted IDs, or panics.
+///
+/// # Safety
+///
+/// `ls` must be a live exclusively borrowed set. `data` must point to `len`
+/// readable bytes. `out_id` must be writable and must not alias the set or data.
+#[no_mangle]
+pub extern "C" fn bethkit_localization_set_insert_new(
+    ls: *mut BethkitLocalizationSet,
+    kind: BethkitStringFileKind,
+    data: *const u8,
+    len: usize,
+    out_id: *mut u32,
+) -> i32 {
+    null_check!(ls, "bethkit_localization_set_insert_new", -1);
+    null_check!(data, "bethkit_localization_set_insert_new/data", -1);
+    null_check!(out_id, "bethkit_localization_set_insert_new/out_id", -1);
+    let id = ffi_try!(
+        {
+            // SAFETY: data is readable for len bytes and copied before mutation.
+            let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
+            // SAFETY: ls is a live exclusively borrowed set.
+            unsafe { &mut *ls }
+                .0
+                .table_mut(string_kind_to_rust(kind))
+                .try_insert_new(bytes)
+                .map_err(FfiError::Core)
+        },
+        -1
+    );
+    // SAFETY: out_id is writable caller-owned storage.
+    unsafe { *out_id = id };
+    0
+}
+
+/// Removes an entry from a borrowed localization set.
+///
+/// Returns 0 if removed, 1 if absent, or -1 on error. Does not remove references
+/// from plugins; callers must ensure no live field still uses the entry.
+///
+/// # Errors
+///
+/// Returns -1 and sets the last error for a null handle or an internal panic.
+///
+/// # Safety
+///
+/// `ls` must be a live exclusively borrowed localization set.
+#[no_mangle]
+pub extern "C" fn bethkit_localization_set_remove(
+    ls: *mut BethkitLocalizationSet,
+    kind: BethkitStringFileKind,
+    id: u32,
+) -> i32 {
+    null_check!(ls, "bethkit_localization_set_remove", -1);
+    ffi_try!(
+        {
+            // SAFETY: ls is a live exclusively borrowed localization set.
+            let removed = unsafe { &mut *ls }
+                .0
+                .table_mut(string_kind_to_rust(kind))
+                .remove(id);
+            Ok::<_, FfiError>(if removed.is_some() { 0 } else { 1 })
+        },
+        -1
+    )
+}
+
+/// Serializes one selected table into an independently owned byte buffer.
+///
+/// Returns 0 on success or -1 on failure. Release the result with
+/// [`crate::bethkit_bytes_free`] and the exact returned length. Outputs are
+/// initialized to null/zero before handle validation; the set is not consumed.
+///
+/// # Errors
+///
+/// Returns -1 and sets the last error for null pointers, encoding errors, or panics.
+///
+/// # Safety
+///
+/// `ls` must be a live borrowed set. Outputs must be distinct writable slots
+/// that do not alias the set.
+#[no_mangle]
+pub extern "C" fn bethkit_localization_set_table_to_bytes(
+    ls: *const BethkitLocalizationSet,
+    kind: BethkitStringFileKind,
+    out_data: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    null_check!(
+        out_data,
+        "bethkit_localization_set_table_to_bytes/out_data",
+        -1
+    );
+    // SAFETY: out_data is writable pointer storage.
+    unsafe { *out_data = std::ptr::null_mut() };
+    null_check!(
+        out_len,
+        "bethkit_localization_set_table_to_bytes/out_len",
+        -1
+    );
+    // SAFETY: out_len is writable length storage.
+    unsafe { *out_len = 0 };
+    null_check!(ls, "bethkit_localization_set_table_to_bytes", -1);
+    let bytes = ffi_try!(
+        (|| {
+            let mut bytes = Vec::new();
+            // SAFETY: ls is live and borrowed for serialization.
+            unsafe { &*ls }
+                .0
+                .table(string_kind_to_rust(kind))
+                .write_to(&mut bytes)
+                .map_err(bethkit_io::IoError::from)?;
+            Ok::<_, FfiError>(bytes.into_boxed_slice())
+        })(),
+        -1
+    );
+    let length = bytes.len();
+    let pointer = Box::into_raw(bytes).cast::<u8>();
+    // SAFETY: both outputs are distinct caller-owned writable slots.
+    unsafe {
+        *out_data = pointer;
+        *out_len = length;
+    }
+    0
 }
 
 /// Opens and parses the three sibling string tables for `plugin_path` and
@@ -471,4 +652,68 @@ pub extern "C" fn bethkit_localization_set_write(
         -1
     );
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Checks independent clones and copy-on-write string IDs for every table format.
+    #[test]
+    fn cloned_tables_allocate_without_changing_shared_ids() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for kind in [
+            BethkitStringFileKind::Strings,
+            BethkitStringFileKind::DlStrings,
+            BethkitStringFileKind::IlStrings,
+        ] {
+            // given
+            let original = bethkit_localization_set_new();
+            assert!(!original.is_null());
+            assert_eq!(
+                bethkit_localization_set_set(original, kind, u32::MAX, b"shared".as_ptr(), 6),
+                0
+            );
+            let cloned = bethkit_localization_set_clone(original);
+            assert!(!cloned.is_null());
+            // when
+            let mut new_id = 0;
+            assert_eq!(
+                bethkit_localization_set_insert_new(cloned, kind, b"new".as_ptr(), 3, &mut new_id),
+                0
+            );
+            assert_eq!(new_id, 1);
+            let mut data = std::ptr::null_mut();
+            let mut length = 0;
+            assert_eq!(
+                bethkit_localization_set_table_to_bytes(cloned, kind, &mut data, &mut length),
+                0
+            );
+            // SAFETY: data is an owned buffer with exactly length initialized bytes.
+            let bytes = unsafe { std::slice::from_raw_parts(data, length) }.to_vec();
+            // SAFETY: this is the matching free of the successful owned export.
+            unsafe { crate::bethkit_bytes_free(data, length) };
+            assert_eq!(bethkit_localization_set_remove(cloned, kind, u32::MAX), 0);
+            assert_eq!(bethkit_localization_set_remove(cloned, kind, u32::MAX), 1);
+            // then
+            let restored = StringTable::from_bytes(&bytes, string_kind_to_rust(kind))?;
+            assert_eq!(restored.get(u32::MAX), Some(&b"shared"[..]));
+            assert_eq!(restored.get(new_id), Some(&b"new"[..]));
+            let mut original_len = 0;
+            let original_data =
+                bethkit_localization_set_get(original, kind, u32::MAX, &mut original_len);
+            assert_eq!(original_len, 6);
+            // SAFETY: the original set is still alive and has not been mutated.
+            assert_eq!(
+                unsafe { std::slice::from_raw_parts(original_data, original_len) },
+                b"shared"
+            );
+            assert!(
+                bethkit_localization_set_get(original, kind, new_id, &mut original_len).is_null()
+            );
+            bethkit_localization_set_free(cloned);
+            bethkit_localization_set_free(original);
+        }
+        Ok(())
+    }
 }

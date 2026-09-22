@@ -130,9 +130,9 @@ pub enum BethkitFieldValueKind {
 
 /// A typed FormID with its allowed target record-type signatures.
 ///
-/// `allowed_sigs` points to a static array of 4-byte signatures; the slice is
-/// `allowed_count` entries long.  The array lives in static memory and must
-/// never be freed by the caller.
+/// `allowed_sigs` points to an array of 4-byte signatures; the slice is
+/// `allowed_count` entries long. The owning record view retains the array
+/// until that view is freed. Never free it separately.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct BethkitTypedFormId {

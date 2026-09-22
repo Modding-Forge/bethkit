@@ -2,6 +2,9 @@
 //!
 //! Lossless schema-guided record editing.
 
+#[path = "editor_address.rs"]
+mod address;
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
@@ -14,10 +17,9 @@ use bethkit_schema::{
 use crate::handler::HandlerInvocationAccess;
 use crate::value::{float_to_raw, handler_to_owned_value};
 use crate::{
-    grammar::{interpret_writable, RepeatScope},
-    FieldValue, HandlerMutation, HandlerOutput, HandlerPhase, HandlerRecordContext,
-    OwnedFieldValue, ParsedEditValue, Result, SemanticContext, SemanticError,
-    SemanticHandlerRegistry,
+    grammar::interpret_writable, FieldValue, HandlerMutation, HandlerOutput, HandlerPhase,
+    HandlerRecordContext, OwnedFieldValue, ParsedEditValue, RepeatScope, Result, SemanticContext,
+    SemanticError, SemanticHandlerRegistry,
 };
 
 #[derive(Clone)]

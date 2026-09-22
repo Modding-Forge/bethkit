@@ -26,16 +26,18 @@
 //! Catalog, package, and semantic-context handles are owned and must be freed
 //! with their matching functions.
 
-use std::ffi::c_char;
+use std::ffi::{c_char, CString};
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::Arc;
 
 use bethkit_schema::{SchemaCatalog, SchemaPackage};
 use bethkit_semantic::{
-    DecoderRegistry, FieldValue, OwnedFieldValue, RecordEditor, SemanticContext,
+    DecoderRegistry, DiagnosticCode, DiagnosticSeverity, Field, FieldOrigin, FieldValue,
+    OwnedFieldValue, RecordEditor, SemanticContext, ValidationMode,
 };
 
+use crate::error::FfiError;
 use crate::record::BethkitRecord;
 use crate::types::{
     game_to_core, BethkitEnumVal, BethkitFieldValueKind, BethkitFlagsVal, BethkitGame,
@@ -43,6 +45,13 @@ use crate::types::{
 };
 use crate::writer::BethkitWritableRecord;
 use crate::{cstr_to_str, ffi_try, null_check, set_last_error, BethkitSlice};
+
+#[path = "schema_snapshot.rs"]
+mod snapshot;
+
+#[cfg(test)]
+#[path = "schema_tests.rs"]
+mod schema_tests;
 
 /// A decoded field value stored as a `#[repr(C)]` tagged union.
 ///
@@ -110,6 +119,32 @@ pub struct BethkitNamedField {
     pub value: BethkitFieldValue,
 }
 
+/// Stable identity and byte provenance for a decoded field.
+///
+/// String pointers are borrowed from the owning view and expire when it is freed.
+/// The layout of [`BethkitNamedField`] remains unchanged; retrieve this metadata
+/// with [`bethkit_record_view_field_metadata`] or [`bethkit_field_entries_metadata`].
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BethkitFieldMetadata {
+    /// Stable schema node identifier, or `UINT32_MAX` for an unknown subrecord.
+    pub node_id: u32,
+    /// Stable schema path, borrowed from the owning view.
+    pub path: *const c_char,
+    /// Selected union-node path, or null when no alternative path applies.
+    pub effective_path: *const c_char,
+    /// Zero-based top-level occurrence containing this field.
+    pub occurrence: usize,
+    /// Inclusive payload byte offset.
+    pub span_start: usize,
+    /// Exclusive payload byte offset.
+    pub span_end: usize,
+    /// Provenance: 0 schema, 1 unknown, 2 unmatched known, 3 custom decoder.
+    pub origin: u32,
+    /// Four-byte signature of the containing subrecord.
+    pub subrecord_signature: [u8; 4],
+}
+
 /// A heap-allocated list of named fields decoded from a struct field.
 ///
 /// Ownership depends on how this was obtained:
@@ -120,6 +155,7 @@ pub struct BethkitNamedField {
 ///   on it or a double-free will occur.
 pub struct BethkitFieldEntries {
     entries: Vec<BethkitNamedField>,
+    metadata: Vec<BethkitFieldMetadata>,
 }
 
 /// A heap-allocated list of field values decoded from an array field.
@@ -140,11 +176,16 @@ pub struct BethkitFieldValues {
 /// [`bethkit_record_view_free`].
 pub struct BethkitRecordView {
     fields: Vec<BethkitNamedField>,
-    // NOTE: string_arena is never read explicitly; it exists solely to keep
-    // NOTE: the CStrings alive (RAII). All `name` and `str_val` pointers in
-    // NOTE: `fields` point into this arena.
-    #[allow(dead_code)]
-    string_arena: Vec<std::ffi::CString>,
+    metadata: Vec<BethkitFieldMetadata>,
+    // The arena owns every leaf allocation referenced by the snapshot.
+    _storage: SnapshotStorage,
+}
+
+#[derive(Default)]
+struct SnapshotStorage {
+    strings: Vec<CString>,
+    bytes: Vec<Box<[u8]>>,
+    signatures: Vec<Box<[[u8; 4]]>>,
 }
 
 /// Owned catalog of schema packages.
@@ -229,6 +270,200 @@ pub extern "C" fn bethkit_schema_package_free(package: *mut BethkitSchemaPackage
         // SAFETY: package was produced by Box::into_raw in this module.
         drop(unsafe { Box::from_raw(package) });
     }
+}
+
+/// Returns an owned UTF-8 JSON representation of the package manifest.
+///
+/// `package` is borrowed for this call. Free the result with [`bethkit_string_free`].
+/// Field names and enum values match the serialized schema manifest.
+///
+/// # Errors
+///
+/// Returns null and sets the last error for a null package or serialization failure.
+///
+/// # Safety
+///
+/// A non-null `package` must point to a live package handle.
+#[no_mangle]
+pub extern "C" fn bethkit_schema_package_manifest_json(
+    package: *const BethkitSchemaPackage,
+) -> *mut c_char {
+    null_check!(
+        package,
+        "bethkit_schema_package_manifest_json",
+        std::ptr::null_mut()
+    );
+    ffi_try!(
+        (|| -> crate::Result<*mut c_char> {
+            // SAFETY: package is non-null and valid for this call by contract.
+            let package = unsafe { &*package };
+            owned_json(&serde_json::to_value(package.0.manifest())?)
+        })(),
+        std::ptr::null_mut()
+    )
+}
+
+/// Returns an owned JSON document containing the complete serializable schema graph.
+///
+/// The document contains `format_version` (1), `manifest`, `records`,
+/// `callback_bindings`, `condition_function_table`, and `payload_sha256`.
+/// Schema signatures retain their four-byte JSON array representation. Node order
+/// matches the package and serialization is deterministic for the same package.
+/// Free the returned string with [`bethkit_string_free`].
+///
+/// # Errors
+///
+/// Returns null and sets the last error for a null package or serialization failure.
+///
+/// # Safety
+///
+/// A non-null `package` must point to a live package handle.
+#[no_mangle]
+pub extern "C" fn bethkit_schema_package_graph_json(
+    package: *const BethkitSchemaPackage,
+) -> *mut c_char {
+    null_check!(
+        package,
+        "bethkit_schema_package_graph_json",
+        std::ptr::null_mut()
+    );
+    ffi_try!(
+        {
+            // SAFETY: package is non-null and valid for this call by contract.
+            let package = unsafe { &*package };
+            let hash = bethkit_semantic::schema_hash_hex(&package.0.payload_sha256());
+            owned_json(&serde_json::json!({
+                "format_version": 1,
+                "manifest": package.0.manifest(),
+                "records": package.0.records(),
+                "callback_bindings": package.0.callback_bindings(),
+                "condition_function_table": package.0.condition_function_table(),
+                "payload_sha256": hash,
+            }))
+        },
+        std::ptr::null_mut()
+    )
+}
+
+/// Frees an owned string returned by a function that names this release function.
+///
+/// Passing null is a no-op. The pointer becomes invalid after this call.
+///
+/// # Safety
+///
+/// `ptr` must be null or an allocation returned by a compatible Bethkit function
+/// that has not already been freed. Borrowed strings must never be passed here.
+#[no_mangle]
+pub unsafe extern "C" fn bethkit_string_free(ptr: *mut c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: ptr is an owned CString allocation by the caller contract.
+    drop(unsafe { CString::from_raw(ptr) });
+}
+
+fn owned_json(value: &serde_json::Value) -> crate::Result<*mut c_char> {
+    Ok(CString::new(serde_json::to_vec(value)?)?.into_raw())
+}
+
+/// Returns structured validation diagnostics as an owned UTF-8 JSON document.
+///
+/// `context` and `record` are borrowed for this call. Set `localized` from the
+/// containing plugin. `mode` is 0 for strict validation or 1 for xEdit-compatible
+/// missing-required-field warnings. Free the result with [`bethkit_string_free`].
+/// The document contains `format_version` (1), `has_errors`, and `diagnostics`.
+/// Each diagnostic includes severity, code, message, record_signature, form_id,
+/// and nullable node_id, path, and span. Severity and code use snake_case strings.
+///
+/// # Errors
+///
+/// Returns null and sets the last error for null handles, an unsupported mode,
+/// a missing record schema, or serialization failure. Record validation errors
+/// are reported in the JSON document, not as an API failure.
+///
+/// # Safety
+///
+/// Both non-null handles must remain valid for this call.
+#[no_mangle]
+pub extern "C" fn bethkit_semantic_validate_json(
+    context: *const BethkitSemanticContext,
+    record: *const BethkitRecord,
+    localized: bool,
+    mode: u32,
+) -> *mut c_char {
+    null_check!(
+        context,
+        "bethkit_semantic_validate_json/context",
+        std::ptr::null_mut()
+    );
+    null_check!(
+        record,
+        "bethkit_semantic_validate_json/record",
+        std::ptr::null_mut()
+    );
+    ffi_try!(
+        (|| -> crate::Result<*mut c_char> {
+            let mode = match mode {
+                0 => ValidationMode::Strict,
+                1 => ValidationMode::XEditCompatible,
+                _ => {
+                    return Err(FfiError::InvalidArgument {
+                        context: "bethkit_semantic_validate_json/mode",
+                        message: format!("unsupported validation mode {mode}"),
+                    })
+                }
+            };
+            // SAFETY: context is non-null and valid for this call by contract.
+            let context = unsafe { &*context };
+            // SAFETY: record is non-null and valid for this call by contract.
+            let record = unsafe { &*record };
+            let report = context
+                .0
+                .view(&record.0, localized)?
+                .validate_with_mode(mode);
+            let diagnostics: Vec<serde_json::Value> = report
+                .diagnostics()
+                .iter()
+                .map(|value| {
+                    let severity = match value.severity {
+                        DiagnosticSeverity::Information => "information",
+                        DiagnosticSeverity::Warning => "warning",
+                        DiagnosticSeverity::Error => "error",
+                    };
+                    let code = match value.code {
+                        DiagnosticCode::MissingRequired => "missing_required",
+                        DiagnosticCode::InvalidOrder => "invalid_order",
+                        DiagnosticCode::UnexpectedDuplicate => "unexpected_duplicate",
+                        DiagnosticCode::InvalidPayload => "invalid_payload",
+                        DiagnosticCode::UncoveredBytes => "uncovered_bytes",
+                        DiagnosticCode::OverlappingBytes => "overlapping_bytes",
+                        DiagnosticCode::InvalidFormIdTarget => "invalid_form_id_target",
+                        DiagnosticCode::CallbackValidation => "callback_validation",
+                        DiagnosticCode::InvalidStringEnumeration => "invalid_string_enumeration",
+                        DiagnosticCode::UnknownSubrecord => "unknown_subrecord",
+                    };
+                    serde_json::json!({
+                        "severity": severity,
+                        "code": code,
+                        "message": value.message,
+                        "record_signature": value.record_signature.to_string(),
+                        "form_id": value.form_id.0,
+                        "node_id": value.node_id.map(|node_id| node_id.0),
+                        "path": value.path,
+                        "span": value.span.map(|span| serde_json::json!({
+                            "start": span.start, "end": span.end,
+                        })),
+                    })
+                })
+                .collect();
+            owned_json(&serde_json::json!({
+                "format_version": 1,
+                "has_errors": report.has_errors(),
+                "diagnostics": diagnostics,
+            }))
+        })(),
+        std::ptr::null_mut()
+    )
 }
 
 /// Creates a semantic context for `package` and the built-in decoders.
@@ -405,10 +640,12 @@ pub extern "C" fn bethkit_record_editor_remove(
     0
 }
 
-/// Consumes an editor and returns an owned writable record.
+/// Consumes an editor's contents and returns an owned writable record.
 ///
 /// The returned record must be freed with `bethkit_writable_record_free` or
-/// transferred to a writable group.
+/// transferred to a writable group. The editor handle itself remains allocated
+/// and must still be freed with [`bethkit_record_editor_free`]. Further editing
+/// or finishing calls fail because its contents have already been consumed.
 #[no_mangle]
 pub extern "C" fn bethkit_record_editor_finish(
     editor: *mut BethkitRecordEditor,
@@ -459,13 +696,18 @@ fn edit_set(
 ///
 /// # Arguments
 ///
-/// * `record`    — Record to inspect. Borrows.
-/// * `sig`       — 4-byte record signature used for schema lookup. Borrows.
-/// * `localized` — Whether the parent plugin is localized.
+/// * `context` - Semantic context used to decode the record. Borrows.
+/// * `record` - Record to inspect. Borrows.
+/// * `localized` - Whether the parent plugin is localized.
 ///
 /// # Errors
 ///
 /// Returns null and sets the last error if a handle is null or decoding fails.
+///
+/// # Safety
+///
+/// Both handles must remain valid for this call. The returned snapshot owns all
+/// decoded data and does not retain either handle.
 #[no_mangle]
 pub extern "C" fn bethkit_record_view_new(
     context: *const BethkitSemanticContext,
@@ -479,33 +721,54 @@ pub extern "C" fn bethkit_record_view_new(
     );
     null_check!(record, "bethkit_record_view_new", std::ptr::null_mut());
 
-    // SAFETY: context and record were checked for null and remain borrowed.
-    let context = unsafe { &*context };
-    let rec = unsafe { &*record };
-    let view = ffi_try!(
-        context
-            .0
-            .view(&rec.0, localized)
-            .and_then(|value| value.fields()),
+    ffi_try!(
+        (|| -> bethkit_semantic::Result<*mut BethkitRecordView> {
+            // SAFETY: context is non-null and valid for this call by contract.
+            let context = unsafe { &*context };
+            // SAFETY: record is non-null and valid for this call by contract.
+            let rec = unsafe { &*record };
+            let fields = context.0.view(&rec.0, localized)?.fields()?;
+            Ok(Box::into_raw(Box::new(snapshot_fields(&fields))))
+        })(),
         std::ptr::null_mut()
-    );
+    )
+}
 
-    let mut owned_strings: Vec<std::ffi::CString> = Vec::new();
-    let fields: Vec<BethkitNamedField> = view
-        .iter()
-        .map(|fe| {
-            let value = convert_field_value(&fe.value, &mut owned_strings);
-            BethkitNamedField {
-                name: intern_str(&fe.name, &mut owned_strings),
-                value,
-            }
-        })
-        .collect();
-
-    Box::into_raw(Box::new(BethkitRecordView {
+fn snapshot_fields(source: &[Field<'_>]) -> BethkitRecordView {
+    let mut storage = SnapshotStorage::default();
+    let mut fields = Vec::with_capacity(source.len());
+    let mut metadata = Vec::with_capacity(source.len());
+    for field in source {
+        let identity = BethkitFieldMetadata {
+            node_id: field.node_id.0,
+            path: intern_str(&field.path, &mut storage.strings),
+            effective_path: field
+                .effective_path
+                .as_deref()
+                .map(|path| intern_str(path, &mut storage.strings))
+                .unwrap_or(std::ptr::null()),
+            occurrence: field.occurrence,
+            span_start: field.span.start,
+            span_end: field.span.end,
+            origin: match field.origin {
+                FieldOrigin::Schema => 0,
+                FieldOrigin::UnknownSubrecord => 1,
+                FieldOrigin::UnmatchedKnownSubrecord => 2,
+                FieldOrigin::CustomDecoder => 3,
+            },
+            subrecord_signature: field.subrecord_signature.0,
+        };
+        fields.push(BethkitNamedField {
+            name: intern_str(&field.name, &mut storage.strings),
+            value: convert_field_value(&field.value, &mut storage, identity),
+        });
+        metadata.push(identity);
+    }
+    BethkitRecordView {
         fields,
-        string_arena: owned_strings,
-    }))
+        metadata,
+        _storage: storage,
+    }
 }
 
 /// Frees a record view and recursively all owned sub-objects — nested
@@ -565,6 +828,87 @@ pub extern "C" fn bethkit_record_view_field_get(
             std::ptr::null()
         }
     }
+}
+
+/// Copies the metadata for top-level field `index` into caller-owned `out`.
+///
+/// Returns 0 on success. Strings in `out` are borrowed from `view` and remain
+/// valid until the view is freed. The output remains unchanged on failure.
+///
+/// # Errors
+///
+/// Returns -1 and sets the last error for a null pointer or an invalid index.
+///
+/// # Safety
+///
+/// `view` must be a live view and `out` must point to writable, aligned storage
+/// for one [`BethkitFieldMetadata`].
+#[no_mangle]
+pub extern "C" fn bethkit_record_view_field_metadata(
+    view: *const BethkitRecordView,
+    index: usize,
+    out: *mut BethkitFieldMetadata,
+) -> i32 {
+    null_check!(view, "bethkit_record_view_field_metadata/view", -1);
+    null_check!(out, "bethkit_record_view_field_metadata/out", -1);
+    ffi_try!(
+        (|| -> crate::Result<()> {
+            // SAFETY: view is non-null and valid for this call by contract.
+            let view = unsafe { &*view };
+            let value = view.metadata.get(index).ok_or(FfiError::IndexOutOfBounds {
+                index,
+                len: view.metadata.len(),
+            })?;
+            // SAFETY: out is non-null and points to writable storage by contract.
+            unsafe { *out = *value };
+            Ok(())
+        })(),
+        -1
+    );
+    0
+}
+
+/// Copies metadata for nested field `index` into caller-owned `out`.
+///
+/// Returns 0 on success. Paths retain their schema identity and union selection;
+/// occurrence, provenance, and subrecord signature identify the containing
+/// top-level field. Array positions are represented by traversal of the value
+/// tree. Strings belong to the owning view. Output remains unchanged on failure.
+///
+/// # Errors
+///
+/// Returns -1 and sets the last error for a null pointer or an invalid index.
+///
+/// # Safety
+///
+/// `entries` and its owning view must remain alive. `out` must point to writable,
+/// aligned storage for one [`BethkitFieldMetadata`].
+#[no_mangle]
+pub extern "C" fn bethkit_field_entries_metadata(
+    entries: *const BethkitFieldEntries,
+    index: usize,
+    out: *mut BethkitFieldMetadata,
+) -> i32 {
+    null_check!(entries, "bethkit_field_entries_metadata/entries", -1);
+    null_check!(out, "bethkit_field_entries_metadata/out", -1);
+    ffi_try!(
+        (|| -> crate::Result<()> {
+            // SAFETY: entries is non-null and valid for this call by contract.
+            let entries = unsafe { &*entries };
+            let value = entries
+                .metadata
+                .get(index)
+                .ok_or(FfiError::IndexOutOfBounds {
+                    index,
+                    len: entries.metadata.len(),
+                })?;
+            // SAFETY: out is non-null and points to writable storage by contract.
+            unsafe { *out = *value };
+            Ok(())
+        })(),
+        -1
+    );
+    0
 }
 
 /// Returns the number of entries in a struct field list.
@@ -700,9 +1044,10 @@ fn intern_str(s: &str, arena: &mut Vec<std::ffi::CString>) -> *const c_char {
 /// String values and schema label strings (field names, enum variant names,
 /// flag bit names) are interned into `owned_strings` so their pointers are
 /// NUL-terminated and stable for the lifetime of the view.
-fn convert_field_value<'a>(
-    fv: &FieldValue<'a>,
-    owned_strings: &mut Vec<std::ffi::CString>,
+fn convert_field_value(
+    fv: &FieldValue<'_>,
+    storage: &mut SnapshotStorage,
+    parent: BethkitFieldMetadata,
 ) -> BethkitFieldValue {
     match fv {
         FieldValue::Int(v) => BethkitFieldValue {
@@ -722,7 +1067,7 @@ fn convert_field_value<'a>(
             let cs = std::ffi::CString::new(sanitized)
                 .unwrap_or_else(|_| std::ffi::CString::new("?").expect("single char is valid"));
             let ptr = cs.as_ptr();
-            owned_strings.push(cs);
+            storage.strings.push(cs);
             BethkitFieldValue {
                 kind: BethkitFieldValueKind::Str,
                 payload: BethkitFieldValuePayload { str_val: ptr },
@@ -735,34 +1080,40 @@ fn convert_field_value<'a>(
                     payload: BethkitFieldValuePayload { form_id: value.0 },
                 }
             } else {
+                let signatures: Box<[[u8; 4]]> =
+                    targets.iter().map(|signature| signature.0).collect();
+                let allowed_sigs = signatures.as_ptr();
+                storage.signatures.push(signatures);
                 BethkitFieldValue {
                     kind: BethkitFieldValueKind::FormIdTyped,
                     payload: BethkitFieldValuePayload {
                         form_id_typed: BethkitTypedFormId {
                             raw: value.0,
-                            allowed_sigs: targets.as_ptr() as *const [u8; 4],
+                            allowed_sigs,
                             allowed_count: targets.len(),
                         },
                     },
                 }
             }
         }
-        FieldValue::Bytes(b) => BethkitFieldValue {
-            kind: BethkitFieldValueKind::Bytes,
-            payload: BethkitFieldValuePayload {
-                bytes: ManuallyDrop::new(BethkitSlice {
-                    ptr: b.as_ptr(),
-                    len: b.len(),
-                }),
-            },
-        },
+        FieldValue::Bytes(b) => {
+            let bytes = b.to_vec().into_boxed_slice();
+            let ptr = bytes.as_ptr();
+            storage.bytes.push(bytes);
+            BethkitFieldValue {
+                kind: BethkitFieldValueKind::Bytes,
+                payload: BethkitFieldValuePayload {
+                    bytes: ManuallyDrop::new(BethkitSlice { ptr, len: b.len() }),
+                },
+            }
+        }
         FieldValue::Enumeration { value, name } => BethkitFieldValue {
             kind: BethkitFieldValueKind::Enum,
             payload: BethkitFieldValuePayload {
                 enum_val: BethkitEnumVal {
                     value: *value,
                     name: match name {
-                        Some(n) => intern_str(n, owned_strings),
+                        Some(n) => intern_str(n, &mut storage.strings),
                         None => std::ptr::null(),
                     },
                 },
@@ -774,7 +1125,7 @@ fn convert_field_value<'a>(
             // stable for the lifetime of the enclosing view.
             let name_ptrs: Vec<*const c_char> = active
                 .iter()
-                .map(|s| intern_str(s, owned_strings))
+                .map(|s| intern_str(s, &mut storage.strings))
                 .collect();
             let count = name_ptrs.len();
             let boxed = name_ptrs.into_boxed_slice();
@@ -793,17 +1144,31 @@ fn convert_field_value<'a>(
             }
         }
         FieldValue::Struct(sub_fields) => {
+            let mut metadata = Vec::with_capacity(sub_fields.len());
             let entries: Vec<BethkitNamedField> = sub_fields
                 .iter()
                 .map(|fe| {
-                    let value = convert_field_value(&fe.value, owned_strings);
+                    let identity = BethkitFieldMetadata {
+                        node_id: fe.node_id.0,
+                        path: intern_str(&fe.path, &mut storage.strings),
+                        effective_path: fe
+                            .effective_path
+                            .as_deref()
+                            .map(|path| intern_str(path, &mut storage.strings))
+                            .unwrap_or(std::ptr::null()),
+                        span_start: fe.span.start,
+                        span_end: fe.span.end,
+                        ..parent
+                    };
+                    let value = convert_field_value(&fe.value, storage, identity);
+                    metadata.push(identity);
                     BethkitNamedField {
-                        name: intern_str(&fe.name, owned_strings),
+                        name: intern_str(&fe.name, &mut storage.strings),
                         value,
                     }
                 })
                 .collect();
-            let boxed = Box::new(BethkitFieldEntries { entries });
+            let boxed = Box::new(BethkitFieldEntries { entries, metadata });
             BethkitFieldValue {
                 kind: BethkitFieldValueKind::Struct,
                 payload: BethkitFieldValuePayload {
@@ -814,7 +1179,7 @@ fn convert_field_value<'a>(
         FieldValue::Array(items) => {
             let values: Vec<BethkitFieldValue> = items
                 .iter()
-                .map(|v| convert_field_value(v, owned_strings))
+                .map(|v| convert_field_value(v, storage, parent))
                 .collect();
             let boxed = Box::new(BethkitFieldValues { values });
             BethkitFieldValue {
@@ -944,6 +1309,7 @@ mod tests {
         };
         let entries = Box::new(BethkitFieldEntries {
             entries: vec![inner],
+            metadata: Vec::new(),
         });
         let fv = BethkitFieldValue {
             kind: BethkitFieldValueKind::Struct,
