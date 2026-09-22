@@ -176,7 +176,7 @@ impl StringTable {
             let payload: &[u8] = read_payload(bytes, entry_start, kind)?;
             entries.insert(id, EntryBytes::Owned(payload.to_vec()));
             if id.saturating_add(1) > next_id {
-                next_id = id + 1;
+                next_id = id.saturating_add(1);
             }
         }
         Ok(Self {
@@ -222,17 +222,52 @@ impl StringTable {
     pub fn insert(&mut self, id: u32, payload: Vec<u8>) {
         self.entries.insert(id, EntryBytes::Owned(payload));
         if id.saturating_add(1) > self.next_id {
-            self.next_id = id + 1;
+            self.next_id = id.saturating_add(1);
         }
     }
 
     /// Allocates a fresh identifier, inserts `payload`, and returns the
     /// identifier.
+    ///
+    /// Prefer [`Self::try_insert_new`] when exhaustion must be handled as an error.
+    ///
+    /// # Panics
+    ///
+    /// Panics when every nonzero 32-bit identifier is already occupied.
     pub fn insert_new(&mut self, payload: Vec<u8>) -> u32 {
-        let id: u32 = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        self.entries.insert(id, EntryBytes::Owned(payload));
-        id
+        match self.try_insert_new(payload) {
+            Ok(id) => id,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    /// Inserts `payload` under a fresh nonzero identifier without replacing an entry.
+    ///
+    /// Allocation normally advances monotonically. At the 32-bit limit it searches
+    /// for the lowest unused identifier, preserving existing high-ID strings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::InvalidStringTable`] if all nonzero IDs are occupied.
+    /// Leaves the table unchanged on failure.
+    pub fn try_insert_new(&mut self, payload: Vec<u8>) -> Result<u32> {
+        let mut id = self.next_id.max(1);
+        if self.entries.contains_key(&id) {
+            id = 1;
+            for &existing in self.entries.keys() {
+                if existing < id {
+                    continue;
+                }
+                if existing > id {
+                    break;
+                }
+                id = id.checked_add(1).ok_or_else(|| {
+                    CoreError::InvalidStringTable("string identifier space exhausted".to_owned())
+                })?;
+            }
+        }
+        self.insert(id, payload);
+        Ok(id)
     }
 
     /// Removes an entry, returning its payload if it existed.
@@ -322,7 +357,7 @@ impl StringTable {
                 },
             );
             if id.saturating_add(1) > next_id {
-                next_id = id + 1;
+                next_id = id.saturating_add(1);
             }
         }
         Ok(Self {
@@ -567,6 +602,24 @@ mod tests {
         assert_eq!(buf, vec![0u8; 8]);
         let parsed: StringTable = StringTable::from_bytes(&buf, StringFileKind::Strings)?;
         assert!(parsed.is_empty());
+        Ok(())
+    }
+
+    /// Preserves maximum-ID strings and allocates a free lower ID without overflow.
+    #[test]
+    fn maximum_identifier_does_not_overwrite_or_overflow(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut table = StringTable::new(StringFileKind::Strings);
+        table.insert(1, b"first".to_vec());
+        table.insert(u32::MAX, b"last".to_vec());
+        let mut bytes = Vec::new();
+        table.write_to(&mut bytes)?;
+        let mut parsed = StringTable::from_bytes(&bytes, StringFileKind::Strings)?;
+        assert_eq!(parsed.try_insert_new(b"new".to_vec())?, 2);
+        assert_eq!(parsed.get(u32::MAX), Some(&b"last"[..]));
+        assert_eq!(parsed.get(1), Some(&b"first"[..]));
+        assert_eq!(parsed.get(2), Some(&b"new"[..]));
+        assert_eq!(parsed.insert_new(b"legacy".to_vec()), 3);
         Ok(())
     }
 }
