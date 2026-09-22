@@ -7,7 +7,7 @@ use bethkit_core::{resolve_string_kind, Signature, StringFileKind};
 use bethkit_schema::{PrimitiveType, SchemaNode, SchemaNodeKind, SchemaRegistry};
 use bethkit_semantic::{
     schema_hash_hex, structure_hash, Field, FieldAddress, FieldOrigin, FieldValue, OwnedFieldValue,
-    ValueStep,
+    ValueSelection, ValueStep,
 };
 use serde_json::{json, Value};
 
@@ -60,6 +60,7 @@ pub extern "C" fn bethkit_semantic_snapshot_json(
                 record.0.header.signature,
                 record.0.header.form_id.0,
                 localized,
+                false,
             ))
         })(),
         std::ptr::null_mut()
@@ -104,6 +105,7 @@ pub extern "C" fn bethkit_record_editor_snapshot_json(
                 signature,
                 form_id.0,
                 editor.is_localized(),
+                false,
             ))
         })(),
         std::ptr::null_mut()
@@ -116,12 +118,13 @@ fn snapshot_document(
     signature: Signature,
     form_id: u32,
     localized: bool,
+    strings_only: bool,
 ) -> Value {
     let schema_hash = schema_hash_hex(&registry.package().payload_sha256());
     let structure_hash = structure_hash(fields);
     let fields: Vec<Value> = fields
         .iter()
-        .map(|field| {
+        .filter_map(|field| {
             let address = FieldAddress {
                 schema_payload_sha256: schema_hash.clone(),
                 structure_hash: structure_hash.clone(),
@@ -137,19 +140,129 @@ fn snapshot_document(
                 signature,
                 field.effective_path.as_deref().unwrap_or(&field.path),
             );
-            json!({
+            let context = WireContext {
+                registry,
+                selections: &field.value_selections,
+                subrecord_signature: field.subrecord_signature,
+                localized,
+                origin,
+            };
+            let value = if strings_only {
+                wire_strings(&field.value, &address, node, &context)?
+            } else {
+                wire_value(&field.value, &address, node, &context)
+            };
+            Some(json!({
                 "name": field.name, "node_id": field.node_id.0, "path": field.path,
                 "effective_path": field.effective_path,
                 "span": {"start": field.span.start, "end": field.span.end},
                 "origin": origin, "address": address,
-                "value": wire_value(&field.value, &address, registry, node,
-                    field.subrecord_signature, localized, origin),
-            })
+                "value": value,
+            }))
         })
         .collect();
     json!({"format_version":1, "schema_payload_sha256":schema_hash,
         "structure_hash":structure_hash, "record_signature":signature.to_string(),
-        "form_id":form_id, "fields":fields})
+        "form_id":form_id, "fields":fields,
+        "projection":if strings_only {"strings"} else {"full"}})
+}
+
+/// Returns only schema-declared translatable values as an owned JSON snapshot.
+///
+/// Borrows both handles during the call. Free the result with `bethkit_string_free`.
+/// The document has `projection: "strings"`; non-string branches are omitted before
+/// JSON serialization. Surviving leaves retain exact full-snapshot addresses and the
+/// structure hash covers the complete record, including omitted branches. This is not
+/// a complete record model and must not be used to reconstruct one.
+///
+/// # Errors
+///
+/// Returns null and sets the last error for null handles, decoding/serialization
+/// failures, or internal panics.
+///
+/// # Safety
+///
+/// Both handles must be live for this call. `localized` must match the source plugin.
+#[no_mangle]
+pub extern "C" fn bethkit_semantic_strings_snapshot_json(
+    context: *const BethkitSemanticContext,
+    record: *const BethkitRecord,
+    localized: bool,
+) -> *mut c_char {
+    null_check!(
+        context,
+        "bethkit_semantic_strings_snapshot_json/context",
+        std::ptr::null_mut()
+    );
+    null_check!(
+        record,
+        "bethkit_semantic_strings_snapshot_json/record",
+        std::ptr::null_mut()
+    );
+    ffi_try!(
+        (|| -> Result<*mut c_char> {
+            // SAFETY: context is a live borrowed semantic context.
+            let context = unsafe { &*context };
+            // SAFETY: record is live and borrowed for this call.
+            let record = unsafe { &*record };
+            let fields = context.0.view(&record.0, localized)?.fields()?;
+            owned_json(&snapshot_document(
+                context.0.registry(),
+                &fields,
+                record.0.header.signature,
+                record.0.header.form_id.0,
+                localized,
+                true,
+            ))
+        })(),
+        std::ptr::null_mut()
+    )
+}
+
+/// Returns an editor's translatable values with exact current structural addresses.
+///
+/// The owned JSON uses `projection: "strings"`, omits non-string branches, and must
+/// be freed with `bethkit_string_free`. Hashes still cover the complete record.
+/// Obtain new addresses after structural edits or after-load normalization.
+///
+/// # Errors
+///
+/// Returns null and sets the last error for null/consumed editors, decoding or
+/// serialization failures, or internal panics.
+///
+/// # Safety
+///
+/// `editor` must be a live borrowed editor handle throughout the call.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_strings_snapshot_json(
+    editor: *const BethkitRecordEditor,
+) -> *mut c_char {
+    null_check!(
+        editor,
+        "bethkit_record_editor_strings_snapshot_json",
+        std::ptr::null_mut()
+    );
+    ffi_try!(
+        (|| -> Result<*mut c_char> {
+            // SAFETY: editor is a live borrowed handle.
+            let editor = unsafe { &*editor }
+                .0
+                .as_ref()
+                .ok_or(FfiError::WriterConsumed)?;
+            let fields = editor.fields()?;
+            let registry = SchemaRegistry::new(editor.schema_package().clone());
+            let (signature, form_id) = editor.identity();
+            owned_json(&snapshot_document(
+                &registry,
+                &fields,
+                signature,
+                form_id.0,
+                editor.is_localized(),
+                true,
+            ))
+        })(),
+        std::ptr::null_mut()
+    )
 }
 
 fn origin_name(origin: FieldOrigin) -> &'static str {
@@ -159,6 +272,48 @@ fn origin_name(origin: FieldOrigin) -> &'static str {
         FieldOrigin::UnmatchedKnownSubrecord => "unmatched_known_subrecord",
         FieldOrigin::CustomDecoder => "custom_decoder",
     }
+}
+
+struct WireContext<'a> {
+    registry: &'a SchemaRegistry,
+    selections: &'a [ValueSelection],
+    subrecord_signature: Signature,
+    localized: bool,
+    origin: &'a str,
+}
+
+fn selected_payload_node<'a>(
+    context: &WireContext<'a>,
+    address: &FieldAddress,
+    mut node: &'a SchemaNode,
+) -> &'a SchemaNode {
+    let signature = Signature(address.record_signature);
+    for _ in 0..128 {
+        node = payload_node(context.registry, signature, node);
+        if !matches!(node.kind, SchemaNodeKind::Union { .. }) {
+            return node;
+        }
+        // Equal-shaped scalar variants cannot be reconstructed from their values.
+        let selection = context.selections.iter().find(|selection| {
+            selection.schema_path == node.path
+                && selection.array_indices.iter().copied().eq(address
+                    .value_steps
+                    .iter()
+                    .filter_map(|step| match step {
+                        ValueStep::Index { index } => Some(*index),
+                        ValueStep::Field { .. } => None,
+                    }))
+        });
+        let Some(selected) = selection.and_then(|selection| {
+            context
+                .registry
+                .get_node(signature, &selection.effective_path)
+        }) else {
+            return node;
+        };
+        node = selected;
+    }
+    node
 }
 
 fn payload_node<'a>(
@@ -184,24 +339,129 @@ fn payload_node<'a>(
     node
 }
 
+fn is_translatable(node: &SchemaNode) -> bool {
+    matches!(&node.kind,
+        SchemaNodeKind::Primitive { primitive: PrimitiveType::String { string } }
+        if string.localized || string.encoding == "localized")
+}
+
+fn can_contain_strings(
+    registry: &SchemaRegistry,
+    signature: Signature,
+    node: &SchemaNode,
+    depth: usize,
+) -> bool {
+    if depth > 128 {
+        return true;
+    }
+    let children = match &node.kind {
+        SchemaNodeKind::Primitive { .. } => return is_translatable(node),
+        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => fields,
+        SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => children,
+        SchemaNodeKind::Union { variants, .. } => variants,
+        SchemaNodeKind::Choice { alternatives }
+        | SchemaNodeKind::SelectedChoice { alternatives, .. } => alternatives,
+        SchemaNodeKind::Array { element: child, .. }
+        | SchemaNodeKind::Repeat { child, .. }
+        | SchemaNodeKind::Subrecord { payload: child, .. }
+        | SchemaNodeKind::Compressed { child, .. }
+        | SchemaNodeKind::Terminated { child, .. } => {
+            return can_contain_strings(registry, signature, child, depth + 1);
+        }
+        SchemaNodeKind::Reference { target } => {
+            return registry
+                .get_node(signature, target)
+                .is_none_or(|target| can_contain_strings(registry, signature, target, depth + 1));
+        }
+        SchemaNodeKind::Custom { .. } => return true,
+    };
+    children
+        .iter()
+        .any(|child| can_contain_strings(registry, signature, child, depth + 1))
+}
+
+fn wire_strings(
+    value: &FieldValue<'_>,
+    address: &FieldAddress,
+    node: Option<&SchemaNode>,
+    context: &WireContext<'_>,
+) -> Option<Value> {
+    let signature = Signature(address.record_signature);
+    let node = node.map(|node| selected_payload_node(context, address, node));
+    if node.is_some_and(|node| !can_contain_strings(context.registry, signature, node, 0)) {
+        return None;
+    }
+    let mut result = match value {
+        FieldValue::Struct(fields) => {
+            let selected: Vec<Value> = fields
+                .iter()
+                .enumerate()
+                .filter_map(|(index, field)| {
+                    let mut address = address.clone();
+                    address.value_steps.push(ValueStep::Field {
+                        index,
+                        path: field.path.clone(),
+                    });
+                    let node = context.registry.get_node(
+                        signature,
+                        field.effective_path.as_deref().unwrap_or(&field.path),
+                    );
+                    let value = wire_strings(&field.value, &address, node, context)?;
+                    Some(
+                        json!({"name":field.name,"node_id":field.node_id.0,"path":field.path,
+                    "effective_path":field.effective_path,
+                    "span":{"start":field.span.start,"end":field.span.end},
+                    "origin":context.origin,"address":address,"value":value}),
+                    )
+                })
+                .collect();
+            if selected.is_empty() {
+                return None;
+            }
+            json!({"kind":"struct","fields":selected})
+        }
+        FieldValue::Array(values) => {
+            let element = node.and_then(|node| match &node.kind {
+                SchemaNodeKind::Array { element, .. } => Some(element.as_ref()),
+                _ => None,
+            });
+            let items: Vec<Value> = values
+                .iter()
+                .enumerate()
+                .filter_map(|(index, value)| {
+                    let mut address = address.clone();
+                    address.value_steps.push(ValueStep::Index { index });
+                    wire_strings(value, &address, element, context)
+                })
+                .collect();
+            if items.is_empty() {
+                return None;
+            }
+            json!({"kind":"array","items":items})
+        }
+        _ if node.is_some_and(is_translatable) => {
+            return Some(wire_value(value, address, node, context));
+        }
+        _ => return None,
+    };
+    result["address"] = json!(address);
+    result["schema_path"] = json!(node.map(|node| node.path.as_str()));
+    result["translatable"] = json!(false);
+    result["string_table"] = Value::Null;
+    Some(result)
+}
+
 fn wire_value(
     value: &FieldValue<'_>,
     address: &FieldAddress,
-    registry: &SchemaRegistry,
     node: Option<&SchemaNode>,
-    subrecord_signature: Signature,
-    localized: bool,
-    origin: &str,
+    context: &WireContext<'_>,
 ) -> Value {
     let signature = Signature(address.record_signature);
-    let node = node.map(|node| payload_node(registry, signature, node));
-    let translatable = node.is_some_and(|node| {
-        matches!(&node.kind,
-        SchemaNodeKind::Primitive { primitive: PrimitiveType::String { string } }
-        if string.localized || string.encoding == "localized")
-    });
-    let string_table = (translatable && localized).then(|| {
-        match resolve_string_kind(signature, subrecord_signature) {
+    let node = node.map(|node| selected_payload_node(context, address, node));
+    let translatable = node.is_some_and(is_translatable);
+    let string_table = (translatable && context.localized).then(|| {
+        match resolve_string_kind(signature, context.subrecord_signature) {
             StringFileKind::Strings => "strings",
             StringFileKind::DLStrings => "dl_strings",
             StringFileKind::ILStrings => "il_strings",
@@ -242,15 +502,15 @@ fn wire_value(
                         index,
                         path: field.path.clone(),
                     });
-                    let node = registry.get_node(
+                    let node = context.registry.get_node(
                         signature,
                         field.effective_path.as_deref().unwrap_or(&field.path),
                     );
                     json!({"name":field.name, "node_id":field.node_id.0, "path":field.path,
                     "effective_path":field.effective_path,
-                    "span":{"start":field.span.start,"end":field.span.end}, "origin":origin,
-                    "address":address, "value":wire_value(&field.value, &address, registry, node,
-                        subrecord_signature, localized, origin)})
+                    "span":{"start":field.span.start,"end":field.span.end},
+                    "origin":context.origin, "address":address,
+                    "value":wire_value(&field.value, &address, node, context)})
                 })
                 .collect();
             json!({"kind":"struct", "fields":fields})
@@ -266,24 +526,69 @@ fn wire_value(
                 .map(|(index, value)| {
                     let mut address = address.clone();
                     address.value_steps.push(ValueStep::Index { index });
-                    wire_value(
-                        value,
-                        &address,
-                        registry,
-                        element,
-                        subrecord_signature,
-                        localized,
-                        origin,
-                    )
+                    wire_value(value, &address, element, context)
                 })
                 .collect();
             json!({"kind":"array", "items":items})
         }
     };
     output["address"] = json!(address);
+    output["schema_path"] = json!(node.map(|node| node.path.as_str()));
     output["translatable"] = json!(translatable);
     output["string_table"] = json!(string_table);
     output
+}
+
+/// Inserts a subrecord using its schema path and a tagged owned JSON value.
+///
+/// Use this for absent optional subrecords that do not yet have an address.
+/// The native grammar determines placement and rejects ambiguous repeat scopes.
+/// Complete multi-subrecord groups cannot be created through this operation.
+/// All handles and UTF-8 strings are borrowed only for this call.
+///
+/// # Errors
+///
+/// Returns -1 and sets the last error for null or consumed handles, malformed JSON,
+/// invalid paths or values, or a grammar-ambiguous insertion. Failed edits do not
+/// change the editor. Returns zero on success.
+///
+/// # Safety
+///
+/// Non-null pointers must remain valid for this call. Strings must be valid
+/// NUL-terminated UTF-8. The editor must not be concurrently accessed.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_insert_json(
+    editor: *mut BethkitRecordEditor,
+    path: *const c_char,
+    value_json: *const c_char,
+) -> i32 {
+    null_check!(editor, "bethkit_record_editor_insert_json/editor", -1);
+    null_check!(path, "bethkit_record_editor_insert_json/path", -1);
+    null_check!(value_json, "bethkit_record_editor_insert_json/value", -1);
+    ffi_try!(
+        (|| -> Result<()> {
+            // SAFETY: editor is non-null, exclusively borrowed, and valid by contract.
+            let editor = unsafe { &mut *editor };
+            let editor = editor
+                .0
+                .as_mut()
+                .ok_or_else(|| input_error("editor is consumed"))?;
+            let path = cstr_to_str(path, "bethkit_record_editor_insert_json/path")
+                .ok_or_else(|| input_error("path must be UTF-8"))?;
+            let value_json = cstr_to_str(value_json, "bethkit_record_editor_insert_json/value")
+                .ok_or_else(|| input_error("value must be UTF-8"))?;
+            let json_value: Value = serde_json::from_str(value_json)?;
+            let registry = SchemaRegistry::new(editor.schema_package().clone());
+            let (signature, _) = editor.identity();
+            let node = registry.get_node(signature, path);
+            validate_struct_names(&json_value, &registry, signature, node)?;
+            let value = parse_owned_value(&json_value, 0)?;
+            editor.insert(path, &value)?;
+            Ok(())
+        })(),
+        -1
+    );
+    0
 }
 
 /// Replaces the exact value selected by a native snapshot address.

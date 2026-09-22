@@ -33,6 +33,8 @@ pub struct Field<'a> {
     pub path: String,
     /// Effective selected payload path for a dynamic union, when available.
     pub effective_path: Option<String>,
+    /// Exact dynamic-union selections, including occurrences inside arrays.
+    pub value_selections: Vec<ValueSelection>,
     /// Human-readable name.
     pub name: String,
     /// Source subrecord signature.
@@ -45,6 +47,17 @@ pub struct Field<'a> {
     pub origin: FieldOrigin,
     /// Decoded field value.
     pub value: FieldValue<'a>,
+}
+
+/// One schema union's selected variant at an exact nested array position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueSelection {
+    /// Original union node path, before selecting a variant.
+    pub schema_path: String,
+    /// Outermost-to-innermost array indices containing the union occurrence.
+    pub array_indices: Vec<usize>,
+    /// Directly selected variant path, before resolving any nested union.
+    pub effective_path: String,
 }
 
 /// Read-only semantic view over one parsed record.
@@ -265,6 +278,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     };
                     let data: &'record [u8] = subrecord.as_bytes();
                     let mut field_values = BTreeMap::new();
+                    let mut value_selections = Vec::new();
                     let frame = DecodeFrame {
                         offset: 0,
                         source_subrecord_index: index,
@@ -275,7 +289,20 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         FieldValue<'record>,
                         usize,
                         Option<String>,
-                    ) = self.decode_node(payload, data, data, frame, &mut field_values)?;
+                    ) = if data.is_empty() && self.is_model_info_payload(node, payload) {
+                        // Vanilla records can retain an empty model-information cache.
+                        // Keep its actual zero-byte subrecord instead of inventing a header.
+                        (FieldValue::Absent, 0, None)
+                    } else {
+                        self.decode_node(
+                            payload,
+                            data,
+                            data,
+                            frame,
+                            &mut field_values,
+                            &mut value_selections,
+                        )?
+                    };
                     if consumed != data.len() {
                         return Err(SemanticError::Decode {
                             path: payload.path.clone(),
@@ -291,6 +318,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         node_id: node.id,
                         path: node.path.clone(),
                         effective_path,
+                        value_selections,
                         name: node.name.clone(),
                         subrecord_signature: subrecord.signature,
                         occurrence,
@@ -319,6 +347,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             signature_occurrence
                         ),
                         effective_path: None,
+                        value_selections: Vec::new(),
                         name: if declared {
                             "Out-of-order known subrecord".to_owned()
                         } else {
@@ -341,6 +370,17 @@ impl<'context, 'record> RecordView<'context, 'record> {
             }
         }
         Ok(fields)
+    }
+
+    fn is_model_info_payload(&self, subrecord: &SchemaNode, payload: &SchemaNode) -> bool {
+        self.uses_handler(&subrecord.path, "conflict.model_info_form_version")
+            && matches!(
+                &payload.kind,
+                SchemaNodeKind::Union { variants, .. }
+                    if variants.iter().any(|variant| {
+                        self.uses_handler(&variant.path, "edit.model_info_counts")
+                    })
+            )
     }
 
     fn uses_handler(&self, path: &str, handler: &str) -> bool {
@@ -900,6 +940,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
         current: &'a [u8],
         frame: DecodeFrame<'_, 'a>,
         field_values: &mut BTreeMap<String, i64>,
+        value_selections: &mut Vec<ValueSelection>,
     ) -> Result<(FieldValue<'a>, usize, Option<String>)> {
         if !self.node_applies(node, payload, field_values)? {
             return Ok((FieldValue::Absent, 0, None));
@@ -977,7 +1018,14 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         array_indices: frame.array_indices,
                     };
                     let (value, consumed, effective_path): (FieldValue<'a>, usize, Option<String>) =
-                        self.decode_node(field, payload, remaining, child_frame, field_values)?;
+                        self.decode_node(
+                            field,
+                            payload,
+                            remaining,
+                            child_frame,
+                            field_values,
+                            value_selections,
+                        )?;
                     values.push(NamedValue {
                         node_id: field.id,
                         path: field.path.clone(),
@@ -1088,8 +1136,14 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         sibling_values: frame.sibling_values,
                         array_indices: &child_array_indices,
                     };
-                    let (value, consumed, _) =
-                        self.decode_node(element, payload, remaining, child_frame, field_values)?;
+                    let (value, consumed, _) = self.decode_node(
+                        element,
+                        payload,
+                        remaining,
+                        child_frame,
+                        field_values,
+                        value_selections,
+                    )?;
                     if consumed == 0 && element_count.is_none() {
                         return Err(SemanticError::Decode {
                             path: element.path.clone(),
@@ -1125,8 +1179,19 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         path: node.path.clone(),
                         message: format!("union variant {index} does not exist"),
                     })?;
-                let (value, consumed, selected) =
-                    self.decode_node(variant, payload, current, frame, field_values)?;
+                let (value, consumed, selected) = self.decode_node(
+                    variant,
+                    payload,
+                    current,
+                    frame,
+                    field_values,
+                    value_selections,
+                )?;
+                value_selections.push(ValueSelection {
+                    schema_path: node.path.clone(),
+                    array_indices: frame.array_indices.to_vec(),
+                    effective_path: variant.path.clone(),
+                });
                 Ok((
                     value,
                     consumed,
@@ -1153,8 +1218,14 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 Ok((decoded.value, decoded.consumed, None))
             }
             SchemaNodeKind::Terminated { terminator, child } => {
-                let (value, body_size, effective_path) =
-                    self.decode_node(child, payload, current, frame, field_values)?;
+                let (value, body_size, effective_path) = self.decode_node(
+                    child,
+                    payload,
+                    current,
+                    frame,
+                    field_values,
+                    value_selections,
+                )?;
                 let actual = current
                     .get(body_size)
                     .ok_or_else(|| SemanticError::Decode {
@@ -2298,6 +2369,294 @@ mod tests {
 
     use super::*;
     use crate::SemanticHandlerRegistry;
+
+    /// Builds an explicitly typed payload node for focused decoder regressions.
+    fn payload_test_node(id: u32, path: &str, kind: SchemaNodeKind) -> SchemaNode {
+        SchemaNode {
+            id: bethkit_schema::SchemaNodeId(id),
+            path: path.to_owned(),
+            name: "Fixture".to_owned(),
+            required: false,
+            conflict_priority: bethkit_schema::ConflictPriority::Normal,
+            condition: None,
+            kind,
+        }
+    }
+
+    /// Creates a minimal BPTD schema with exact model-information callback metadata.
+    fn model_info_test_context(binding_count: usize) -> Result<SemanticContext> {
+        let integer = IntegerType {
+            width: 4,
+            signed: false,
+            byte_order: ByteOrder::LittleEndian,
+        };
+        let path = "BPTD/0:Cache";
+        let variant_path = format!("{path}/payload/variants/0");
+        let headers = payload_test_node(
+            4,
+            &format!("{variant_path}/0:Headers"),
+            SchemaNodeKind::Array {
+                count: ArrayCount::Prefixed {
+                    integer,
+                    terminator: None,
+                },
+                element: Box::new(payload_test_node(
+                    5,
+                    &format!("{variant_path}/0:Headers/element"),
+                    SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::Integer { integer },
+                    },
+                )),
+            },
+        );
+        let payload = payload_test_node(
+            2,
+            &format!("{path}/payload"),
+            SchemaNodeKind::Union {
+                selector: UnionSelector::Expression(Expression::Int { value: 0 }),
+                variants: vec![payload_test_node(
+                    3,
+                    &variant_path,
+                    SchemaNodeKind::Struct {
+                        fields: vec![headers],
+                    },
+                )],
+            },
+        );
+        let operations = [
+            (
+                path,
+                "def.conflict_priority",
+                "conflict.model_info_form_version",
+            ),
+            (
+                variant_path.as_str(),
+                "def.after_set",
+                "edit.model_info_counts",
+            ),
+        ];
+        let bindings: Vec<CallbackBinding> = operations
+            .iter()
+            .take(binding_count)
+            .map(|(path, callback_id, operation)| CallbackBinding {
+                path: (*path).to_owned(),
+                callback_id: (*callback_id).to_owned(),
+                callback_slot: None,
+                implementation_fingerprint: "00".repeat(32),
+                implementation: CallbackImplementation::BuiltIn {
+                    operation: BuiltInOperation {
+                        id: (*operation).to_owned(),
+                        minimum_version: 1,
+                        configuration: serde_json::json!({}),
+                    },
+                },
+            })
+            .collect();
+        let mut manifest = test_manifest();
+        manifest.callbacks_total = bindings.len() as u64;
+        manifest.callbacks_classified = bindings.len() as u64;
+        manifest.required_handlers = operations
+            .iter()
+            .take(binding_count)
+            .map(|(_, _, operation)| HandlerRequirement {
+                id: (*operation).to_owned(),
+                minimum_version: 1,
+            })
+            .collect();
+        let package = SchemaPackage::new_with_callbacks(
+            manifest,
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"BPTD"),
+                name: "Body Parts".to_owned(),
+                root: payload_test_node(
+                    0,
+                    "BPTD",
+                    SchemaNodeKind::Sequence {
+                        children: vec![payload_test_node(
+                            1,
+                            path,
+                            SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"NAM5"),
+                                payload: Box::new(payload),
+                            },
+                        )],
+                    },
+                ),
+            }],
+            bindings,
+        )?;
+        SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())
+    }
+
+    /// Preserves empty vanilla model caches through semantic views, editors and patchers.
+    #[test]
+    fn empty_model_info_is_absent_and_preserved_verbatim(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        use bethkit_core::{
+            Plugin, PluginPatcher, PluginWriter, RecordPatch, WritableGroup, WritableGroupChild,
+        };
+        let context = model_info_test_context(2)?;
+        let bytes = test_record_bytes(b"BPTD", b"NAM5", &[]);
+        let record = Record::parse_header(&mut SliceCursor::new(&bytes), &GameContext::sse())?;
+
+        // when
+        let fields = context.view(&record, false)?.fields()?;
+        let edited = context.edit(&record, false)?.into_writable_record();
+        let mut writer = PluginWriter::new(GameContext::sse(), 1.7);
+        writer.add_group(WritableGroup {
+            label: *b"BPTD",
+            group_type: 0,
+            children: vec![WritableGroupChild::Record(edited)],
+        });
+        let source = writer.write_to_vec()?;
+        let plugin = Plugin::from_bytes(&source, GameContext::sse())?;
+        let source_record = plugin
+            .find_record(FormId(1))
+            .expect("fixture record exists");
+        let edited = context.edit(source_record, false)?.into_writable_record();
+        let mut patcher = PluginPatcher::new(&plugin);
+        patcher.replace_record(FormId(1), RecordPatch::from_writable_record(edited));
+        let mut output = Vec::new();
+        patcher.write_to(&mut output)?;
+        let mut unpatched = Vec::new();
+        PluginPatcher::new(&plugin).write_to(&mut unpatched)?;
+        let output_plugin = Plugin::from_bytes(&output, GameContext::sse())?;
+        let output_record = output_plugin
+            .find_record(FormId(1))
+            .expect("patched fixture record exists");
+
+        // then
+        assert!(matches!(fields[0].value, FieldValue::Absent));
+        assert_eq!(fields[0].subrecord_signature, Signature(*b"NAM5"));
+        assert_eq!(fields[0].span, ByteSpan { start: 0, end: 0 });
+        assert_eq!(source_record.source_bytes(&source), Some(bytes.as_slice()));
+        assert_eq!(unpatched, source);
+        assert_eq!(output_record.source_bytes(&output), Some(bytes.as_slice()));
+        Ok(())
+    }
+
+    /// Keeps truncated nonempty caches and unrelated zero-length arrays as hard errors.
+    #[test]
+    fn empty_model_info_requires_exact_metadata_and_never_masks_truncation(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given / when / then
+        for binding_count in 0..=2 {
+            let context = model_info_test_context(binding_count)?;
+            for length in 0..=3 {
+                let bytes = test_record_bytes(b"BPTD", b"NAM5", &vec![0; length]);
+                let record =
+                    Record::parse_header(&mut SliceCursor::new(&bytes), &GameContext::sse())?;
+                let result = context.view(&record, false)?.fields();
+                assert_eq!(result.is_ok(), binding_count == 2 && length == 0);
+            }
+        }
+        let context = model_info_test_context(2)?;
+        let bytes = test_record_bytes(b"BPTD", b"NAM5", &[0; 4]);
+        let record = Record::parse_header(&mut SliceCursor::new(&bytes), &GameContext::sse())?;
+        assert!(matches!(
+            context.view(&record, false)?.fields()?[0].value,
+            FieldValue::Struct(_)
+        ));
+        Ok(())
+    }
+
+    /// Records direct nested union choices separately for every nested array occurrence.
+    #[test]
+    fn array_union_selections_preserve_nested_schema_and_index_identity(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let inner_path = "TEST/0:Data/payload/element/element";
+        let nested_path = format!("{inner_path}/variants/0");
+        let selected_path = format!("{nested_path}/variants/0");
+        let mut payload = payload_test_node(
+            6,
+            &selected_path,
+            SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::Integer {
+                    integer: IntegerType {
+                        width: 1,
+                        signed: false,
+                        byte_order: ByteOrder::LittleEndian,
+                    },
+                },
+            },
+        );
+        for (id, path) in [(5, nested_path.as_str()), (4, inner_path)] {
+            payload = payload_test_node(
+                id,
+                path,
+                SchemaNodeKind::Union {
+                    selector: UnionSelector::Expression(Expression::Int { value: 0 }),
+                    variants: vec![payload],
+                },
+            );
+        }
+        for (id, path) in [
+            (3, "TEST/0:Data/payload/element"),
+            (2, "TEST/0:Data/payload"),
+        ] {
+            payload = payload_test_node(
+                id,
+                path,
+                SchemaNodeKind::Array {
+                    element: Box::new(payload),
+                    count: ArrayCount::Fixed { count: 2 },
+                },
+            );
+        }
+        let package = SchemaPackage::new(
+            test_manifest(),
+            vec![SchemaRecord {
+                signature: SchemaSignature(*b"TEST"),
+                name: "Test".to_owned(),
+                root: payload_test_node(
+                    0,
+                    "TEST",
+                    SchemaNodeKind::Sequence {
+                        children: vec![payload_test_node(
+                            1,
+                            "TEST/0:Data",
+                            SchemaNodeKind::Subrecord {
+                                signature: SchemaSignature(*b"DATA"),
+                                payload: Box::new(payload),
+                            },
+                        )],
+                    },
+                ),
+            }],
+        )?;
+        let context = SemanticContext::new(Arc::new(package), crate::DecoderRegistry::builtin())?;
+        let bytes = test_record_bytes(b"TEST", b"DATA", &[1, 2, 3, 4]);
+        let record = Record::parse_header(&mut SliceCursor::new(&bytes), &GameContext::sse())?;
+
+        // when
+        let fields = context.view(&record, false)?.fields()?;
+        let selections = &fields[0].value_selections;
+
+        // then
+        assert_eq!(selections.len(), 8);
+        for outer in 0..2 {
+            for inner in 0..2 {
+                let indices = vec![outer, inner];
+                assert!(selections.contains(&ValueSelection {
+                    schema_path: inner_path.to_owned(),
+                    array_indices: indices.clone(),
+                    effective_path: nested_path.clone(),
+                }));
+                assert!(selections.contains(&ValueSelection {
+                    schema_path: nested_path.clone(),
+                    array_indices: indices,
+                    effective_path: selected_path.clone(),
+                }));
+            }
+        }
+        assert_eq!(
+            context.edit(&record, false)?.fields()?[0].value_selections,
+            *selections
+        );
+        Ok(())
+    }
 
     /// Preserves xEdit validation warnings as non-fatal diagnostics.
     #[test]

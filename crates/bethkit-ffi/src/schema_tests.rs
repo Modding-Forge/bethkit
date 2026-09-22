@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use bethkit_core::{FormId, Record, RecordFlags, Signature, WritableRecord, WritableSubRecord};
 use bethkit_schema::{
-    ArrayCount, ByteOrder, ConflictPriority, IntegerType, PrimitiveType, SchemaManifest,
-    SchemaNode, SchemaNodeId, SchemaNodeKind, SchemaPackage, SchemaRecord, SchemaSignature,
+    ArrayCount, ByteOrder, ConflictPriority, Expression, IntegerType, PrimitiveType,
+    SchemaManifest, SchemaNode, SchemaNodeId, SchemaNodeKind, SchemaPackage, SchemaRecord,
+    SchemaSignature, UnionSelector,
 };
 use bethkit_semantic::{
     ByteSpan, DecoderRegistry, Field, FieldOrigin, FieldValue, SemanticContext,
@@ -19,6 +20,411 @@ use super::snapshot::*;
 use super::*;
 
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+fn string_projection_fixture(
+    bulk_size: usize,
+) -> TestResult<(BethkitSemanticContext, BethkitRecord)> {
+    let text = |id, path: &str| {
+        node(
+            id,
+            path,
+            SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::String {
+                    string: bethkit_schema::StringType {
+                        encoding: "utf8".to_owned(),
+                        localized: true,
+                        zero_terminated: true,
+                        fixed_length: Some(4),
+                        length_prefix: None,
+                        trailing_terminator: None,
+                        allowed_values: Vec::new(),
+                    },
+                },
+            },
+        )
+    };
+    let schema = SchemaPackage::new(
+        package()?.manifest().clone(),
+        vec![SchemaRecord {
+            signature: SchemaSignature(*b"TEST"),
+            name: "Strings projection".to_owned(),
+            root: node(
+                1,
+                "TEST",
+                SchemaNodeKind::Sequence {
+                    children: vec![
+                        subrecord(
+                            2,
+                            "TEST/text",
+                            b"TEXT",
+                            node(
+                                3,
+                                "TEST/text/value",
+                                SchemaNodeKind::Struct {
+                                    fields: vec![
+                                        integer(4, "TEST/text/value/count"),
+                                        text(5, "TEST/text/value/text"),
+                                    ],
+                                },
+                            ),
+                        ),
+                        subrecord(
+                            6,
+                            "TEST/items",
+                            b"ARRY",
+                            node(
+                                7,
+                                "TEST/items/value",
+                                SchemaNodeKind::Array {
+                                    count: ArrayCount::Remainder,
+                                    element: Box::new(node(
+                                        8,
+                                        "TEST/items/value/item",
+                                        SchemaNodeKind::Struct {
+                                            fields: vec![
+                                                integer(9, "TEST/items/value/item/count"),
+                                                text(10, "TEST/items/value/item/text"),
+                                            ],
+                                        },
+                                    )),
+                                },
+                            ),
+                        ),
+                        subrecord(
+                            11,
+                            "TEST/bulk",
+                            b"BULK",
+                            node(
+                                12,
+                                "TEST/bulk/value",
+                                SchemaNodeKind::Primitive {
+                                    primitive: PrimitiveType::Bytes { length: None },
+                                },
+                            ),
+                        ),
+                    ],
+                },
+            ),
+        }],
+    )?;
+    let context = BethkitSemanticContext(SemanticContext::new(
+        Arc::new(schema),
+        DecoderRegistry::new(),
+    )?);
+    let mut first = 1u32.to_le_bytes().to_vec();
+    first.extend_from_slice(b"a\0\0\0");
+    let mut items = 2u32.to_le_bytes().to_vec();
+    items.extend_from_slice(b"b\0\0\0");
+    items.extend_from_slice(&3u32.to_le_bytes());
+    items.extend_from_slice(b"c\0\0\0");
+    let record = BethkitRecord(Record::from_writable(&WritableRecord {
+        signature: Signature(*b"TEST"),
+        flags: RecordFlags::empty(),
+        form_id: FormId(0x800),
+        form_version: 44,
+        subrecords: vec![
+            WritableSubRecord {
+                signature: Signature(*b"TEXT"),
+                data: first,
+            },
+            WritableSubRecord {
+                signature: Signature(*b"ARRY"),
+                data: items,
+            },
+            WritableSubRecord {
+                signature: Signature(*b"BULK"),
+                data: vec![0xAB; bulk_size],
+            },
+        ],
+    }));
+    Ok((context, record))
+}
+
+/// Keeps exact full-snapshot addresses while omitting unrelated bytes and struct members.
+#[test]
+fn strings_projection_preserves_addresses_and_shape_guard() -> TestResult {
+    let (context, record) = string_projection_fixture(4)?;
+    let complete = take_json(bethkit_semantic_snapshot_json(&context, &record, false))?;
+    let strings = take_json(bethkit_semantic_strings_snapshot_json(
+        &context, &record, false,
+    ))?;
+    assert_eq!(complete["projection"], "full");
+    assert_eq!(strings["projection"], "strings");
+    assert_eq!(
+        complete["fields"][0]["value"]["schema_path"],
+        "TEST/text/value"
+    );
+    assert_eq!(
+        strings["fields"][1]["value"]["items"][1]["fields"][0]["value"]["schema_path"],
+        "TEST/items/value/item/text"
+    );
+    assert_eq!(strings["structure_hash"], complete["structure_hash"]);
+    assert_eq!(strings["fields"].as_array().expect("fields array").len(), 2);
+    assert_eq!(
+        strings["fields"][0]["value"]["fields"]
+            .as_array()
+            .expect("members array")
+            .len(),
+        1
+    );
+    assert_eq!(
+        strings["fields"][0]["value"]["fields"][0]["value"],
+        complete["fields"][0]["value"]["fields"][1]["value"]
+    );
+    for index in 0..2 {
+        assert_eq!(
+            strings["fields"][1]["value"]["items"][index]["fields"][0]["value"],
+            complete["fields"][1]["value"]["items"][index]["fields"][1]["value"]
+        );
+    }
+    let editor = bethkit_record_editor_new(&context, &record, false);
+    assert!(!editor.is_null());
+    let edited = take_json(bethkit_record_editor_strings_snapshot_json(editor))?;
+    assert_eq!(edited, strings);
+    bethkit_record_editor_free(editor);
+    Ok(())
+}
+
+/// Bounds string-snapshot JSON size even when a record contains megabytes of raw payload.
+#[test]
+fn strings_projection_omits_large_payload_before_serialization() -> TestResult {
+    let (context, record) = string_projection_fixture(16 * 1024 * 1024)?;
+    let pointer = bethkit_semantic_strings_snapshot_json(&context, &record, false);
+    assert!(!pointer.is_null());
+    // SAFETY: the snapshot API returned an owned NUL-terminated JSON allocation.
+    let length = unsafe { CStr::from_ptr(pointer) }.to_bytes().len();
+    assert!(
+        length < 12_000,
+        "strings-only snapshot unexpectedly contains bulk data: {length}"
+    );
+    let strings = take_json(pointer)?;
+    assert_eq!(strings["fields"].as_array().expect("fields array").len(), 2);
+    let external = take_json(bethkit_semantic_strings_snapshot_json(
+        &context, &record, true,
+    ))?;
+    let value = &external["fields"][0]["value"]["fields"][0]["value"];
+    assert_eq!(value["kind"], "uint");
+    assert_eq!(value["value"], 97);
+    assert_eq!(value["string_table"], "strings");
+    Ok(())
+}
+
+fn union_array_fixture() -> TestResult<(BethkitSemanticContext, BethkitRecord)> {
+    let inner = node(
+        10,
+        "TEST/data/groups/group/items/item/selected",
+        SchemaNodeKind::Union {
+            selector: UnionSelector::Expression(Expression::ReadField {
+                path: "TEST/data/groups/group/tag".to_owned(),
+            }),
+            variants: vec![
+                integer(11, "TEST/data/groups/group/items/item/selected/number"),
+                node(
+                    12,
+                    "TEST/data/groups/group/items/item/selected/text",
+                    SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::String {
+                            string: bethkit_schema::StringType {
+                                encoding: "utf8".to_owned(),
+                                localized: true,
+                                zero_terminated: true,
+                                fixed_length: Some(4),
+                                length_prefix: None,
+                                trailing_terminator: None,
+                                allowed_values: Vec::new(),
+                            },
+                        },
+                    },
+                ),
+            ],
+        },
+    );
+    let item = node(
+        8,
+        "TEST/data/groups/group/items/item",
+        SchemaNodeKind::Union {
+            selector: UnionSelector::Expression(Expression::Int { value: 1 }),
+            variants: vec![
+                integer(9, "TEST/data/groups/group/items/item/unused"),
+                inner,
+            ],
+        },
+    );
+    let group = node(
+        4,
+        "TEST/data/groups/group",
+        SchemaNodeKind::Struct {
+            fields: vec![
+                integer(5, "TEST/data/groups/group/tag"),
+                node(
+                    6,
+                    "TEST/data/groups/group/items",
+                    SchemaNodeKind::Array {
+                        count: ArrayCount::Fixed { count: 2 },
+                        element: Box::new(item),
+                    },
+                ),
+            ],
+        },
+    );
+    let schema = SchemaPackage::new(
+        package()?.manifest().clone(),
+        vec![SchemaRecord {
+            signature: SchemaSignature(*b"TEST"),
+            name: "Array unions".to_owned(),
+            root: node(
+                1,
+                "TEST",
+                SchemaNodeKind::Sequence {
+                    children: vec![subrecord(
+                        2,
+                        "TEST/data",
+                        b"DATA",
+                        node(
+                            3,
+                            "TEST/data/groups",
+                            SchemaNodeKind::Array {
+                                count: ArrayCount::Remainder,
+                                element: Box::new(group),
+                            },
+                        ),
+                    )],
+                },
+            ),
+        }],
+    )?;
+    let context = BethkitSemanticContext(SemanticContext::new(
+        Arc::new(schema),
+        DecoderRegistry::new(),
+    )?);
+    let record = BethkitRecord(Record::from_writable(&WritableRecord {
+        signature: Signature(*b"TEST"),
+        flags: RecordFlags::empty(),
+        form_id: FormId(0x801),
+        form_version: 44,
+        subrecords: vec![WritableSubRecord {
+            signature: Signature(*b"DATA"),
+            data: [0u32, 97, 98, 1, 99, 100]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect(),
+        }],
+    }));
+    Ok((context, record))
+}
+
+/// Resolves nested array union arms exactly even when all localized values are integers.
+#[test]
+fn json_snapshot_retains_each_nested_array_union_selection() -> TestResult {
+    // given
+    let (context, record) = union_array_fixture()?;
+    for localized in [false, true] {
+        // when
+        let full = take_json(bethkit_semantic_snapshot_json(&context, &record, localized))?;
+        let strings = take_json(bethkit_semantic_strings_snapshot_json(
+            &context, &record, localized,
+        ))?;
+
+        // then
+        let groups = full["fields"][0]["value"]["items"]
+            .as_array()
+            .expect("two decoded groups");
+        assert_eq!(groups.len(), 2);
+        for (group_index, group) in groups.iter().enumerate() {
+            assert_eq!(group["schema_path"], "TEST/data/groups/group");
+            assert_eq!(
+                group["fields"][0]["value"]["schema_path"],
+                "TEST/data/groups/group/tag"
+            );
+            let items = group["fields"][1]["value"]["items"]
+                .as_array()
+                .expect("two inner elements");
+            for (item_index, item) in items.iter().enumerate() {
+                let suffix = if group_index == 0 { "number" } else { "text" };
+                assert_eq!(
+                    item["schema_path"],
+                    format!("TEST/data/groups/group/items/item/selected/{suffix}")
+                );
+                assert_eq!(item["translatable"], group_index == 1);
+                assert_eq!(
+                    item["address"]["value_steps"],
+                    json!([
+                        {"kind":"index","index":group_index},
+                        {"kind":"field","index":1,"path":"TEST/data/groups/group/items"},
+                        {"kind":"index","index":item_index}
+                    ])
+                );
+                if localized {
+                    assert_eq!(item["kind"], "uint");
+                }
+            }
+        }
+        let filtered = &strings["fields"][0]["value"]["items"];
+        assert_eq!(filtered.as_array().expect("string-bearing group").len(), 1);
+        assert_eq!(
+            filtered[0]["fields"][0]["value"],
+            groups[1]["fields"][1]["value"]
+        );
+        assert_eq!(strings["structure_hash"], full["structure_hash"]);
+        let editor = bethkit_record_editor_new(&context, &record, localized);
+        assert!(!editor.is_null());
+        let edited = take_json(bethkit_record_editor_snapshot_json(editor))?;
+        assert_eq!(edited, full);
+        bethkit_record_editor_free(editor);
+    }
+    Ok(())
+}
+
+/// Rejects old addresses when a selector switches equally shaped scalar array variants.
+#[test]
+fn array_union_variant_changes_invalidate_addresses() -> TestResult {
+    // given
+    let (context, record) = union_array_fixture()?;
+    let editor = bethkit_record_editor_new(&context, &record, true);
+    assert!(!editor.is_null());
+    let before = take_json(bethkit_record_editor_snapshot_json(editor))?;
+    let original_group = &before["fields"][0]["value"]["items"][0];
+    let tag_address = CString::new(serde_json::to_string(
+        &original_group["fields"][0]["address"],
+    )?)?;
+    let old_item = CString::new(serde_json::to_string(
+        &original_group["fields"][1]["value"]["items"][0]["address"],
+    )?)?;
+    let selected = CString::new(r#"{"kind":"uint","value":1}"#)?;
+
+    // when
+    assert_eq!(
+        bethkit_record_editor_set_at_json(editor, tag_address.as_ptr(), selected.as_ptr()),
+        0
+    );
+    let after = take_json(bethkit_record_editor_snapshot_json(editor))?;
+
+    // then
+    let new_item = &after["fields"][0]["value"]["items"][0]["fields"][1]["value"]["items"][0];
+    assert_eq!(new_item["kind"], "uint");
+    assert_eq!(
+        new_item["schema_path"],
+        "TEST/data/groups/group/items/item/selected/text"
+    );
+    assert_ne!(before["structure_hash"], after["structure_hash"]);
+    assert_eq!(
+        bethkit_record_editor_set_at_json(editor, old_item.as_ptr(), selected.as_ptr()),
+        -1
+    );
+    assert_eq!(
+        take_json(bethkit_record_editor_snapshot_json(editor))?,
+        after
+    );
+    let new_address = CString::new(serde_json::to_string(&new_item["address"])?)?;
+    assert_eq!(
+        bethkit_record_editor_set_at_json(editor, new_address.as_ptr(), selected.as_ptr()),
+        0
+    );
+    let edited = take_json(bethkit_record_editor_snapshot_json(editor))?;
+    assert_eq!(edited["structure_hash"], after["structure_hash"]);
+    bethkit_record_editor_free(editor);
+    Ok(())
+}
 
 fn node(id: u32, path: &str, kind: SchemaNodeKind) -> SchemaNode {
     SchemaNode {
@@ -259,6 +665,7 @@ fn snapshot_copies_owned_bytes_in_nested_arrays() -> TestResult {
         span: ByteSpan { start: 0, end: 3 },
         origin: FieldOrigin::CustomDecoder,
         value: FieldValue::Array(vec![FieldValue::Bytes(Cow::Owned(vec![8, 9, 10]))]),
+        value_selections: Vec::new(),
     }];
     let snapshot = snapshot_fields(&fields);
     assert_eq!(snapshot._storage.bytes.len(), 1);
@@ -631,5 +1038,81 @@ fn schema_json_and_validation_modes_are_structured() -> TestResult {
         .iter()
         .any(|item| item["code"] == "missing_required" && item["severity"] == "warning"));
     assert!(bethkit_semantic_validate_json(&context, &empty, false, 42).is_null());
+    Ok(())
+}
+
+/// Inserts an absent optional field in grammar order and rolls back invalid requests.
+#[test]
+fn json_insert_adds_optional_full_and_preserves_failed_edits() -> TestResult {
+    // given
+    let original = package()?;
+    let mut records = original.records().to_vec();
+    let SchemaNodeKind::Sequence { children } = &mut records[0].root.kind else {
+        panic!("fixture root must be a sequence");
+    };
+    let mut name = subrecord(
+        16,
+        "TEST/name",
+        b"FULL",
+        node(
+            17,
+            "TEST/name/value",
+            SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::String {
+                    string: serde_json::from_value(json!({
+                        "encoding":"utf8", "zero_terminated":true, "fixed_length":null
+                    }))?,
+                },
+            },
+        ),
+    );
+    name.required = false;
+    children.insert(1, name);
+    let package = SchemaPackage::new(original.manifest().clone(), records)?;
+    let context = BethkitSemanticContext(SemanticContext::new(
+        Arc::new(package),
+        DecoderRegistry::builtin(),
+    )?);
+    let source = record();
+    let editor = bethkit_record_editor_new(&context, &source, false);
+    let path = CString::new("TEST/name")?;
+    let value = CString::new(r#"{"kind":"string","value":"Inserted name"}"#)?;
+    // when
+    assert_eq!(
+        bethkit_record_editor_insert_json(editor, path.as_ptr(), value.as_ptr()),
+        0
+    );
+    let inserted = take_json(bethkit_record_editor_snapshot_json(editor))?;
+    // then
+    assert_eq!(inserted["fields"][5]["path"], "TEST/name");
+    assert_eq!(inserted["fields"][5]["value"]["value"], "Inserted name");
+    assert_eq!(inserted["fields"][6]["path"], "TEST/items");
+    assert_eq!(inserted["fields"][8]["value"]["value"], json!([4, 5, 6]));
+    for (invalid_path, invalid_value) in [
+        ("TEST/missing", r#"{"kind":"string","value":"Ignored"}"#),
+        ("TEST/name", "malformed JSON"),
+        ("TEST/name", r#"{"kind":"uint","value":42}"#),
+    ] {
+        let invalid_path = CString::new(invalid_path)?;
+        let invalid_value = CString::new(invalid_value)?;
+        assert_eq!(
+            bethkit_record_editor_insert_json(
+                editor,
+                invalid_path.as_ptr(),
+                invalid_value.as_ptr(),
+            ),
+            -1
+        );
+        assert_eq!(
+            take_json(bethkit_record_editor_snapshot_json(editor))?,
+            inserted
+        );
+    }
+    assert!(source.0.get(Signature(*b"FULL"))?.is_none());
+    assert_eq!(
+        bethkit_record_editor_insert_json(editor, std::ptr::null(), value.as_ptr()),
+        -1
+    );
+    bethkit_record_editor_free(editor);
     Ok(())
 }

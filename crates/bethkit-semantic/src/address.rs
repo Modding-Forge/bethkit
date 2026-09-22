@@ -77,7 +77,7 @@ pub fn schema_hash_hex(digest: &[u8; 32]) -> String {
 /// Scalar values are deliberately excluded so independent value edits do not
 /// invalidate each other's addresses. Byte offsets and scalar lengths are excluded
 /// because navigation uses schema members, not byte positions. Selected union paths
-/// remain part of the structural identity.
+/// remain part of the structural identity, including each nested array occurrence.
 pub fn structure_hash(fields: &[Field<'_>]) -> String {
     let mut digest = Sha256::new();
     digest.update(b"bethkit-field-address-v1");
@@ -92,6 +92,15 @@ pub fn structure_hash(fields: &[Field<'_>]) -> String {
         for scope in &field.repeat_scopes {
             hash_text(&mut digest, &scope.path);
             digest.update(scope.occurrence.to_le_bytes());
+        }
+        hash_usize(&mut digest, field.value_selections.len());
+        for selection in &field.value_selections {
+            hash_text(&mut digest, &selection.schema_path);
+            hash_usize(&mut digest, selection.array_indices.len());
+            for index in &selection.array_indices {
+                hash_usize(&mut digest, *index);
+            }
+            hash_text(&mut digest, &selection.effective_path);
         }
         hash_value(&mut digest, &field.value);
     }
@@ -139,5 +148,65 @@ fn hash_value(digest: &mut Sha256, value: &FieldValue<'_>) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use bethkit_core::Signature;
+    use bethkit_schema::SchemaNodeId;
+
+    use super::structure_hash;
+    use crate::{ByteSpan, Field, FieldOrigin, FieldValue, ValueSelection};
+
+    fn selected_field() -> Field<'static> {
+        Field {
+            subrecord_index: 0,
+            repeat_scopes: Vec::new(),
+            node_id: SchemaNodeId(1),
+            path: "TEST/data".to_owned(),
+            effective_path: None,
+            value_selections: vec![ValueSelection {
+                schema_path: "TEST/data/items/item".to_owned(),
+                array_indices: vec![0, 1],
+                effective_path: "TEST/data/items/item/first".to_owned(),
+            }],
+            name: "Data".to_owned(),
+            subrecord_signature: Signature(*b"DATA"),
+            occurrence: 0,
+            span: ByteSpan { start: 0, end: 4 },
+            origin: FieldOrigin::Schema,
+            value: FieldValue::Array(vec![FieldValue::String(Cow::Borrowed("old"))]),
+        }
+    }
+
+    /// Distinguishes every selected union occurrence without hashing editable scalar text.
+    #[test]
+    fn union_selection_identity_is_structural() -> Result<(), Box<dyn std::error::Error>> {
+        // given
+        let mut fields = [selected_field()];
+        let original = structure_hash(&fields);
+
+        // when
+        fields[0].value = FieldValue::Array(vec![FieldValue::String(Cow::Borrowed(
+            "a substantially longer replacement",
+        ))]);
+        fields[0].span.end = 36;
+
+        // then
+        assert_eq!(structure_hash(&fields), original);
+        fields[0].value_selections[0].effective_path = "TEST/data/items/item/second".to_owned();
+        assert_ne!(structure_hash(&fields), original);
+        fields[0].value_selections[0].effective_path = "TEST/data/items/item/first".to_owned();
+        fields[0].value_selections[0].array_indices = vec![1, 0];
+        assert_ne!(structure_hash(&fields), original);
+        fields[0].value_selections[0].array_indices = vec![0, 1];
+        fields[0].value_selections[0].schema_path = "TEST/data/other/item".to_owned();
+        assert_ne!(structure_hash(&fields), original);
+        fields[0].value_selections.clear();
+        assert_ne!(structure_hash(&fields), original);
+        Ok(())
     }
 }

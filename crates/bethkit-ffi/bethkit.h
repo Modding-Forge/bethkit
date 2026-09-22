@@ -2087,6 +2087,69 @@ char *bethkit_semantic_snapshot_json(const struct BethkitSemanticContext *contex
 char *bethkit_record_editor_snapshot_json(const struct BethkitRecordEditor *editor);
 
 /**
+ * Returns only schema-declared translatable values as an owned JSON snapshot.
+ *
+ * Borrows both handles during the call. Free the result with `bethkit_string_free`.
+ * The document has `projection: "strings"`; non-string branches are omitted before
+ * JSON serialization. Surviving leaves retain exact full-snapshot addresses and the
+ * structure hash covers the complete record, including omitted branches. This is not
+ * a complete record model and must not be used to reconstruct one.
+ *
+ * # Errors
+ *
+ * Returns null and sets the last error for null handles, decoding/serialization
+ * failures, or internal panics.
+ *
+ * # Safety
+ *
+ * Both handles must be live for this call. `localized` must match the source plugin.
+ */
+char *bethkit_semantic_strings_snapshot_json(const struct BethkitSemanticContext *context,
+                                             const BethkitRecord *record,
+                                             bool localized);
+
+/**
+ * Returns an editor's translatable values with exact current structural addresses.
+ *
+ * The owned JSON uses `projection: "strings"`, omits non-string branches, and must
+ * be freed with `bethkit_string_free`. Hashes still cover the complete record.
+ * Obtain new addresses after structural edits or after-load normalization.
+ *
+ * # Errors
+ *
+ * Returns null and sets the last error for null/consumed editors, decoding or
+ * serialization failures, or internal panics.
+ *
+ * # Safety
+ *
+ * `editor` must be a live borrowed editor handle throughout the call.
+ */
+char *bethkit_record_editor_strings_snapshot_json(const struct BethkitRecordEditor *editor);
+
+/**
+ * Inserts a subrecord using its schema path and a tagged owned JSON value.
+ *
+ * Use this for absent optional subrecords that do not yet have an address.
+ * The native grammar determines placement and rejects ambiguous repeat scopes.
+ * Complete multi-subrecord groups cannot be created through this operation.
+ * All handles and UTF-8 strings are borrowed only for this call.
+ *
+ * # Errors
+ *
+ * Returns -1 and sets the last error for null or consumed handles, malformed JSON,
+ * invalid paths or values, or a grammar-ambiguous insertion. Failed edits do not
+ * change the editor. Returns zero on success.
+ *
+ * # Safety
+ *
+ * Non-null pointers must remain valid for this call. Strings must be valid
+ * NUL-terminated UTF-8. The editor must not be concurrently accessed.
+ */
+int32_t bethkit_record_editor_insert_json(struct BethkitRecordEditor *editor,
+                                          const char *path,
+                                          const char *value_json);
+
+/**
  * Replaces the exact value selected by a native snapshot address.
  *
  * Both JSON strings are borrowed NUL-terminated UTF-8. `value_json` uses the

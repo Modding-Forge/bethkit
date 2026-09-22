@@ -47,6 +47,7 @@ impl RecordEditor {
                     node_id: field.node_id,
                     path: field.path,
                     effective_path: field.effective_path,
+                    value_selections: field.value_selections,
                     name: field.name,
                     subrecord_signature: field.subrecord_signature,
                     occurrence: field.occurrence,
