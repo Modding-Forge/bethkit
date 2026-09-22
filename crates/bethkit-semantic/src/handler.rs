@@ -6532,7 +6532,7 @@ fn parse_wwise_guid(value: &str) -> Result<[u8; 16]> {
     guid[0..4].copy_from_slice(&data1.to_le_bytes());
     guid[4..6].copy_from_slice(&data2.to_le_bytes());
     guid[6..8].copy_from_slice(&data3.to_le_bytes());
-    for (index, chunk) in tail.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in tail.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let text = std::str::from_utf8(chunk)
             .map_err(|_| wwise_guid_error("Wwise GUID contains invalid text"))?;
         guid[8 + index] = u8::from_str_radix(text, 16)
@@ -10199,7 +10199,7 @@ impl SemanticHandler for DefaultObjectArrayAfterLoad {
             });
         }
         let mut data = Vec::with_capacity(objects.data.len());
-        for entry in objects.data.chunks_exact(8) {
+        for entry in objects.data.as_chunks::<8>().0 {
             let use_code = u32::from_le_bytes(
                 entry[..4]
                     .try_into()
@@ -10877,7 +10877,9 @@ fn normalize_oblivion_point_connections(
         return None;
     }
     let expected_connections = points
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .map(|point| usize::from(point[12]))
         .sum::<usize>();
     if expected_connections.saturating_mul(2) != connections.len() {
@@ -10887,13 +10889,15 @@ fn normalize_oblivion_point_connections(
     let mut normalized_connections = Vec::with_capacity(connections.len());
     let mut source_offset = 0;
     let mut changed = false;
-    for (index, point) in points.chunks_exact(16).enumerate() {
+    for (index, point) in points.as_chunks::<16>().0.iter().enumerate() {
         let count = usize::from(point[12]);
         let end = source_offset + count * 2;
         let connection_group = &connections[source_offset..end];
         let retained_len = connection_group
-            .chunks_exact(2)
-            .rposition(|connection| connection != [0xff, 0xff])
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .rposition(|connection| *connection != [0xff, 0xff])
             .map_or(0, |last| last + 1);
         if retained_len != count {
             changed = true;
@@ -10993,7 +10997,7 @@ fn deduplicate_oblivion_inter_cell_connections(data: &[u8]) -> Option<Vec<u8>> {
     if !data.len().is_multiple_of(16) {
         return None;
     }
-    let entries = data.chunks_exact(16).collect::<Vec<_>>();
+    let entries = data.as_chunks::<16>().0;
     let mut keys = BTreeSet::new();
     let mut keep = vec![true; entries.len()];
     for (index, entry) in entries.iter().enumerate().rev() {
@@ -11012,7 +11016,7 @@ fn deduplicate_oblivion_inter_cell_connections(data: &[u8]) -> Option<Vec<u8>> {
     }
     Some(
         entries
-            .into_iter()
+            .iter()
             .zip(keep)
             .filter_map(|(entry, retain)| retain.then_some(entry))
             .flatten()
@@ -12654,8 +12658,10 @@ fn append_fallout_npc_morph_mutations(
     }
     let current_keys = keys
         .data
-        .chunks_exact(4)
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four-byte morph key")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| u32::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     let mut master_positions = BTreeMap::new();
     for (index, key) in master_keys.iter().copied().enumerate() {
@@ -13581,7 +13587,9 @@ impl SemanticHandler for RegionPointOrderAfterLoad {
         }
         let normalized = points
             .data
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .rev()
             .flat_map(|point| point.iter().copied())
             .collect();
@@ -17318,7 +17326,9 @@ fn parse_fixed_hex_bytes(value: &str, length: usize) -> Result<Vec<u8>> {
     }
     let mut bytes = digits
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let text = std::str::from_utf8(pair).map_err(|_| {
                 timestamp_date_error("timestamp edit value contains invalid hexadecimal text")
