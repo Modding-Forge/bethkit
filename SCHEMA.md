@@ -6,7 +6,7 @@ The package derives its record structures and callback metadata from the [xEdit 
 
 ## Distribution
 
-Generated schema binaries are not stored in the Bethkit repository. The pinned source for Bethkit 0.4.0 is:
+Generated schema binaries are not stored in the Bethkit repository. The pinned source for Bethkit 0.5.0 is:
 
 | Property | Value |
 | --- | --- |
