@@ -1054,7 +1054,7 @@ impl RecordEditor {
                     UnionSelectionContext {
                         field_values,
                         source_record: &self.record,
-                        source_subrecord_index: None,
+                        source_subrecord_index,
                         value_scope: None,
                     },
                 )?;
@@ -1086,7 +1086,7 @@ impl RecordEditor {
             node,
             &updated,
             field_values,
-            None,
+            source_subrecord_index,
             &self.record,
         )?;
         if old_value.is_some_and(|old| handler_values_equal(&handler_value, old)) {
@@ -1110,7 +1110,7 @@ impl RecordEditor {
                 node,
                 &updated,
                 field_values,
-                None,
+                source_subrecord_index,
                 &self.record,
             )?;
             let access = source_subrecord_index.map_or_else(
@@ -12314,6 +12314,58 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected_source
         );
+        Ok(())
+    }
+
+    /// Preserves each PERK union's source occurrence throughout after-set processing.
+    #[test]
+    fn perk_effect_value_edits_use_repeat_local_union_selector(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let context = perk_effect_editor_context()?;
+        let source = Record::from_writable(&WritableRecord {
+            signature: Signature(*b"PERK"),
+            flags: bethkit_core::RecordFlags::empty(),
+            form_id: bethkit_core::FormId(0x1234),
+            form_version: 44,
+            subrecords: [
+                (*b"PRKE", vec![2, 1]),
+                (*b"DATA", vec![0, 2, 0, 0]),
+                (*b"PRKF", Vec::new()),
+                (*b"PRKE", vec![1, 2]),
+                (*b"DATA", vec![1, 2, 3, 4]),
+                (*b"PRKF", Vec::new()),
+            ]
+            .into_iter()
+            .map(|(signature, data)| WritableSubRecord {
+                signature: Signature(signature),
+                data,
+            })
+            .collect(),
+        });
+        let path = "PERK/8:Effects/repeat/0:Effect/1:Effect Data";
+        let mut editor = context.edit(&source, false)?;
+        // when
+        editor.set(
+            path,
+            0,
+            &OwnedFieldValue::Struct(vec![
+                OwnedFieldValue::UInt(0),
+                OwnedFieldValue::UInt(3),
+                OwnedFieldValue::UInt(0),
+                OwnedFieldValue::UInt(0),
+            ]),
+        )?;
+        editor.set(path, 1, &OwnedFieldValue::Bytes(vec![5, 6, 7, 8]))?;
+        // then
+        let updated = Record::from_writable(&editor.record);
+        assert_eq!(updated.subrecords()?[1].as_bytes(), &[0, 3, 0, 0]);
+        assert_eq!(updated.subrecords()?[4].as_bytes(), &[5, 6, 7, 8]);
+        assert_eq!(source.subrecords()?[1].as_bytes(), &[0, 2, 0, 0]);
+        assert_eq!(source.subrecords()?[4].as_bytes(), &[1, 2, 3, 4]);
+        let fields = context.view(&updated, false)?.fields()?;
+        assert!(matches!(fields[1].value, FieldValue::Struct(_)));
+        assert!(matches!(fields[4].value, FieldValue::Bytes(_)));
         Ok(())
     }
 
