@@ -5,6 +5,13 @@
 #[path = "editor_address.rs"]
 mod address;
 
+#[path = "editor_union.rs"]
+mod union;
+
+#[cfg(test)]
+#[path = "editor_union_tests.rs"]
+mod union_tests;
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
@@ -1324,6 +1331,9 @@ impl RecordEditor {
         occurrence: &mut usize,
         context: NestedValueContext<'_>,
     ) -> Result<Option<&'a OwnedFieldValue>> {
+        if !path_is_within(target_path, &node.path) {
+            return Ok(None);
+        }
         if node.path == target_path {
             if *occurrence == 0 {
                 return Ok(Some(value));
@@ -1459,6 +1469,9 @@ impl RecordEditor {
         replacement: &mut Option<OwnedFieldValue>,
         context: NestedValueContext<'_>,
     ) -> Result<bool> {
+        if !path_is_within(target_path, &node.path) {
+            return Ok(false);
+        }
         if node.path == target_path {
             if *occurrence == 0 {
                 *value = replacement.take().ok_or_else(|| SemanticError::Handler {
@@ -1865,6 +1878,7 @@ impl RecordEditor {
     ) -> Result<&'a SchemaNode> {
         let selected = match selector {
             UnionSelector::Expression(expression) => {
+                let expression = self.union_expression(node, expression, 0, field_values);
                 let context = EvalContext {
                     payload: &[],
                     field_values,
@@ -1951,6 +1965,7 @@ impl RecordEditor {
             source_subrecord_index,
             value_scope,
         } = context;
+        let mut selection_error = None;
         for (index, variant) in variants.iter().enumerate() {
             let Ok(encoded) = self.encode_node_with_scope(
                 variant,
@@ -1964,6 +1979,8 @@ impl RecordEditor {
             };
             let selected = match selector {
                 UnionSelector::Expression(expression) => {
+                    let expression =
+                        self.union_expression(node, expression, encoded.len(), field_values);
                     let context = EvalContext {
                         payload: &encoded,
                         field_values,
@@ -1972,7 +1989,15 @@ impl RecordEditor {
                     };
                     match expression.evaluate(&context, 1024) {
                         Ok(EvalValue::Int(selected)) => selected,
-                        _ => continue,
+                        Ok(_) => {
+                            selection_error =
+                                Some("selector returned a non-integer value".to_owned());
+                            continue;
+                        }
+                        Err(error) => {
+                            selection_error = Some(error.to_string());
+                            continue;
+                        }
                     }
                 }
                 UnionSelector::Callback { callback_id } => {
@@ -2035,7 +2060,10 @@ impl RecordEditor {
         }
         Err(encode_error(
             &node.path,
-            "value does not match the selected union variant",
+            selection_error.map_or_else(
+                || "value does not match the selected union variant".to_owned(),
+                |error| format!("value does not match the selected union variant: {error}"),
+            ),
         ))
     }
 
@@ -3136,6 +3164,23 @@ impl RecordEditor {
                     })?;
             let mut updated = handler_to_owned_value(current.to_handler_value(), &parent.path)?;
             let index = self.assigned_subrecord_index(record, &parent.path, parent_occurrence)?;
+            let context = CandidateValueContext {
+                source_record: record,
+                source_subrecord_index: Some(index),
+                decoded_values,
+            };
+            // Counter maintenance must not re-encode unrelated packed values for a no-op.
+            let mut probe = remaining_occurrence;
+            if let Some(existing) =
+                self.nested_value_at_for_record(&parent, &updated, path, &mut probe, context)?
+            {
+                if replacement
+                    .as_ref()
+                    .is_some_and(|value| owned_values_equal(existing, value))
+                {
+                    return Ok(());
+                }
+            }
             if !self.set_nested_value_for_record(
                 &parent,
                 &mut updated,
@@ -3648,6 +3693,8 @@ fn collect_expression_field_values(
         FieldValue::UInt(value) | FieldValue::Flags { value, .. } => {
             if let Ok(value) = i64::try_from(*value) {
                 output.insert(path.to_owned(), value);
+            } else {
+                output.remove(path);
             }
         }
         FieldValue::Enumeration { value, .. } => {
@@ -3679,6 +3726,9 @@ fn collect_owned_expression_field_values(
         (SchemaNodeKind::Primitive { .. }, OwnedFieldValue::UInt(value)) => {
             if let Ok(value) = i64::try_from(*value) {
                 output.insert(node.path.clone(), value);
+            } else {
+                // An unrepresentable update must not reuse an earlier selector value.
+                output.remove(&node.path);
             }
         }
         (SchemaNodeKind::Primitive { .. }, OwnedFieldValue::FormId(value)) => {
@@ -9883,7 +9933,7 @@ mod tests {
         Ok(())
     }
 
-    fn test_manifest() -> SchemaManifest {
+    pub(super) fn test_manifest() -> SchemaManifest {
         SchemaManifest {
             format_version: PACKAGE_FORMAT_VERSION,
             game: SchemaGame::SkyrimSe,

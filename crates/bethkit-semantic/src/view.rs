@@ -1173,7 +1173,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
             }
             SchemaNodeKind::Union { selector, variants } => {
                 let index =
-                    self.select_union_index(node, selector, payload, field_values, frame)?;
+                    self.select_union_index(node, selector, payload, current, field_values, frame)?;
                 let variant: &SchemaNode =
                     variants.get(index).ok_or_else(|| SemanticError::Decode {
                         path: node.path.clone(),
@@ -1295,13 +1295,14 @@ impl<'context, 'record> RecordView<'context, 'record> {
         node: &SchemaNode,
         selector: &UnionSelector,
         payload: &[u8],
+        current: &[u8],
         field_values: &BTreeMap<String, i64>,
         frame: DecodeFrame<'_, '_>,
     ) -> Result<usize> {
         let selected = match selector {
             UnionSelector::Expression(expression) => {
                 let context = EvalContext {
-                    payload,
+                    payload: current,
                     field_values,
                     form_version: self.record.header.form_version,
                     record_signature: self.record.header.signature.into(),
