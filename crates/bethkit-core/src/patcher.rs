@@ -26,6 +26,13 @@ use crate::record::Record;
 use crate::types::{FormId, RecordFlags};
 use crate::writer::WritableRecord;
 
+#[path = "patcher_header.rs"]
+mod header;
+
+#[cfg(test)]
+#[path = "patcher_header_tests.rs"]
+mod header_tests;
+
 /// Modifications to apply to the TES4/TES3 plugin header during
 /// [`PluginPatcher::write_to`].
 ///
@@ -198,9 +205,9 @@ impl<'p> PluginPatcher<'p> {
     /// Registers a header patch.
     ///
     /// Replaces any previously registered [`PluginHeaderPatch`]. At write
-    /// time the TES4/TES3 header is re-serialised with the given overrides;
-    /// HEDR `record_count` and `next_object_id` are always recomputed from the
-    /// actual group content rather than being caller-settable.
+    /// time only the specified header fields and HEDR counters are updated.
+    /// Unrelated subrecord bytes and their order are preserved. The next object
+    /// ID is increased when necessary, never lowered below its original value.
     pub fn patch_header(&mut self, patch: PluginHeaderPatch) -> &mut Self {
         self.header_patch = Some(patch);
         self
@@ -249,7 +256,7 @@ impl<'p> PluginPatcher<'p> {
         // Write the TES4/TES3 header. Recompute when records were actually
         // replaced or when an explicit header patch was registered.
         if self.header_patch.is_some() || !touched_groups.is_empty() {
-            self.write_header_updated(writer)?;
+            header::write_updated(self.plugin, self.header_patch.as_ref(), writer)?;
         } else {
             let header_bytes: &[u8] =
                 source
@@ -263,114 +270,6 @@ impl<'p> PluginPatcher<'p> {
         for group in self.plugin.groups() {
             self.write_group(group, source, &touched_groups, writer)?;
         }
-
-        Ok(())
-    }
-
-    /// Serialises an updated TES4/TES3 record with recomputed HEDR fields.
-    ///
-    /// `record_count` is counted from the groups currently in the plugin.
-    /// `next_object_id` is the maximum object ID of plugin-owned FormIDs,
-    /// clamped to a minimum of `0x800`.
-    fn write_header_updated(&self, writer: &mut impl Write) -> Result<()> {
-        let header = &self.plugin.header;
-        let hp = self.header_patch.as_ref();
-
-        let effective_masters: &[String] = hp
-            .and_then(|p| p.masters.as_deref())
-            .unwrap_or(&header.masters);
-
-        let effective_description: Option<&str> = hp
-            .and_then(|p| p.description.as_deref())
-            .or(header.description.as_deref());
-
-        // The file-index for plugin-owned records: one past the last master.
-        let own_file_index: u8 = effective_masters.len() as u8;
-
-        // Count all records that live under GRUPs.
-        let record_count: u32 = self
-            .plugin
-            .groups()
-            .iter()
-            .flat_map(|g| g.records_recursive())
-            .count() as u32;
-
-        // Largest object_id among self-owned records, minimum 0x800.
-        let next_id_raw: u32 = self
-            .plugin
-            .groups()
-            .iter()
-            .flat_map(|g| g.records_recursive())
-            .filter(|r| r.header.form_id.file_index() == own_file_index)
-            .map(|r| r.header.form_id.object_id())
-            .max()
-            .unwrap_or(0x800)
-            .max(0x800)
-            + 1;
-
-        // Build subrecord payload.
-        let mut payload: Vec<u8> = Vec::new();
-
-        // HEDR subrecord: 4-sig + 2-size + 12-data
-        payload.extend_from_slice(b"HEDR");
-        payload.extend_from_slice(&12u16.to_le_bytes());
-        payload.extend_from_slice(&header.hedr_version.to_le_bytes());
-        payload.extend_from_slice(&record_count.to_le_bytes());
-        payload.extend_from_slice(&next_id_raw.to_le_bytes());
-
-        // MAST/DATA pairs (one per effective master).
-        for master in effective_masters {
-            let mut name_bytes: Vec<u8> = master.as_bytes().to_vec();
-            name_bytes.push(0); // NUL terminator
-            payload.extend_from_slice(b"MAST");
-            payload.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
-            payload.extend_from_slice(&name_bytes);
-            // DATA is always 8 zero bytes following a MAST.
-            payload.extend_from_slice(b"DATA");
-            payload.extend_from_slice(&8u16.to_le_bytes());
-            payload.extend_from_slice(&0u64.to_le_bytes());
-        }
-
-        // Optional SNAM description.
-        if let Some(desc) = effective_description {
-            let mut desc_bytes: Vec<u8> = desc.as_bytes().to_vec();
-            desc_bytes.push(0); // NUL terminator
-            payload.extend_from_slice(b"SNAM");
-            payload.extend_from_slice(&(desc_bytes.len() as u16).to_le_bytes());
-            payload.extend_from_slice(&desc_bytes);
-        }
-
-        // Compute effective record flags.
-        let mut flags: RecordFlags = header.record.header.flags;
-        if let Some(p) = hp {
-            if let Some(set) = p.flags_set {
-                flags |= set;
-            }
-            if let Some(clear) = p.flags_clear {
-                flags &= !clear;
-            }
-        }
-
-        // Write the 24-byte record header, then the subrecord payload.
-        let sig_bytes: [u8; 4] = header.record.header.signature.0;
-        writer.write_all(&sig_bytes).map_err(io_err)?;
-        writer
-            .write_all(&(payload.len() as u32).to_le_bytes())
-            .map_err(io_err)?;
-        writer
-            .write_all(&flags.bits().to_le_bytes())
-            .map_err(io_err)?;
-        writer.write_all(&0u32.to_le_bytes()).map_err(io_err)?; // form_id = 0
-        writer
-            .write_all(&header.record.header.version_control.to_le_bytes())
-            .map_err(io_err)?;
-        writer
-            .write_all(&header.record.header.form_version.to_le_bytes())
-            .map_err(io_err)?;
-        writer
-            .write_all(&header.record.header.unknown.to_le_bytes())
-            .map_err(io_err)?;
-        writer.write_all(&payload).map_err(io_err)?;
 
         Ok(())
     }
@@ -737,9 +636,9 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         patcher.write_to(&mut out)?;
 
-        // then — reparsed header still reports 2 records
+        // then - xEdit counts the two records plus their containing GRUP.
         let reparsed = Plugin::from_bytes(&out, GameContext::sse())?;
-        assert_eq!(reparsed.header.record_count, 2);
+        assert_eq!(reparsed.header.record_count, 3);
         Ok(())
     }
 
