@@ -15,9 +15,9 @@ use crate::handler::HandlerInvocationAccess;
 use crate::value::float_from_raw;
 use crate::{
     grammar::interpret, ByteSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, FieldOrigin,
-    FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, NamedValue, ParsedEditValue,
-    Result, SemanticContext, SemanticError, SemanticLink, ValidationMode, ValidationReport,
-    ValueFormat,
+    FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, InlineStringEncoding,
+    NamedValue, ParsedEditValue, Result, SemanticContext, SemanticError, SemanticLink,
+    ValidationMode, ValidationReport, ValueFormat,
 };
 
 /// One decoded top-level record field.
@@ -958,8 +958,14 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             current.len()
                         ),
                     })?;
-                decode_primitive(primitive, data, self.localized, &node.path)
-                    .map(|value| (value, consumed, None))
+                decode_primitive(
+                    primitive,
+                    data,
+                    self.localized,
+                    self.context.inline_string_encoding(),
+                    &node.path,
+                )
+                .map(|value| (value, consumed, None))
             }
             SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
                 let optional_from = match &node.kind {
@@ -1693,6 +1699,7 @@ fn decode_primitive<'a>(
     primitive: &PrimitiveType,
     data: &'a [u8],
     localized: bool,
+    inline_encoding: Option<InlineStringEncoding>,
     path: &str,
 ) -> Result<FieldValue<'a>> {
     match primitive {
@@ -1707,7 +1714,9 @@ fn decode_primitive<'a>(
         PrimitiveType::Float {
             width, byte_order, ..
         } => decode_float(*width, *byte_order, data, path),
-        PrimitiveType::String { string } => decode_string(string, data, localized, path),
+        PrimitiveType::String { string } => {
+            decode_string(string, data, localized, inline_encoding, path)
+        }
         PrimitiveType::Bytes { length } => {
             if let Some(expected) = length {
                 if data.len() != *expected as usize {
@@ -1948,6 +1957,7 @@ fn decode_string<'a>(
     string: &StringType,
     data: &'a [u8],
     localized: bool,
+    inline_encoding: Option<InlineStringEncoding>,
     path: &str,
 ) -> Result<FieldValue<'a>> {
     if is_localized_string(string) && localized {
@@ -1970,7 +1980,11 @@ fn decode_string<'a>(
     } else {
         bytes
     };
-    let value: Cow<'a, str> = match text_encoding(string) {
+    let encoding = inline_encoding
+        .filter(|_| is_localized_string(string))
+        .map(InlineStringEncoding::schema_name)
+        .unwrap_or_else(|| text_encoding(string));
+    let value: Cow<'a, str> = match encoding {
         "utf8" => {
             Cow::Borrowed(
                 std::str::from_utf8(bytes).map_err(|error| SemanticError::Decode {
@@ -5409,13 +5423,70 @@ mod tests {
             allowed_values: Vec::new(),
         };
 
-        let value = decode_string(&string, b"Gr\xfc\xdfe\0ignored", false, "TEST")
+        let value = decode_string(&string, b"Gr\xfc\xdfe\0ignored", false, None, "TEST")
             .expect("Windows-1252 string should decode");
 
         match value {
             FieldValue::String(value) => assert_eq!(value, "Grüße"),
             other => panic!("expected string, got {other:?}"),
         }
+    }
+
+    /// Decodes UTF-8 inline bytes when a context overrides a legacy schema field.
+    #[test]
+    fn inline_override_decodes_utf8() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let string = StringType {
+            encoding: "windows_1252".to_owned(),
+            localized: true,
+            zero_terminated: true,
+            fixed_length: None,
+            length_prefix: None,
+            trailing_terminator: None,
+            allowed_values: Vec::new(),
+        };
+
+        // when
+        let value = decode_string(
+            &string,
+            b"Gr\xc3\xbc\xc3\x9fe\0",
+            false,
+            Some(InlineStringEncoding::Utf8),
+            "TEST",
+        )?;
+
+        // then
+        match value {
+            FieldValue::String(value) => assert_eq!(value, "Grüße"),
+            other => panic!("expected string, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// Leaves technical inline fields on their schema codec despite an override.
+    #[test]
+    fn override_keeps_technical_text() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let string = StringType {
+            encoding: "windows_1252".to_owned(),
+            localized: false,
+            zero_terminated: true,
+            fixed_length: None,
+            length_prefix: None,
+            trailing_terminator: None,
+            allowed_values: Vec::new(),
+        };
+        let value = decode_string(
+            &string,
+            b"Gr\xfc\xdfe\0",
+            false,
+            Some(InlineStringEncoding::Utf8),
+            "TEST",
+        )?;
+        match value {
+            FieldValue::String(value) => assert_eq!(value, "Grüße"),
+            other => panic!("expected string, got {other:?}"),
+        }
+        Ok(())
     }
 
     #[test]
@@ -5430,8 +5501,8 @@ mod tests {
             allowed_values: Vec::new(),
         };
 
-        let value =
-            decode_string(&string, b"\x81", false, "TEST").expect("control byte should decode");
+        let value = decode_string(&string, b"\x81", false, None, "TEST")
+            .expect("control byte should decode");
 
         match value {
             FieldValue::String(value) => assert_eq!(value, "\u{81}"),
@@ -5454,7 +5525,7 @@ mod tests {
             allowed_values: Vec::new(),
         };
 
-        let value = decode_string(&string, b"\x03\0abc|", false, "TEST")
+        let value = decode_string(&string, b"\x03\0abc|", false, None, "TEST")
             .expect("length-prefixed string should decode");
 
         match value {
@@ -5476,7 +5547,7 @@ mod tests {
         };
 
         let bytes = 0x1234_5678_u32.to_le_bytes();
-        let value = decode_string(&string, &bytes, true, "TEST")
+        let value = decode_string(&string, &bytes, true, None, "TEST")
             .expect("localized string ID should decode");
 
         match value {

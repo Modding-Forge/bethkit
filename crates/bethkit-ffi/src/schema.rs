@@ -34,7 +34,7 @@ use std::sync::Arc;
 use bethkit_schema::{SchemaCatalog, SchemaPackage};
 use bethkit_semantic::{
     DecoderRegistry, DiagnosticCode, DiagnosticSeverity, Field, FieldOrigin, FieldValue,
-    OwnedFieldValue, RecordEditor, SemanticContext, ValidationMode,
+    InlineStringEncoding, OwnedFieldValue, RecordEditor, SemanticContext, ValidationMode,
 };
 
 use crate::error::FfiError;
@@ -483,6 +483,50 @@ pub extern "C" fn bethkit_semantic_context_new(
         std::ptr::null_mut()
     );
     Box::into_raw(Box::new(BethkitSemanticContext(context)))
+}
+
+/// Creates a semantic context with an explicit inline string encoding.
+///
+/// `encoding` is 1 for UTF-8 or 2 for Windows-1252. This setting is used
+/// when reading and editing schema-localizable text embedded in a plugin.
+/// Technical inline strings and external string-table IDs are unaffected.
+/// Returns null and sets the last error on invalid input.
+///
+/// # Safety
+///
+/// `package` must be a live borrowed schema-package handle. The returned
+/// context is owned by the caller and must be freed with
+/// [`bethkit_semantic_context_free`].
+#[no_mangle]
+pub extern "C" fn bethkit_semantic_context_new_with_inline_encoding(
+    package: *const BethkitSchemaPackage,
+    encoding: u32,
+) -> *mut BethkitSemanticContext {
+    null_check!(
+        package,
+        "bethkit_semantic_context_new_with_inline_encoding",
+        std::ptr::null_mut()
+    );
+    ffi_try!(
+        (|| -> crate::Result<*mut BethkitSemanticContext> {
+            let encoding = match encoding {
+                1 => InlineStringEncoding::Utf8,
+                2 => InlineStringEncoding::Windows1252,
+                _ => {
+                    return Err(FfiError::InvalidArgument {
+                        context: "bethkit_semantic_context_new_with_inline_encoding",
+                        message: format!("unsupported inline encoding code {encoding}"),
+                    });
+                }
+            };
+            // SAFETY: package was checked for null and remains borrowed.
+            let package = unsafe { &*package };
+            let context = SemanticContext::new(package.0.clone(), DecoderRegistry::builtin())?
+                .with_inline_string_encoding(encoding);
+            Ok(Box::into_raw(Box::new(BethkitSemanticContext(context))))
+        })(),
+        std::ptr::null_mut()
+    )
 }
 
 /// Frees an owned semantic context. Passing null is a no-op.

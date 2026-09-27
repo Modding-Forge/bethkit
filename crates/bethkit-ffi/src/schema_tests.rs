@@ -1041,6 +1041,29 @@ fn schema_json_and_validation_modes_are_structured() -> TestResult {
     Ok(())
 }
 
+/// Keeps the optional inline encoding ABI explicit and rejects unknown codes.
+#[test]
+fn semantic_context_inline_encoding_abi() -> TestResult {
+    // given
+    let package = BethkitSchemaPackage(Arc::new(package()?));
+
+    // when
+    let context = bethkit_semantic_context_new_with_inline_encoding(&package, 1);
+
+    // then
+    assert!(!context.is_null());
+    // SAFETY: the constructor returned a live owned pointer above.
+    assert_eq!(
+        unsafe { &*context }.0.inline_string_encoding(),
+        Some(bethkit_semantic::InlineStringEncoding::Utf8)
+    );
+    bethkit_semantic_context_free(context);
+    assert!(bethkit_semantic_context_new_with_inline_encoding(&package, 0).is_null());
+    assert!(bethkit_semantic_context_new_with_inline_encoding(&package, 3).is_null());
+    assert!(bethkit_semantic_context_new_with_inline_encoding(std::ptr::null(), 1).is_null());
+    Ok(())
+}
+
 /// Inserts an absent optional field in grammar order and rolls back invalid requests.
 #[test]
 fn json_insert_adds_optional_full_and_preserves_failed_edits() -> TestResult {

@@ -1799,6 +1799,23 @@ char *bethkit_semantic_validate_json(const struct BethkitSemanticContext *contex
 struct BethkitSemanticContext *bethkit_semantic_context_new(const struct BethkitSchemaPackage *package);
 
 /**
+ * Creates a semantic context with an explicit inline string encoding.
+ *
+ * `encoding` is 1 for UTF-8 or 2 for Windows-1252. This setting is used
+ * when reading and editing schema-localizable text embedded in a plugin.
+ * Technical inline strings and external string-table IDs are unaffected.
+ * Returns null and sets the last error on invalid input.
+ *
+ * # Safety
+ *
+ * `package` must be a live borrowed schema-package handle. The returned
+ * context is owned by the caller and must be freed with
+ * [`bethkit_semantic_context_free`].
+ */
+struct BethkitSemanticContext *bethkit_semantic_context_new_with_inline_encoding(const struct BethkitSchemaPackage *package,
+                                                                                 uint32_t encoding);
+
+/**
  * Frees an owned semantic context. Passing null is a no-op.
  */
 void bethkit_semantic_context_free(struct BethkitSemanticContext *context);
