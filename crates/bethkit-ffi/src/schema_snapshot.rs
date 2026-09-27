@@ -6,8 +6,8 @@ use std::ffi::c_char;
 use bethkit_core::{resolve_string_kind, Signature, StringFileKind};
 use bethkit_schema::{PrimitiveType, SchemaNode, SchemaNodeKind, SchemaRegistry};
 use bethkit_semantic::{
-    schema_hash_hex, structure_hash, Field, FieldAddress, FieldOrigin, FieldValue, OwnedFieldValue,
-    ValueSelection, ValueStep,
+    schema_hash_hex, structure_hash, Field, FieldAddress, FieldOrigin, FieldValue,
+    InlineStringCodec, OwnedFieldValue, ValueSelection, ValueStep,
 };
 use serde_json::{json, Value};
 
@@ -143,6 +143,7 @@ fn snapshot_document(
             let context = WireContext {
                 registry,
                 selections: &field.value_selections,
+                inline_string_codecs: &field.inline_string_codecs,
                 subrecord_signature: field.subrecord_signature,
                 localized,
                 origin,
@@ -277,6 +278,7 @@ fn origin_name(origin: FieldOrigin) -> &'static str {
 struct WireContext<'a> {
     registry: &'a SchemaRegistry,
     selections: &'a [ValueSelection],
+    inline_string_codecs: &'a [InlineStringCodec],
     subrecord_signature: Signature,
     localized: bool,
     origin: &'a str,
@@ -536,6 +538,49 @@ fn wire_value(
     output["schema_path"] = json!(node.map(|node| node.path.as_str()));
     output["translatable"] = json!(translatable);
     output["string_table"] = json!(string_table);
+    if translatable && !context.localized && matches!(value, FieldValue::String(_)) {
+        if let Some(
+            schema_node @ SchemaNode {
+                kind:
+                    SchemaNodeKind::Primitive {
+                        primitive: PrimitiveType::String { string },
+                    },
+                ..
+            },
+        ) = node
+        {
+            let selected = context.inline_string_codecs.iter().find(|codec| {
+                codec.path == schema_node.path
+                    && codec.array_indices.iter().copied().eq(address
+                        .value_steps
+                        .iter()
+                        .filter_map(|step| match step {
+                            ValueStep::Index { index } => Some(*index),
+                            ValueStep::Field { .. } => None,
+                        }))
+            });
+            let encoding = selected.map_or_else(
+                || {
+                    if string.encoding == "localized" {
+                        "windows_1252"
+                    } else {
+                        string.encoding.as_str()
+                    }
+                },
+                |codec| codec.encoding.schema_name(),
+            );
+            output["inline_encoding"] = json!(encoding);
+            output["encoding_source"] = json!(if selected.is_some() {
+                if selected.is_some_and(|codec| codec.heuristic) {
+                    "heuristic"
+                } else {
+                    "forced"
+                }
+            } else {
+                "schema"
+            });
+        }
+    }
     output
 }
 

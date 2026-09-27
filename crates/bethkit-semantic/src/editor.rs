@@ -42,6 +42,13 @@ struct UnionSelectionContext<'a> {
     source_record: &'a WritableRecord,
     source_subrecord_index: Option<usize>,
     value_scope: Option<&'a FieldValue<'static>>,
+    array_indices: &'a [usize],
+}
+
+#[derive(Clone, Copy)]
+struct EncodeScope<'a> {
+    value_scope: Option<&'a FieldValue<'static>>,
+    array_indices: &'a [usize],
 }
 
 #[derive(Clone, Copy)]
@@ -66,6 +73,7 @@ pub struct RecordEditor {
     record: WritableRecord,
     localized: bool,
     inline_string_encoding: Option<crate::InlineStringEncoding>,
+    inline_string_codecs: Vec<Vec<crate::view::InlineStringCodec>>,
     after_load_migrations: usize,
     decoded_values: BTreeMap<(String, usize), FieldValue<'static>>,
 }
@@ -107,17 +115,25 @@ impl RecordEditor {
             },
             localized: plugin_localized,
             inline_string_encoding: context.inline_string_encoding(),
+            inline_string_codecs: Vec::new(),
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
+        if context.inline_string_encoding() == Some(crate::InlineStringEncoding::PreferUtf8) {
+            editor.inline_string_codecs = vec![Vec::new(); editor.record.subrecords.len()];
+            for field in context.view(record, plugin_localized)?.fields()? {
+                editor.inline_string_codecs[field.subrecord_index] = field.inline_string_codecs;
+            }
+        }
         editor.apply_generic_after_load_callbacks()?;
         editor.apply_after_load_callbacks()?;
         let snapshot = Record::from_writable(&editor.record);
-        editor.decoded_values = context
-            .view(&snapshot, plugin_localized)?
-            .fields()?
+        let fields = context.view(&snapshot, plugin_localized)?.fields()?;
+        editor.inline_string_codecs = vec![Vec::new(); editor.record.subrecords.len()];
+        editor.decoded_values = fields
             .into_iter()
             .map(|field| {
+                editor.inline_string_codecs[field.subrecord_index] = field.inline_string_codecs;
                 (
                     (field.path, field.occurrence),
                     field.value.to_handler_value(),
@@ -146,6 +162,18 @@ impl RecordEditor {
         let old_value = self.decoded_values.get(&(path.to_owned(), occurrence));
         let (normalized, mutations) =
             self.apply_after_set_tree(payload, &normalized, old_value, Some(index))?;
+        if self.inline_string_encoding == Some(crate::InlineStringEncoding::PreferUtf8)
+            && self
+                .inline_string_codecs
+                .get(index)
+                .is_some_and(|codecs| !codecs.is_empty())
+            && old_value.is_some_and(|old| !same_array_shape(old, &normalized))
+        {
+            return Err(encode_error(
+                path,
+                "array shape changes require an explicit codec for affected inline strings",
+            ));
+        }
         let encoded: Vec<u8> = self.encode_node_at(payload, &normalized, Some(index))?;
         let decoded = self.owned_to_handler_value_at(payload, &normalized, Some(index))?;
         let mut candidate = clone_record(&self.record);
@@ -324,7 +352,7 @@ impl RecordEditor {
         let normalized = self.normalize_value(&payload.path, value)?;
         let (normalized, mutations) =
             self.apply_after_set_tree(payload, &normalized, None, Some(insertion_index))?;
-        let encoded: Vec<u8> = self.encode_node_at(payload, &normalized, Some(insertion_index))?;
+        let encoded: Vec<u8> = self.encode_node_at(payload, &normalized, None)?;
         let decoded =
             self.owned_to_handler_value_at(payload, &normalized, Some(insertion_index))?;
         let mut candidate = clone_record(&self.record);
@@ -347,6 +375,8 @@ impl RecordEditor {
         self.apply_after_set_callbacks(&mut candidate, &mut decoded_values, &changed)?;
         self.record = candidate;
         self.decoded_values = decoded_values;
+        self.inline_string_codecs
+            .insert(insertion_index, Vec::new());
         Ok(())
     }
 
@@ -372,6 +402,9 @@ impl RecordEditor {
         self.apply_after_set_callbacks(&mut candidate, &mut decoded_values, &changed)?;
         self.record = candidate;
         self.decoded_values = decoded_values;
+        if index < self.inline_string_codecs.len() {
+            self.inline_string_codecs.remove(index);
+        }
         Ok(())
     }
 
@@ -707,7 +740,10 @@ impl RecordEditor {
             value,
             field_values,
             source_subrecord_index,
-            None,
+            EncodeScope {
+                value_scope: None,
+                array_indices: &[],
+            },
             source_record,
         )
     }
@@ -718,17 +754,34 @@ impl RecordEditor {
         value: &OwnedFieldValue,
         field_values: &BTreeMap<String, i64>,
         source_subrecord_index: Option<usize>,
-        value_scope: Option<&FieldValue<'static>>,
+        scope: EncodeScope<'_>,
         source_record: &WritableRecord,
     ) -> Result<Vec<u8>> {
         match &node.kind {
-            SchemaNodeKind::Primitive { primitive } => encode_primitive(
-                primitive,
-                value,
-                self.localized,
-                self.inline_string_encoding,
-                &node.path,
-            ),
+            SchemaNodeKind::Primitive { primitive } => {
+                let inline_encoding = if self.inline_string_encoding
+                    == Some(crate::InlineStringEncoding::PreferUtf8)
+                {
+                    source_subrecord_index
+                        .and_then(|index| self.inline_string_codecs.get(index))
+                        .and_then(|codecs| {
+                            codecs.iter().find(|codec| {
+                                codec.path == node.path
+                                    && codec.array_indices == scope.array_indices
+                            })
+                        })
+                        .map(|codec| codec.encoding)
+                } else {
+                    self.inline_string_encoding
+                };
+                encode_primitive(
+                    primitive,
+                    value,
+                    self.localized,
+                    inline_encoding,
+                    &node.path,
+                )
+            }
             SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
                 let OwnedFieldValue::Struct(values) = value else {
                     return Err(encode_error(&node.path, "expected a struct value"));
@@ -767,13 +820,16 @@ impl RecordEditor {
                         }
                         break;
                     }
-                    let scope = FieldValue::Struct(scope_values.clone());
+                    let sibling_scope = FieldValue::Struct(scope_values.clone());
                     let encoded = self.encode_node_with_scope(
                         field,
                         value,
                         field_values,
                         source_subrecord_index,
-                        Some(&scope),
+                        EncodeScope {
+                            value_scope: Some(&sibling_scope),
+                            array_indices: scope.array_indices,
+                        },
                         source_record,
                     )?;
                     let handler_value = if matches!(&field.kind, SchemaNodeKind::Union { .. }) {
@@ -853,13 +909,18 @@ impl RecordEditor {
                     | ArrayCount::Callback { .. }
                     | ArrayCount::Remainder => {}
                 }
-                for value in values {
+                for (index, value) in values.iter().enumerate() {
+                    let mut child_indices = scope.array_indices.to_vec();
+                    child_indices.push(index);
                     output.extend(self.encode_node_with_scope(
                         element,
                         value,
                         field_values,
                         source_subrecord_index,
-                        value_scope,
+                        EncodeScope {
+                            value_scope: scope.value_scope,
+                            array_indices: &child_indices,
+                        },
                         source_record,
                     )?);
                 }
@@ -875,7 +936,8 @@ impl RecordEditor {
                         field_values,
                         source_record,
                         source_subrecord_index,
-                        value_scope,
+                        value_scope: scope.value_scope,
+                        array_indices: scope.array_indices,
                     },
                 )?;
                 self.encode_node_with_scope(
@@ -883,7 +945,7 @@ impl RecordEditor {
                     value,
                     field_values,
                     source_subrecord_index,
-                    value_scope,
+                    scope,
                     source_record,
                 )
             }
@@ -898,7 +960,7 @@ impl RecordEditor {
                     value,
                     field_values,
                     source_subrecord_index,
-                    value_scope,
+                    scope,
                     source_record,
                 )?;
                 output.push(*terminator);
@@ -1069,6 +1131,7 @@ impl RecordEditor {
                         source_record: &self.record,
                         source_subrecord_index,
                         value_scope: None,
+                        array_indices: &[],
                     },
                 )?;
                 self.apply_after_set_tree_with_fields(
@@ -1388,6 +1451,7 @@ impl RecordEditor {
                         source_record: context.source_record,
                         source_subrecord_index: context.source_subrecord_index,
                         value_scope: None,
+                        array_indices: &[],
                     },
                 )?;
                 return self.nested_value_at_with_fields(
@@ -1532,6 +1596,7 @@ impl RecordEditor {
                         source_record: context.source_record,
                         source_subrecord_index: context.source_subrecord_index,
                         value_scope: None,
+                        array_indices: &[],
                     },
                 )?;
                 if self.set_nested_value_with_fields(
@@ -1629,6 +1694,7 @@ impl RecordEditor {
                         source_record: &self.record,
                         source_subrecord_index: None,
                         value_scope: None,
+                        array_indices: &[],
                     },
                 )?;
                 if self.reset_nested_value_with_fields(
@@ -1970,6 +2036,7 @@ impl RecordEditor {
             source_record,
             source_subrecord_index,
             value_scope,
+            array_indices,
         } = context;
         let mut selection_error = None;
         for (index, variant) in variants.iter().enumerate() {
@@ -1978,7 +2045,10 @@ impl RecordEditor {
                 value,
                 field_values,
                 source_subrecord_index,
-                value_scope,
+                EncodeScope {
+                    value_scope,
+                    array_indices,
+                },
                 source_record,
             ) else {
                 continue;
@@ -2194,6 +2264,7 @@ impl RecordEditor {
                         source_record,
                         source_subrecord_index,
                         value_scope: None,
+                        array_indices: &[],
                     },
                 )?;
                 self.owned_to_handler_value_with_fields(
@@ -3948,6 +4019,28 @@ fn find_containing_subrecord<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a
     find(node, path, None)
 }
 
+fn same_array_shape(old: &FieldValue<'_>, updated: &OwnedFieldValue) -> bool {
+    match (old, updated) {
+        (FieldValue::Array(before), OwnedFieldValue::Array(after)) => {
+            before.len() == after.len()
+                && before
+                    .iter()
+                    .zip(after)
+                    .all(|(before, after)| same_array_shape(before, after))
+        }
+        (FieldValue::Struct(before), OwnedFieldValue::Struct(after)) => {
+            before.len() == after.len()
+                && before
+                    .iter()
+                    .zip(after)
+                    .all(|(before, after)| same_array_shape(&before.value, after))
+        }
+        (FieldValue::Array(_) | FieldValue::Struct(_), _)
+        | (_, OwnedFieldValue::Array(_) | OwnedFieldValue::Struct(_)) => false,
+        _ => true,
+    }
+}
+
 fn encode_primitive(
     primitive: &PrimitiveType,
     value: &OwnedFieldValue,
@@ -4507,6 +4600,7 @@ mod tests {
             },
             localized: false,
             inline_string_encoding: None,
+            inline_string_codecs: Vec::new(),
             after_load_migrations: 0,
             decoded_values: BTreeMap::from([((ctda_path.to_owned(), 0), FieldValue::UInt(5))]),
         };
@@ -4709,6 +4803,7 @@ mod tests {
             },
             localized: false,
             inline_string_encoding: None,
+            inline_string_codecs: Vec::new(),
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
@@ -5245,6 +5340,7 @@ mod tests {
             },
             localized: false,
             inline_string_encoding: None,
+            inline_string_codecs: Vec::new(),
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
@@ -5356,6 +5452,7 @@ mod tests {
             },
             localized: false,
             inline_string_encoding: None,
+            inline_string_codecs: Vec::new(),
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
@@ -5476,6 +5573,7 @@ mod tests {
             },
             localized: false,
             inline_string_encoding: None,
+            inline_string_codecs: Vec::new(),
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
@@ -11454,6 +11552,7 @@ mod tests {
             },
             localized: false,
             inline_string_encoding: None,
+            inline_string_codecs: Vec::new(),
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         })
@@ -11549,6 +11648,7 @@ mod tests {
             },
             localized: false,
             inline_string_encoding: None,
+            inline_string_codecs: Vec::new(),
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
@@ -11718,6 +11818,7 @@ mod tests {
             },
             localized: false,
             inline_string_encoding: None,
+            inline_string_codecs: Vec::new(),
             after_load_migrations: 0,
             decoded_values: BTreeMap::from([
                 ((counter_path.clone(), 0), FieldValue::UInt(1)),

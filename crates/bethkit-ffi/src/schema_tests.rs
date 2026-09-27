@@ -12,7 +12,8 @@ use bethkit_schema::{
     SchemaSignature, UnionSelector,
 };
 use bethkit_semantic::{
-    ByteSpan, DecoderRegistry, Field, FieldOrigin, FieldValue, SemanticContext,
+    ByteSpan, DecoderRegistry, Field, FieldOrigin, FieldValue, InlineStringEncoding,
+    OwnedFieldValue, SemanticContext,
 };
 use serde_json::{json, Value};
 
@@ -20,6 +21,105 @@ use super::snapshot::*;
 use super::*;
 
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// Preserves each inline string's original codec when a packed sibling changes.
+#[test]
+fn mixed_inline_text_edit_preserves_sibling_bytes() -> TestResult {
+    // given
+    let text = |id, path: &str| {
+        node(
+            id,
+            path,
+            SchemaNodeKind::Primitive {
+                primitive: PrimitiveType::String {
+                    string: bethkit_schema::StringType {
+                        encoding: "windows_1252".to_owned(),
+                        localized: true,
+                        zero_terminated: true,
+                        fixed_length: None,
+                        length_prefix: None,
+                        trailing_terminator: None,
+                        allowed_values: Vec::new(),
+                    },
+                },
+            },
+        )
+    };
+    let schema = SchemaPackage::new(
+        package()?.manifest().clone(),
+        vec![SchemaRecord {
+            signature: SchemaSignature(*b"TEST"),
+            name: "Mixed strings".to_owned(),
+            root: node(
+                1,
+                "TEST",
+                SchemaNodeKind::Sequence {
+                    children: vec![subrecord(
+                        2,
+                        "TEST/mixed",
+                        b"TEXT",
+                        node(
+                            3,
+                            "TEST/mixed/value",
+                            SchemaNodeKind::Struct {
+                                fields: vec![
+                                    text(4, "TEST/mixed/value/first"),
+                                    text(5, "TEST/mixed/value/second"),
+                                ],
+                            },
+                        ),
+                    )],
+                },
+            ),
+        }],
+    )?;
+    let context = SemanticContext::new(Arc::new(schema), DecoderRegistry::new())?
+        .with_inline_string_encoding(InlineStringEncoding::PreferUtf8);
+    let original = b"Gr\xc3\xbc\xc3\x9fe\0T\xfcre\0".to_vec();
+    let record = Record::from_writable(&WritableRecord {
+        signature: Signature(*b"TEST"),
+        flags: RecordFlags::empty(),
+        form_id: FormId(0x800),
+        form_version: 44,
+        subrecords: vec![WritableSubRecord {
+            signature: Signature(*b"TEXT"),
+            data: original.clone(),
+        }],
+    });
+
+    // when
+    let fields = context.view(&record, false)?.fields()?;
+    let mut editor = context.edit(&record, false)?;
+    editor.set(
+        "TEST/mixed",
+        0,
+        &OwnedFieldValue::Struct(vec![
+            OwnedFieldValue::String("Grüße".to_owned()),
+            OwnedFieldValue::String("Türe".to_owned()),
+        ]),
+    )?;
+    assert_eq!(editor.into_writable_record().subrecords[0].data, original);
+    let mut editor = context.edit(&record, false)?;
+    editor.set(
+        "TEST/mixed",
+        0,
+        &OwnedFieldValue::Struct(vec![
+            OwnedFieldValue::String("Änderung".to_owned()),
+            OwnedFieldValue::String("Türe".to_owned()),
+        ]),
+    )?;
+    let edited = editor.into_writable_record();
+
+    // then
+    assert_eq!(fields[0].inline_string_codecs.len(), 1);
+    assert_eq!(
+        fields[0].inline_string_codecs[0].encoding,
+        InlineStringEncoding::Utf8
+    );
+    assert_eq!(edited.subrecords[0].data, b"\xc3\x84nderung\0T\xfcre\0");
+    assert_eq!(&original[8..], &edited.subrecords[0].data[10..]);
+    Ok(())
+}
 
 fn string_projection_fixture(
     bulk_size: usize,
@@ -666,6 +766,7 @@ fn snapshot_copies_owned_bytes_in_nested_arrays() -> TestResult {
         origin: FieldOrigin::CustomDecoder,
         value: FieldValue::Array(vec![FieldValue::Bytes(Cow::Owned(vec![8, 9, 10]))]),
         value_selections: Vec::new(),
+        inline_string_codecs: Vec::new(),
     }];
     let snapshot = snapshot_fields(&fields);
     assert_eq!(snapshot._storage.bytes.len(), 1);
@@ -1058,8 +1159,16 @@ fn semantic_context_inline_encoding_abi() -> TestResult {
         Some(bethkit_semantic::InlineStringEncoding::Utf8)
     );
     bethkit_semantic_context_free(context);
+    let mixed = bethkit_semantic_context_new_with_inline_encoding(&package, 3);
+    assert!(!mixed.is_null());
+    // SAFETY: the constructor returned a live owned pointer above.
+    assert_eq!(
+        unsafe { &*mixed }.0.inline_string_encoding(),
+        Some(bethkit_semantic::InlineStringEncoding::PreferUtf8)
+    );
+    bethkit_semantic_context_free(mixed);
     assert!(bethkit_semantic_context_new_with_inline_encoding(&package, 0).is_null());
-    assert!(bethkit_semantic_context_new_with_inline_encoding(&package, 3).is_null());
+    assert!(bethkit_semantic_context_new_with_inline_encoding(&package, 4).is_null());
     assert!(bethkit_semantic_context_new_with_inline_encoding(std::ptr::null(), 1).is_null());
     Ok(())
 }

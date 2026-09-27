@@ -30,11 +30,14 @@ impl RecordEditor {
     ///
     /// Returns a semantic error if the current record cannot be decoded.
     pub fn fields(&self) -> Result<Vec<Field<'static>>> {
-        let context = SemanticContext::new_with_handlers(
+        let mut context = SemanticContext::new_with_handlers(
             self.registry.package().clone(),
             self.decoders.clone(),
             self.handlers.clone(),
         )?;
+        if let Some(encoding) = self.inline_string_encoding {
+            context = context.with_inline_string_encoding(encoding);
+        }
         let record = Record::from_writable(&self.record);
         context
             .view(&record, self.localized)?
@@ -48,6 +51,7 @@ impl RecordEditor {
                     path: field.path,
                     effective_path: field.effective_path,
                     value_selections: field.value_selections,
+                    inline_string_codecs: field.inline_string_codecs,
                     name: field.name,
                     subrecord_signature: field.subrecord_signature,
                     occurrence: field.occurrence,
@@ -213,7 +217,7 @@ impl RecordEditor {
         let normalized = self.normalize_value(&payload.path, value)?;
         let (normalized, mutations) =
             self.apply_after_set_tree(payload, &normalized, None, Some(index))?;
-        let encoded = self.encode_node_at(payload, &normalized, Some(index))?;
+        let encoded = self.encode_node_at(payload, &normalized, None)?;
         let decoded = self.owned_to_handler_value_at(payload, &normalized, Some(index))?;
         let mut candidate = clone_record(&self.record);
         candidate.subrecords.insert(
@@ -248,6 +252,7 @@ impl RecordEditor {
         self.apply_after_set_callbacks(&mut candidate, &mut decoded_values, &changed)?;
         self.record = candidate;
         self.decoded_values = decoded_values;
+        self.inline_string_codecs.insert(index, Vec::new());
         Ok(())
     }
 }

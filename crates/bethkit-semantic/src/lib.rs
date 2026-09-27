@@ -46,4 +46,4 @@ pub use validation::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationMode, ValidationReport,
 };
 pub use value::{ByteSpan, FieldOrigin, FieldValue, NamedValue, OwnedFieldValue};
-pub use view::{Field, RecordView, ValueSelection};
+pub use view::{Field, InlineStringCodec, RecordView, ValueSelection};

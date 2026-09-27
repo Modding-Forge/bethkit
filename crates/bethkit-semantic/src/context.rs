@@ -102,7 +102,7 @@ impl SemanticContext {
         })
     }
 
-    /// Overrides the schema encoding for inline strings in this context.
+    /// Selects an inline-string encoding policy for this context.
     ///
     /// `encoding` applies to both reading and editing. Localized string IDs
     /// continue to use their external string tables.
@@ -113,7 +113,7 @@ impl SemanticContext {
         self
     }
 
-    /// Returns the selected inline encoding, or `None` for the schema default.
+    /// Returns the selected policy, or `None` for the schema default.
     pub fn inline_string_encoding(&self) -> Option<InlineStringEncoding> {
         self.inline_string_encoding
     }
