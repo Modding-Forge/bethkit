@@ -65,6 +65,7 @@ pub struct RecordEditor {
     handlers: SemanticHandlerRegistry,
     record: WritableRecord,
     localized: bool,
+    inline_string_encoding: Option<crate::InlineStringEncoding>,
     after_load_migrations: usize,
     decoded_values: BTreeMap<(String, usize), FieldValue<'static>>,
 }
@@ -105,6 +106,7 @@ impl RecordEditor {
                 subrecords,
             },
             localized: plugin_localized,
+            inline_string_encoding: context.inline_string_encoding(),
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
@@ -720,9 +722,13 @@ impl RecordEditor {
         source_record: &WritableRecord,
     ) -> Result<Vec<u8>> {
         match &node.kind {
-            SchemaNodeKind::Primitive { primitive } => {
-                encode_primitive(primitive, value, self.localized, &node.path)
-            }
+            SchemaNodeKind::Primitive { primitive } => encode_primitive(
+                primitive,
+                value,
+                self.localized,
+                self.inline_string_encoding,
+                &node.path,
+            ),
             SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
                 let OwnedFieldValue::Struct(values) = value else {
                     return Err(encode_error(&node.path, "expected a struct value"));
@@ -3946,6 +3952,7 @@ fn encode_primitive(
     primitive: &PrimitiveType,
     value: &OwnedFieldValue,
     localized: bool,
+    inline_encoding: Option<crate::InlineStringEncoding>,
     path: &str,
 ) -> Result<Vec<u8>> {
     match (primitive, value) {
@@ -4000,7 +4007,11 @@ fn encode_primitive(
                     "localized plugin string requires a string-table ID",
                 ));
             }
-            let bytes: Vec<u8> = match text_encoding(string) {
+            let encoding = inline_encoding
+                .filter(|_| is_localized_string(string))
+                .map(crate::InlineStringEncoding::schema_name)
+                .unwrap_or_else(|| text_encoding(string));
+            let bytes: Vec<u8> = match encoding {
                 "utf8" => value.as_bytes().to_vec(),
                 "windows_1252" => {
                     let (bytes, _, had_errors) = encoding_rs::WINDOWS_1252.encode(value);
@@ -4495,6 +4506,7 @@ mod tests {
                 }],
             },
             localized: false,
+            inline_string_encoding: None,
             after_load_migrations: 0,
             decoded_values: BTreeMap::from([((ctda_path.to_owned(), 0), FieldValue::UInt(5))]),
         };
@@ -4696,6 +4708,7 @@ mod tests {
                 }],
             },
             localized: false,
+            inline_string_encoding: None,
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
@@ -5231,6 +5244,7 @@ mod tests {
                 subrecords: Vec::new(),
             },
             localized: false,
+            inline_string_encoding: None,
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
@@ -5341,6 +5355,7 @@ mod tests {
                 subrecords: Vec::new(),
             },
             localized: false,
+            inline_string_encoding: None,
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
@@ -5460,6 +5475,7 @@ mod tests {
                 subrecords: Vec::new(),
             },
             localized: false,
+            inline_string_encoding: None,
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
@@ -11437,6 +11453,7 @@ mod tests {
                 ],
             },
             localized: false,
+            inline_string_encoding: None,
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         })
@@ -11531,6 +11548,7 @@ mod tests {
                 }],
             },
             localized: false,
+            inline_string_encoding: None,
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
@@ -11699,6 +11717,7 @@ mod tests {
                 ],
             },
             localized: false,
+            inline_string_encoding: None,
             after_load_migrations: 0,
             decoded_values: BTreeMap::from([
                 ((counter_path.clone(), 0), FieldValue::UInt(1)),
@@ -11718,11 +11737,52 @@ mod tests {
             &windows_1252_string(true),
             &OwnedFieldValue::String("Grüße".to_owned()),
             false,
+            None,
             "TEST",
         )
         .expect("Windows-1252 string should encode");
 
         assert_eq!(bytes, b"Gr\xfc\xdfe\0");
+    }
+
+    /// Writes UTF-8 bytes when a plugin overrides the schema's legacy encoding.
+    #[test]
+    fn inline_encoding_override_writes_utf8() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        // given
+        let mut primitive = windows_1252_string(true);
+        let PrimitiveType::String { string } = &mut primitive else {
+            panic!("test fixture must be a string");
+        };
+        string.localized = true;
+        let value = OwnedFieldValue::String("Grüße".to_owned());
+
+        // when
+        let bytes = encode_primitive(
+            &primitive,
+            &value,
+            false,
+            Some(crate::InlineStringEncoding::Utf8),
+            "TEST",
+        )?;
+
+        // then
+        assert_eq!(bytes, b"Gr\xc3\xbc\xc3\x9fe\0");
+        Ok(())
+    }
+
+    /// Keeps technical inline strings on the schema codec during editing.
+    #[test]
+    fn override_keeps_technical_encoding() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let bytes = encode_primitive(
+            &windows_1252_string(true),
+            &OwnedFieldValue::String("Grüße".to_owned()),
+            false,
+            Some(crate::InlineStringEncoding::Utf8),
+            "TEST",
+        )?;
+        assert_eq!(bytes, b"Gr\xfc\xdfe\0");
+        Ok(())
     }
 
     /// Addresses repeated signatures by their ordered schema path.
@@ -12953,6 +13013,7 @@ mod tests {
             &windows_1252_string(false),
             &OwnedFieldValue::String("Dragon 🐉".to_owned()),
             false,
+            None,
             "TEST",
         )
         .expect_err("unrepresentable character should fail");
@@ -13014,6 +13075,7 @@ mod tests {
             &primitive,
             &OwnedFieldValue::String("abc".to_owned()),
             false,
+            None,
             "TEST",
         )
         .expect("length-prefixed string should encode");
@@ -13039,6 +13101,7 @@ mod tests {
             &primitive,
             &OwnedFieldValue::UInt(0x1234_5678),
             true,
+            None,
             "TEST",
         )
         .expect("localized string ID should encode");

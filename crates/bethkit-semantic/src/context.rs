@@ -13,9 +13,9 @@ use bethkit_schema::{
 
 use crate::{handler::HandlerInvocationAccess, value::handler_to_owned_value, OwnedFieldValue};
 use crate::{
-    DecoderRegistry, FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext, RecordEditor,
-    RecordGridCell, RecordIndexKey, RecordView, Result, SemanticError, SemanticHandlerRegistry,
-    SemanticLink, ValueFormat,
+    DecoderRegistry, FieldValue, HandlerOutput, HandlerPhase, HandlerRecordContext,
+    InlineStringEncoding, RecordEditor, RecordGridCell, RecordIndexKey, RecordView, Result,
+    SemanticError, SemanticHandlerRegistry, SemanticLink, ValueFormat,
 };
 
 /// Runtime context for schema-guided operations on one game mode.
@@ -23,6 +23,7 @@ pub struct SemanticContext {
     registry: SchemaRegistry,
     decoders: DecoderRegistry,
     handlers: SemanticHandlerRegistry,
+    inline_string_encoding: Option<InlineStringEncoding>,
 }
 
 /// Typed result of parsing text accepted by an xEdit edit control.
@@ -97,7 +98,24 @@ impl SemanticContext {
             registry: SchemaRegistry::new(package),
             decoders,
             handlers,
+            inline_string_encoding: None,
         })
+    }
+
+    /// Overrides the schema encoding for inline strings in this context.
+    ///
+    /// `encoding` applies to both reading and editing. Localized string IDs
+    /// continue to use their external string tables.
+    ///
+    /// Returns the configured context.
+    pub fn with_inline_string_encoding(mut self, encoding: InlineStringEncoding) -> Self {
+        self.inline_string_encoding = Some(encoding);
+        self
+    }
+
+    /// Returns the selected inline encoding, or `None` for the schema default.
+    pub fn inline_string_encoding(&self) -> Option<InlineStringEncoding> {
+        self.inline_string_encoding
     }
 
     /// Creates a read-only semantic view over a record.
