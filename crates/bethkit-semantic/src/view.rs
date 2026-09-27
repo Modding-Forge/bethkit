@@ -35,6 +35,8 @@ pub struct Field<'a> {
     pub effective_path: Option<String>,
     /// Exact dynamic-union selections, including occurrences inside arrays.
     pub value_selections: Vec<ValueSelection>,
+    /// Inline strings whose detected codec differs from their schema codec.
+    pub inline_string_codecs: Vec<InlineStringCodec>,
     /// Human-readable name.
     pub name: String,
     /// Source subrecord signature.
@@ -47,6 +49,19 @@ pub struct Field<'a> {
     pub origin: FieldOrigin,
     /// Decoded field value.
     pub value: FieldValue<'a>,
+}
+
+/// Codec selected for a nested inline string by an opt-in decoding policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineStringCodec {
+    /// Stable schema path of the string node.
+    pub path: String,
+    /// Outermost-to-innermost array indices containing this string.
+    pub array_indices: Vec<usize>,
+    /// Codec used to decode the original bytes.
+    pub encoding: InlineStringEncoding,
+    /// Whether UTF-8 was selected by the opt-in per-string heuristic.
+    pub heuristic: bool,
 }
 
 /// One schema union's selected variant at an exact nested array position.
@@ -66,6 +81,7 @@ pub struct RecordView<'context, 'record> {
     record: &'record Record,
     schema: &'context SchemaRecord,
     localized: bool,
+    inline_codecs: Option<&'context [Vec<InlineStringCodec>]>,
 }
 
 #[derive(Clone, Copy)]
@@ -74,6 +90,12 @@ struct DecodeFrame<'scope, 'record> {
     source_subrecord_index: usize,
     sibling_values: &'scope [NamedValue<'record>],
     array_indices: &'scope [usize],
+}
+
+#[derive(Default)]
+struct DecodeMetadata {
+    selections: Vec<ValueSelection>,
+    codecs: Vec<InlineStringCodec>,
 }
 
 impl<'context, 'record> RecordView<'context, 'record> {
@@ -94,7 +116,19 @@ impl<'context, 'record> RecordView<'context, 'record> {
             record,
             schema,
             localized: plugin_localized,
+            inline_codecs: None,
         })
+    }
+
+    pub(crate) fn new_with_inline_codecs(
+        context: &'context SemanticContext,
+        record: &'record Record,
+        plugin_localized: bool,
+        codecs: &'context [Vec<InlineStringCodec>],
+    ) -> Result<Self> {
+        let mut view = Self::new(context, record, plugin_localized)?;
+        view.inline_codecs = Some(codecs);
+        Ok(view)
     }
 
     /// Returns the schema used by this view.
@@ -278,7 +312,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     };
                     let data: &'record [u8] = subrecord.as_bytes();
                     let mut field_values = BTreeMap::new();
-                    let mut value_selections = Vec::new();
+                    let mut metadata = DecodeMetadata::default();
                     let frame = DecodeFrame {
                         offset: 0,
                         source_subrecord_index: index,
@@ -300,7 +334,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             data,
                             frame,
                             &mut field_values,
-                            &mut value_selections,
+                            &mut metadata,
                         )?
                     };
                     if consumed != data.len() {
@@ -318,7 +352,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         node_id: node.id,
                         path: node.path.clone(),
                         effective_path,
-                        value_selections,
+                        value_selections: metadata.selections,
+                        inline_string_codecs: metadata.codecs,
                         name: node.name.clone(),
                         subrecord_signature: subrecord.signature,
                         occurrence,
@@ -348,6 +383,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         ),
                         effective_path: None,
                         value_selections: Vec::new(),
+                        inline_string_codecs: Vec::new(),
                         name: if declared {
                             "Out-of-order known subrecord".to_owned()
                         } else {
@@ -940,7 +976,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
         current: &'a [u8],
         frame: DecodeFrame<'_, 'a>,
         field_values: &mut BTreeMap<String, i64>,
-        value_selections: &mut Vec<ValueSelection>,
+        metadata: &mut DecodeMetadata,
     ) -> Result<(FieldValue<'a>, usize, Option<String>)> {
         if !self.node_applies(node, payload, field_values)? {
             return Ok((FieldValue::Absent, 0, None));
@@ -958,14 +994,39 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             current.len()
                         ),
                     })?;
-                decode_primitive(
+                let explicit_codec = self
+                    .inline_codecs
+                    .and_then(|codecs| codecs.get(frame.source_subrecord_index))
+                    .and_then(|codecs| {
+                        codecs.iter().find(|codec| {
+                            codec.path == node.path && codec.array_indices == frame.array_indices
+                        })
+                    });
+                let mut selected_codec = None;
+                let result = decode_primitive(
                     primitive,
                     data,
                     self.localized,
-                    self.context.inline_string_encoding(),
+                    explicit_codec
+                        .map(|codec| codec.encoding)
+                        .or_else(|| self.context.inline_string_encoding()),
+                    &mut selected_codec,
                     &node.path,
-                )
-                .map(|value| (value, consumed, None))
+                );
+                if let Some(encoding) =
+                    selected_codec.or_else(|| explicit_codec.map(|c| c.encoding))
+                {
+                    metadata.codecs.push(InlineStringCodec {
+                        path: node.path.clone(),
+                        array_indices: frame.array_indices.to_vec(),
+                        encoding,
+                        heuristic: explicit_codec.is_some_and(|codec| codec.heuristic)
+                            || (explicit_codec.is_none()
+                                && self.context.inline_string_encoding()
+                                    == Some(InlineStringEncoding::PreferUtf8)),
+                    });
+                }
+                result.map(|value| (value, consumed, None))
             }
             SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
                 let optional_from = match &node.kind {
@@ -1030,7 +1091,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             remaining,
                             child_frame,
                             field_values,
-                            value_selections,
+                            metadata,
                         )?;
                     values.push(NamedValue {
                         node_id: field.id,
@@ -1148,7 +1209,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         remaining,
                         child_frame,
                         field_values,
-                        value_selections,
+                        metadata,
                     )?;
                     if consumed == 0 && element_count.is_none() {
                         return Err(SemanticError::Decode {
@@ -1185,15 +1246,9 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         path: node.path.clone(),
                         message: format!("union variant {index} does not exist"),
                     })?;
-                let (value, consumed, selected) = self.decode_node(
-                    variant,
-                    payload,
-                    current,
-                    frame,
-                    field_values,
-                    value_selections,
-                )?;
-                value_selections.push(ValueSelection {
+                let (value, consumed, selected) =
+                    self.decode_node(variant, payload, current, frame, field_values, metadata)?;
+                metadata.selections.push(ValueSelection {
                     schema_path: node.path.clone(),
                     array_indices: frame.array_indices.to_vec(),
                     effective_path: variant.path.clone(),
@@ -1224,14 +1279,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 Ok((decoded.value, decoded.consumed, None))
             }
             SchemaNodeKind::Terminated { terminator, child } => {
-                let (value, body_size, effective_path) = self.decode_node(
-                    child,
-                    payload,
-                    current,
-                    frame,
-                    field_values,
-                    value_selections,
-                )?;
+                let (value, body_size, effective_path) =
+                    self.decode_node(child, payload, current, frame, field_values, metadata)?;
                 let actual = current
                     .get(body_size)
                     .ok_or_else(|| SemanticError::Decode {
@@ -1700,6 +1749,7 @@ fn decode_primitive<'a>(
     data: &'a [u8],
     localized: bool,
     inline_encoding: Option<InlineStringEncoding>,
+    selected_codec: &mut Option<InlineStringEncoding>,
     path: &str,
 ) -> Result<FieldValue<'a>> {
     match primitive {
@@ -1714,9 +1764,14 @@ fn decode_primitive<'a>(
         PrimitiveType::Float {
             width, byte_order, ..
         } => decode_float(*width, *byte_order, data, path),
-        PrimitiveType::String { string } => {
-            decode_string(string, data, localized, inline_encoding, path)
-        }
+        PrimitiveType::String { string } => decode_string_selected(
+            string,
+            data,
+            localized,
+            inline_encoding,
+            selected_codec,
+            path,
+        ),
         PrimitiveType::Bytes { length } => {
             if let Some(expected) = length {
                 if data.len() != *expected as usize {
@@ -1953,11 +2008,23 @@ fn decode_float<'a>(
     Ok(FieldValue::Float(value))
 }
 
+#[cfg(test)]
 fn decode_string<'a>(
     string: &StringType,
     data: &'a [u8],
     localized: bool,
     inline_encoding: Option<InlineStringEncoding>,
+    path: &str,
+) -> Result<FieldValue<'a>> {
+    decode_string_selected(string, data, localized, inline_encoding, &mut None, path)
+}
+
+fn decode_string_selected<'a>(
+    string: &StringType,
+    data: &'a [u8],
+    localized: bool,
+    inline_encoding: Option<InlineStringEncoding>,
+    selected_codec: &mut Option<InlineStringEncoding>,
     path: &str,
 ) -> Result<FieldValue<'a>> {
     if is_localized_string(string) && localized {
@@ -1980,19 +2047,33 @@ fn decode_string<'a>(
     } else {
         bytes
     };
-    let encoding = inline_encoding
-        .filter(|_| is_localized_string(string))
-        .map(InlineStringEncoding::schema_name)
-        .unwrap_or_else(|| text_encoding(string));
-    let value: Cow<'a, str> = match encoding {
-        "utf8" => {
-            Cow::Borrowed(
-                std::str::from_utf8(bytes).map_err(|error| SemanticError::Decode {
-                    path: path.to_owned(),
-                    message: error.to_string(),
-                })?,
-            )
+    let preferred_utf8 = (inline_encoding == Some(InlineStringEncoding::PreferUtf8)
+        && is_localized_string(string))
+    .then(|| std::str::from_utf8(bytes).ok())
+    .flatten();
+    let encoding = match inline_encoding.filter(|_| is_localized_string(string)) {
+        Some(InlineStringEncoding::PreferUtf8) if preferred_utf8.is_some() => {
+            if !bytes.is_ascii() && text_encoding(string) != "utf8" {
+                *selected_codec = Some(InlineStringEncoding::Utf8);
+            }
+            "utf8"
         }
+        Some(InlineStringEncoding::PreferUtf8) | None => text_encoding(string),
+        Some(encoding) => {
+            if encoding.schema_name() != text_encoding(string) {
+                *selected_codec = Some(encoding);
+            }
+            encoding.schema_name()
+        }
+    };
+    let value: Cow<'a, str> = match encoding {
+        "utf8" => Cow::Borrowed(match preferred_utf8 {
+            Some(value) => value,
+            None => std::str::from_utf8(bytes).map_err(|error| SemanticError::Decode {
+                path: path.to_owned(),
+                message: error.to_string(),
+            })?,
+        }),
         "windows_1252" => {
             let (value, had_errors) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes);
             if had_errors {
@@ -5460,6 +5541,43 @@ mod tests {
             FieldValue::String(value) => assert_eq!(value, "Grüße"),
             other => panic!("expected string, got {other:?}"),
         }
+        Ok(())
+    }
+
+    /// Selects a codec for each localizable string in a mixed-encoding plugin.
+    #[test]
+    fn prefer_utf8_decodes_mixed_inline_text() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        // given
+        let string = StringType {
+            encoding: "windows_1252".to_owned(),
+            localized: true,
+            zero_terminated: true,
+            fixed_length: None,
+            length_prefix: None,
+            trailing_terminator: None,
+            allowed_values: Vec::new(),
+        };
+
+        // when
+        let utf8 = decode_string(
+            &string,
+            b"Gr\xc3\xbc\xc3\x9fe\0",
+            false,
+            Some(InlineStringEncoding::PreferUtf8),
+            "TEST",
+        )?;
+        let legacy = decode_string(
+            &string,
+            b"Gr\xfc\xdfe\0",
+            false,
+            Some(InlineStringEncoding::PreferUtf8),
+            "TEST",
+        )?;
+
+        // then
+        assert!(matches!(utf8, FieldValue::String(value) if value == "Grüße"));
+        assert!(matches!(legacy, FieldValue::String(value) if value == "Grüße"));
         Ok(())
     }
 

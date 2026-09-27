@@ -337,6 +337,7 @@ fn mgef_forward_selector_fails_closed_without_matching_field(
                 source_record: &editor.record,
                 source_subrecord_index: Some(1),
                 value_scope: None,
+                array_indices: &[],
             },
         )
         .expect_err("unmapped forward reads must fail");

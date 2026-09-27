@@ -4,13 +4,13 @@
 use std::sync::Arc;
 
 use bethkit_core::{Record, WritableSubRecord};
-use bethkit_schema::{SchemaNodeKind, SchemaPackage};
+use bethkit_schema::{PrimitiveType, SchemaNodeKind, SchemaPackage};
 
 use super::{clone_record, insert_decoded_occurrence, RecordEditor};
 use crate::value::handler_to_owned_value;
 use crate::{
-    schema_hash_hex, structure_hash, Field, FieldAddress, FieldValue, OwnedFieldValue, Result,
-    SemanticContext, SemanticError, ValueStep,
+    schema_hash_hex, structure_hash, Field, FieldAddress, FieldValue, InlineStringCodec,
+    InlineStringEncoding, OwnedFieldValue, Result, SemanticContext, SemanticError, ValueStep,
 };
 
 impl RecordEditor {
@@ -30,33 +30,41 @@ impl RecordEditor {
     ///
     /// Returns a semantic error if the current record cannot be decoded.
     pub fn fields(&self) -> Result<Vec<Field<'static>>> {
-        let context = SemanticContext::new_with_handlers(
+        let mut context = SemanticContext::new_with_handlers(
             self.registry.package().clone(),
             self.decoders.clone(),
             self.handlers.clone(),
         )?;
+        if let Some(encoding) = self.inline_string_encoding {
+            context = context.with_inline_string_encoding(encoding);
+        }
         let record = Record::from_writable(&self.record);
-        context
-            .view(&record, self.localized)?
-            .fields()?
-            .into_iter()
-            .map(|field| {
-                Ok(Field {
-                    subrecord_index: field.subrecord_index,
-                    repeat_scopes: field.repeat_scopes,
-                    node_id: field.node_id,
-                    path: field.path,
-                    effective_path: field.effective_path,
-                    value_selections: field.value_selections,
-                    name: field.name,
-                    subrecord_signature: field.subrecord_signature,
-                    occurrence: field.occurrence,
-                    span: field.span,
-                    origin: field.origin,
-                    value: field.value.to_handler_value(),
-                })
+        crate::RecordView::new_with_inline_codecs(
+            &context,
+            &record,
+            self.localized,
+            &self.inline_string_codecs,
+        )?
+        .fields()?
+        .into_iter()
+        .map(|field| {
+            Ok(Field {
+                subrecord_index: field.subrecord_index,
+                repeat_scopes: field.repeat_scopes,
+                node_id: field.node_id,
+                path: field.path,
+                effective_path: field.effective_path,
+                value_selections: field.value_selections,
+                inline_string_codecs: field.inline_string_codecs,
+                name: field.name,
+                subrecord_signature: field.subrecord_signature,
+                occurrence: field.occurrence,
+                span: field.span,
+                origin: field.origin,
+                value: field.value.to_handler_value(),
             })
-            .collect()
+        })
+        .collect()
     }
 
     /// Replaces exactly one value selected by a current structural address.
@@ -78,6 +86,108 @@ impl RecordEditor {
             &field.path,
         )? = value.clone();
         self.set(&field.path, field.occurrence, &updated)
+    }
+
+    /// Selects a concrete codec for one addressed inline string in this editor.
+    ///
+    /// The override is scoped to this record editor and does not alter the field address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale address, non-string field, unsupported codec,
+    /// or source bytes that cannot be decoded with the selected codec.
+    pub fn set_inline_encoding_at(
+        &mut self,
+        address: &FieldAddress,
+        path: &str,
+        encoding: InlineStringEncoding,
+    ) -> Result<()> {
+        if encoding == InlineStringEncoding::PreferUtf8 {
+            return Err(address_error(
+                path,
+                "a field override requires a concrete codec",
+            ));
+        }
+        let field = self.addressed_field(address)?;
+        let target = decoded_target(&field.value, &address.value_steps, path)?;
+        if !matches!(target, FieldValue::String(_)) || self.localized {
+            return Err(address_error(path, "address does not select inline text"));
+        }
+        let node = self
+            .registry
+            .get_node(self.record.signature, path)
+            .ok_or_else(|| address_error(path, "schema string path is unknown"))?;
+        let SchemaNodeKind::Primitive {
+            primitive: PrimitiveType::String { string },
+        } = &node.kind
+        else {
+            return Err(address_error(path, "schema path does not select a string"));
+        };
+        if !(string.localized || string.encoding == "localized") {
+            return Err(address_error(
+                path,
+                "technical strings keep their schema codec",
+            ));
+        }
+        let indices = address
+            .value_steps
+            .iter()
+            .filter_map(|step| match step {
+                ValueStep::Index { index } => Some(*index),
+                ValueStep::Field { .. } => None,
+            })
+            .collect();
+        let codecs = self
+            .inline_string_codecs
+            .get_mut(field.subrecord_index)
+            .ok_or_else(|| address_error(path, "subrecord codec state is missing"))?;
+        let previous = codecs.clone();
+        if let Some(codec) = codecs
+            .iter_mut()
+            .find(|codec| codec.path == path && codec.array_indices == indices)
+        {
+            codec.encoding = encoding;
+            codec.heuristic = false;
+        } else {
+            codecs.push(InlineStringCodec {
+                path: path.to_owned(),
+                array_indices: indices,
+                encoding,
+                heuristic: false,
+            });
+        }
+        if let Err(error) = self.fields() {
+            self.inline_string_codecs[field.subrecord_index] = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Atomically replaces one inline string using a caller-selected codec.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale address, invalid codec or text, or a
+    /// schema-invalid edit. A failed replacement retains the prior codec.
+    pub fn set_string_at_with_encoding(
+        &mut self,
+        address: &FieldAddress,
+        path: &str,
+        encoding: InlineStringEncoding,
+        text: &str,
+    ) -> Result<()> {
+        let index = address.subrecord_index;
+        let previous = self
+            .inline_string_codecs
+            .get(index)
+            .cloned()
+            .ok_or_else(|| address_error(path, "subrecord codec state is missing"))?;
+        self.set_inline_encoding_at(address, path, encoding)?;
+        if let Err(error) = self.set_at(address, &OwnedFieldValue::String(text.to_owned())) {
+            self.inline_string_codecs[index] = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Removes an addressed subrecord, array item, or optional struct value.
@@ -213,7 +323,7 @@ impl RecordEditor {
         let normalized = self.normalize_value(&payload.path, value)?;
         let (normalized, mutations) =
             self.apply_after_set_tree(payload, &normalized, None, Some(index))?;
-        let encoded = self.encode_node_at(payload, &normalized, Some(index))?;
+        let encoded = self.encode_node_at(payload, &normalized, None)?;
         let decoded = self.owned_to_handler_value_at(payload, &normalized, Some(index))?;
         let mut candidate = clone_record(&self.record);
         candidate.subrecords.insert(
@@ -248,8 +358,28 @@ impl RecordEditor {
         self.apply_after_set_callbacks(&mut candidate, &mut decoded_values, &changed)?;
         self.record = candidate;
         self.decoded_values = decoded_values;
+        self.inline_string_codecs.insert(index, Vec::new());
         Ok(())
     }
+}
+
+fn decoded_target<'field, 'data>(
+    mut value: &'field FieldValue<'data>,
+    steps: &[ValueStep],
+    path: &str,
+) -> Result<&'field FieldValue<'data>> {
+    for step in steps {
+        value = match (step, value) {
+            (ValueStep::Field { index, path }, FieldValue::Struct(fields)) => fields
+                .get(*index)
+                .filter(|field| field.path == *path)
+                .map(|field| &field.value),
+            (ValueStep::Index { index }, FieldValue::Array(items)) => items.get(*index),
+            _ => None,
+        }
+        .ok_or_else(|| address_error(path, "address does not select a live value"))?;
+    }
+    Ok(value)
 }
 
 fn address_error(path: &str, message: &str) -> SemanticError {

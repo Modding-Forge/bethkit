@@ -487,8 +487,9 @@ pub extern "C" fn bethkit_semantic_context_new(
 
 /// Creates a semantic context with an explicit inline string encoding.
 ///
-/// `encoding` is 1 for UTF-8 or 2 for Windows-1252. This setting is used
-/// when reading and editing schema-localizable text embedded in a plugin.
+/// `encoding` is 1 for forced UTF-8, 2 for forced Windows-1252, or 3 to
+/// prefer UTF-8 separately for each string and otherwise use its schema codec.
+/// This setting is used when reading and editing schema-localizable text.
 /// Technical inline strings and external string-table IDs are unaffected.
 /// Returns null and sets the last error on invalid input.
 ///
@@ -512,6 +513,7 @@ pub extern "C" fn bethkit_semantic_context_new_with_inline_encoding(
             let encoding = match encoding {
                 1 => InlineStringEncoding::Utf8,
                 2 => InlineStringEncoding::Windows1252,
+                3 => InlineStringEncoding::PreferUtf8,
                 _ => {
                     return Err(FfiError::InvalidArgument {
                         context: "bethkit_semantic_context_new_with_inline_encoding",

@@ -173,6 +173,7 @@ mod tests {
                 array_indices: vec![0, 1],
                 effective_path: "TEST/data/items/item/first".to_owned(),
             }],
+            inline_string_codecs: Vec::new(),
             name: "Data".to_owned(),
             subrecord_signature: Signature(*b"DATA"),
             occurrence: 0,
