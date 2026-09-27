@@ -759,21 +759,18 @@ impl RecordEditor {
     ) -> Result<Vec<u8>> {
         match &node.kind {
             SchemaNodeKind::Primitive { primitive } => {
-                let inline_encoding = if self.inline_string_encoding
-                    == Some(crate::InlineStringEncoding::PreferUtf8)
-                {
-                    source_subrecord_index
-                        .and_then(|index| self.inline_string_codecs.get(index))
-                        .and_then(|codecs| {
-                            codecs.iter().find(|codec| {
-                                codec.path == node.path
-                                    && codec.array_indices == scope.array_indices
-                            })
+                let inline_encoding = source_subrecord_index
+                    .and_then(|index| self.inline_string_codecs.get(index))
+                    .and_then(|codecs| {
+                        codecs.iter().find(|codec| {
+                            codec.path == node.path && codec.array_indices == scope.array_indices
                         })
-                        .map(|codec| codec.encoding)
-                } else {
-                    self.inline_string_encoding
-                };
+                    })
+                    .map(|codec| codec.encoding)
+                    .or(match self.inline_string_encoding {
+                        Some(crate::InlineStringEncoding::PreferUtf8) => None,
+                        encoding => encoding,
+                    });
                 encode_primitive(
                     primitive,
                     value,

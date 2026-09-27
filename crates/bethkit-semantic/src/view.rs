@@ -81,6 +81,7 @@ pub struct RecordView<'context, 'record> {
     record: &'record Record,
     schema: &'context SchemaRecord,
     localized: bool,
+    inline_codecs: Option<&'context [Vec<InlineStringCodec>]>,
 }
 
 #[derive(Clone, Copy)]
@@ -115,7 +116,19 @@ impl<'context, 'record> RecordView<'context, 'record> {
             record,
             schema,
             localized: plugin_localized,
+            inline_codecs: None,
         })
+    }
+
+    pub(crate) fn new_with_inline_codecs(
+        context: &'context SemanticContext,
+        record: &'record Record,
+        plugin_localized: bool,
+        codecs: &'context [Vec<InlineStringCodec>],
+    ) -> Result<Self> {
+        let mut view = Self::new(context, record, plugin_localized)?;
+        view.inline_codecs = Some(codecs);
+        Ok(view)
     }
 
     /// Returns the schema used by this view.
@@ -981,22 +994,36 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             current.len()
                         ),
                     })?;
+                let explicit_codec = self
+                    .inline_codecs
+                    .and_then(|codecs| codecs.get(frame.source_subrecord_index))
+                    .and_then(|codecs| {
+                        codecs.iter().find(|codec| {
+                            codec.path == node.path && codec.array_indices == frame.array_indices
+                        })
+                    });
                 let mut selected_codec = None;
                 let result = decode_primitive(
                     primitive,
                     data,
                     self.localized,
-                    self.context.inline_string_encoding(),
+                    explicit_codec
+                        .map(|codec| codec.encoding)
+                        .or_else(|| self.context.inline_string_encoding()),
                     &mut selected_codec,
                     &node.path,
                 );
-                if let Some(encoding) = selected_codec {
+                if let Some(encoding) =
+                    selected_codec.or_else(|| explicit_codec.map(|c| c.encoding))
+                {
                     metadata.codecs.push(InlineStringCodec {
                         path: node.path.clone(),
                         array_indices: frame.array_indices.to_vec(),
                         encoding,
-                        heuristic: self.context.inline_string_encoding()
-                            == Some(InlineStringEncoding::PreferUtf8),
+                        heuristic: explicit_codec.is_some_and(|codec| codec.heuristic)
+                            || (explicit_codec.is_none()
+                                && self.context.inline_string_encoding()
+                                    == Some(InlineStringEncoding::PreferUtf8)),
                     });
                 }
                 result.map(|value| (value, consumed, None))

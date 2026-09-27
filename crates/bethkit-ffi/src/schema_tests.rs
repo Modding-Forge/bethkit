@@ -12,8 +12,8 @@ use bethkit_schema::{
     SchemaSignature, UnionSelector,
 };
 use bethkit_semantic::{
-    ByteSpan, DecoderRegistry, Field, FieldOrigin, FieldValue, InlineStringEncoding,
-    OwnedFieldValue, SemanticContext,
+    schema_hash_hex, structure_hash, ByteSpan, DecoderRegistry, Field, FieldAddress, FieldOrigin,
+    FieldValue, InlineStringEncoding, OwnedFieldValue, SemanticContext, ValueStep,
 };
 use serde_json::{json, Value};
 
@@ -118,6 +118,43 @@ fn mixed_inline_text_edit_preserves_sibling_bytes() -> TestResult {
     );
     assert_eq!(edited.subrecords[0].data, b"\xc3\x84nderung\0T\xfcre\0");
     assert_eq!(&original[8..], &edited.subrecords[0].data[10..]);
+
+    let address = FieldAddress {
+        schema_payload_sha256: schema_hash_hex(&context.registry().package().payload_sha256()),
+        structure_hash: structure_hash(&fields),
+        record_signature: *b"TEST",
+        form_id: 0x800,
+        subrecord_index: 0,
+        subrecord_path: "TEST/mixed".to_owned(),
+        repeat_scopes: Vec::new(),
+        value_steps: vec![ValueStep::Field {
+            index: 0,
+            path: "TEST/mixed/value/first".to_owned(),
+        }],
+    };
+    let mut explicit = context.edit(&record, false)?;
+    assert!(explicit
+        .set_string_at_with_encoding(
+            &address,
+            "TEST/mixed/value/first",
+            InlineStringEncoding::Windows1252,
+            "🐉",
+        )
+        .is_err());
+    assert_eq!(
+        explicit.fields()?[0].inline_string_codecs[0].encoding,
+        InlineStringEncoding::Utf8
+    );
+    explicit.set_string_at_with_encoding(
+        &address,
+        "TEST/mixed/value/first",
+        InlineStringEncoding::Windows1252,
+        "Grüße",
+    )?;
+    assert_eq!(
+        explicit.into_writable_record().subrecords[0].data,
+        b"Gr\xfc\xdfe\0T\xfcre\0"
+    );
     Ok(())
 }
 

@@ -1801,8 +1801,9 @@ struct BethkitSemanticContext *bethkit_semantic_context_new(const struct Bethkit
 /**
  * Creates a semantic context with an explicit inline string encoding.
  *
- * `encoding` is 1 for UTF-8 or 2 for Windows-1252. This setting is used
- * when reading and editing schema-localizable text embedded in a plugin.
+ * `encoding` is 1 for forced UTF-8, 2 for forced Windows-1252, or 3 to
+ * prefer UTF-8 separately for each string and otherwise use its schema codec.
+ * This setting is used when reading and editing schema-localizable text.
  * Technical inline strings and external string-table IDs are unaffected.
  * Returns null and sets the last error on invalid input.
  *
@@ -2185,6 +2186,50 @@ int32_t bethkit_record_editor_insert_json(struct BethkitRecordEditor *editor,
 int32_t bethkit_record_editor_set_at_json(struct BethkitRecordEditor *editor,
                                           const char *address_json,
                                           const char *value_json);
+
+/**
+ * Replaces one addressed inline string with a concrete codec atomically.
+ *
+ * `encoding` is 1 for UTF-8 or 2 for Windows-1252. The address and schema
+ * path and replacement text are borrowed NUL-terminated UTF-8. Returns zero
+ * on success or -1 with a copied last error on failure.
+ *
+ * # Errors
+ *
+ * Returns -1 for invalid pointers, stale addresses, non-inline strings,
+ * unsupported codecs, or source bytes invalid under the selected codec.
+ *
+ * # Safety
+ *
+ * The editor must be live and exclusively borrowed. String pointers must
+ * remain valid for this call.
+ */
+int32_t bethkit_record_editor_set_inline_string_at_json(struct BethkitRecordEditor *editor,
+                                                        const char *address_json,
+                                                        const char *path,
+                                                        uint32_t encoding,
+                                                        const char *text);
+
+/**
+ * Selects a codec for reading and subsequent editing of one inline field.
+ *
+ * `encoding` is 1 for UTF-8 or 2 for Windows-1252. This does not change
+ * the record bytes. Returns zero on success or -1 with the last error.
+ *
+ * # Errors
+ *
+ * Returns -1 for invalid pointers, stale addresses, non-inline strings,
+ * unsupported codecs, or source bytes invalid under the selected codec.
+ *
+ * # Safety
+ *
+ * The editor must be live and exclusively borrowed. String pointers must
+ * remain valid for this call.
+ */
+int32_t bethkit_record_editor_select_inline_encoding_at_json(struct BethkitRecordEditor *editor,
+                                                             const char *address_json,
+                                                             const char *path,
+                                                             uint32_t encoding);
 
 /**
  * Inserts a value before an array item or appends to an addressed array.

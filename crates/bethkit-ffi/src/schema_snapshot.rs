@@ -7,7 +7,7 @@ use bethkit_core::{resolve_string_kind, Signature, StringFileKind};
 use bethkit_schema::{PrimitiveType, SchemaNode, SchemaNodeKind, SchemaRegistry};
 use bethkit_semantic::{
     schema_hash_hex, structure_hash, Field, FieldAddress, FieldOrigin, FieldValue,
-    InlineStringCodec, OwnedFieldValue, ValueSelection, ValueStep,
+    InlineStringCodec, InlineStringEncoding, OwnedFieldValue, ValueSelection, ValueStep,
 };
 use serde_json::{json, Value};
 
@@ -657,6 +657,137 @@ pub extern "C" fn bethkit_record_editor_set_at_json(
     value_json: *const c_char,
 ) -> i32 {
     edit_json(editor, address_json, value_json, EditOperation::Set)
+}
+
+/// Replaces one addressed inline string with a concrete codec atomically.
+///
+/// `encoding` is 1 for UTF-8 or 2 for Windows-1252. The address and schema
+/// path and replacement text are borrowed NUL-terminated UTF-8. Returns zero
+/// on success or -1 with a copied last error on failure.
+///
+/// # Errors
+///
+/// Returns -1 for invalid pointers, stale addresses, non-inline strings,
+/// unsupported codecs, or source bytes invalid under the selected codec.
+///
+/// # Safety
+///
+/// The editor must be live and exclusively borrowed. String pointers must
+/// remain valid for this call.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_set_inline_string_at_json(
+    editor: *mut BethkitRecordEditor,
+    address_json: *const c_char,
+    path: *const c_char,
+    encoding: u32,
+    text: *const c_char,
+) -> i32 {
+    null_check!(
+        editor,
+        "bethkit_record_editor_set_inline_string_at_json/editor",
+        -1
+    );
+    null_check!(
+        address_json,
+        "bethkit_record_editor_set_inline_string_at_json/address",
+        -1
+    );
+    null_check!(
+        path,
+        "bethkit_record_editor_set_inline_string_at_json/path",
+        -1
+    );
+    null_check!(
+        text,
+        "bethkit_record_editor_set_inline_string_at_json/text",
+        -1
+    );
+    ffi_try!(
+        (|| -> Result<()> {
+            let address_text = cstr_to_str(address_json, "inline codec address")
+                .ok_or_else(|| input_error("address is not valid UTF-8"))?;
+            let path = cstr_to_str(path, "inline codec path")
+                .ok_or_else(|| input_error("path is not valid UTF-8"))?;
+            let text = cstr_to_str(text, "inline string replacement")
+                .ok_or_else(|| input_error("replacement is not valid UTF-8"))?;
+            let address: FieldAddress = serde_json::from_str(address_text)?;
+            let codec = match encoding {
+                1 => InlineStringEncoding::Utf8,
+                2 => InlineStringEncoding::Windows1252,
+                _ => return Err(input_error("unsupported inline codec")),
+            };
+            // SAFETY: editor is non-null and exclusively borrowed by caller contract.
+            let editor = unsafe { &mut *editor }
+                .0
+                .as_mut()
+                .ok_or(FfiError::WriterConsumed)?;
+            editor.set_string_at_with_encoding(&address, path, codec, text)?;
+            Ok(())
+        })(),
+        -1
+    );
+    0
+}
+
+/// Selects a codec for reading and subsequent editing of one inline field.
+///
+/// `encoding` is 1 for UTF-8 or 2 for Windows-1252. This does not change
+/// the record bytes. Returns zero on success or -1 with the last error.
+///
+/// # Errors
+///
+/// Returns -1 for invalid pointers, stale addresses, non-inline strings,
+/// unsupported codecs, or source bytes invalid under the selected codec.
+///
+/// # Safety
+///
+/// The editor must be live and exclusively borrowed. String pointers must
+/// remain valid for this call.
+#[no_mangle]
+pub extern "C" fn bethkit_record_editor_select_inline_encoding_at_json(
+    editor: *mut BethkitRecordEditor,
+    address_json: *const c_char,
+    path: *const c_char,
+    encoding: u32,
+) -> i32 {
+    null_check!(
+        editor,
+        "bethkit_record_editor_select_inline_encoding_at_json/editor",
+        -1
+    );
+    null_check!(
+        address_json,
+        "bethkit_record_editor_select_inline_encoding_at_json/address",
+        -1
+    );
+    null_check!(
+        path,
+        "bethkit_record_editor_select_inline_encoding_at_json/path",
+        -1
+    );
+    ffi_try!(
+        (|| -> Result<()> {
+            let address_text = cstr_to_str(address_json, "inline codec address")
+                .ok_or_else(|| input_error("address is not valid UTF-8"))?;
+            let path = cstr_to_str(path, "inline codec path")
+                .ok_or_else(|| input_error("path is not valid UTF-8"))?;
+            let address: FieldAddress = serde_json::from_str(address_text)?;
+            let codec = match encoding {
+                1 => InlineStringEncoding::Utf8,
+                2 => InlineStringEncoding::Windows1252,
+                _ => return Err(input_error("unsupported inline codec")),
+            };
+            // SAFETY: editor is non-null and exclusively borrowed by caller contract.
+            let editor = unsafe { &mut *editor }
+                .0
+                .as_mut()
+                .ok_or(FfiError::WriterConsumed)?;
+            editor.set_inline_encoding_at(&address, path, codec)?;
+            Ok(())
+        })(),
+        -1
+    );
+    0
 }
 
 /// Inserts a value before an array item or appends to an addressed array.
