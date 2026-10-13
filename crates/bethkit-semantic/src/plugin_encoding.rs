@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Bounded plugin-text detection and explicit caller-supplied codepage overrides.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -130,6 +131,14 @@ fn override_error(path: &Path, message: &str) -> SemanticError {
 }
 
 fn detect(context: &SemanticContext, plugin: &Plugin) -> PluginEncodingDecision {
+    let text_signatures: BTreeSet<[u8; 4]> = context
+        .registry()
+        .package()
+        .records()
+        .iter()
+        .filter(|record| contains_text(&record.root))
+        .map(|record| record.signature.0)
+        .collect();
     let mut sample = Vec::with_capacity(ENCODING_SAMPLE_BYTES);
     let mut strings = 0;
     let mut scanned = 0;
@@ -142,6 +151,9 @@ fn detect(context: &SemanticContext, plugin: &Plugin) -> PluginEncodingDecision 
             .take(ENCODING_SAMPLE_RECORDS)
         {
             scanned += 1;
+            if !text_signatures.contains(&record.header.signature.0) {
+                continue;
+            }
             // Avoid decompressing or materializing unusually large records for detection.
             if record.uncompressed_data_size() > 1024 * 1024 {
                 skipped += 1;
@@ -162,7 +174,7 @@ fn detect(context: &SemanticContext, plugin: &Plugin) -> PluginEncodingDecision 
                     &mut strings,
                 );
             }
-            if sample.len() >= ENCODING_SAMPLE_BYTES.saturating_sub(1) {
+            if sample.len() >= ENCODING_SAMPLE_BYTES * 3 / 4 {
                 break;
             }
         }
@@ -189,6 +201,32 @@ fn detect(context: &SemanticContext, plugin: &Plugin) -> PluginEncodingDecision 
         sample_strings: strings,
         scanned_records: scanned,
         skipped_records: skipped,
+    }
+}
+
+fn contains_text(node: &SchemaNode) -> bool {
+    match &node.kind {
+        SchemaNodeKind::Primitive { primitive } => matches!(primitive,
+            PrimitiveType::String { string } if string.localized || string.encoding == "localized"),
+        SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
+            children.iter().any(contains_text)
+        }
+        SchemaNodeKind::Choice { alternatives }
+        | SchemaNodeKind::SelectedChoice { alternatives, .. } => {
+            alternatives.iter().any(contains_text)
+        }
+        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
+            fields.iter().any(contains_text)
+        }
+        SchemaNodeKind::Union { variants, .. } => variants.iter().any(contains_text),
+        SchemaNodeKind::Subrecord { payload, .. } => contains_text(payload),
+        SchemaNodeKind::Repeat { child, .. }
+        | SchemaNodeKind::Compressed { child, .. }
+        | SchemaNodeKind::Terminated { child, .. } => contains_text(child),
+        SchemaNodeKind::Array { element, .. } => contains_text(element),
+        // References are conservatively included; only resolved string nodes are sampled.
+        SchemaNodeKind::Reference { .. } => true,
+        SchemaNodeKind::Custom { .. } => false,
     }
 }
 
