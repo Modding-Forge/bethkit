@@ -83,11 +83,16 @@ pub extern "C" fn bethkit_semantic_context_encoding_json(
         {
             // SAFETY: context was checked for null and remains borrowed.
             let decision = unsafe { &*context }.0.plugin_encoding_decision();
-            let value = decision.map(|decision| json!({
-            "encoding": decision.encoding().schema_name(), "source": decision.source(),
-            "sample_bytes": decision.sample_bytes(), "sample_strings": decision.sample_strings(),
-            "scanned_records": decision.scanned_records(), "skipped_records": decision.skipped_records(),
-        }));
+            let value = decision.map(|decision| {
+                json!({
+                    "encoding": decision.encoding().schema_name(),
+                    "source": decision.source(),
+                    "sample_bytes": decision.sample_bytes(),
+                    "sample_strings": decision.sample_strings(),
+                    "scanned_records": decision.scanned_records(),
+                    "skipped_records": decision.skipped_records(),
+                })
+            });
             owned_json(&json!(value))
         },
         std::ptr::null_mut()
