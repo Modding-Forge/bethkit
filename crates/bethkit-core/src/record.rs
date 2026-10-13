@@ -369,6 +369,16 @@ pub struct Record {
 }
 
 impl Record {
+    /// Returns the uncompressed payload size without parsing or decompressing it.
+    pub fn uncompressed_data_size(&self) -> usize {
+        match &self.data {
+            RecordData::Raw(data) => data.len(),
+            RecordData::Compressed {
+                decompressed_size, ..
+            } => *decompressed_size as usize,
+        }
+    }
+
     /// Creates an immutable record snapshot from a writable record.
     ///
     /// The snapshot owns copies of all subrecord payloads and has no source

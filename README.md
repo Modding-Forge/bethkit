@@ -21,6 +21,10 @@ Bethkit does not store generated schema packages in Git. The release workflow do
 
 The definitions originate in the [xEdit project](https://github.com/TES5Edit/TES5Edit). [Modding-Forge/xDump](https://github.com/Modding-Forge/xDump) pins the upstream xEdit source, builds the exporter, audits the conversion rules, validates the result, and publishes the package consumed by Bethkit.
 
+`SemanticContext::new_for_plugin(package, decoders, &plugin, cpoverride)` resolves an inline-text codec once for that plugin. An explicitly supplied `.cpoverride` path takes precedence and invalid files fail without detection. Otherwise `chardetng` samples up to 64 KiB of complete schema-localizable text from at most the first 512 records, skipping records with an uncompressed payload over 1 MiB or decoding errors. Technical fields and external string tables are excluded. Reuse the returned context for reads and edits of that plugin. The retained `plugin_encoding_decision()` reports the codec, evidence source, and sampling counts. ASCII-only or empty samples cannot identify an original encoding and use UTF-8 as a compatible default. A single plugin decision cannot reliably describe mixed encodings; existing per-field overrides remain available.
+
+The detector uses the MIT licensing option of `chardetng`; encoding tables also carry BSD-3-Clause and CC0 notices. Native release archives include the relevant copyright and permission texts. See [encoding component notices](THIRD_PARTY_NOTICES.md) for the audited versions and sources.
+
 See [SCHEMA.md](SCHEMA.md) for provenance, measured coverage, validation results, and current limitations.
 
 ## Documentation

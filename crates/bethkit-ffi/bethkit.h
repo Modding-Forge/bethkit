@@ -2067,6 +2067,43 @@ const struct BethkitFieldValue *bethkit_field_values_get(const struct BethkitFie
 void bethkit_field_values_free(struct BethkitFieldValues *values);
 
 /**
+ * Creates an owned semantic context with a retained plugin encoding decision.
+ *
+ * An optional UTF-8 `cpoverride` path always wins over detection. Invalid overrides
+ * fail without falling back. Without an override, a bounded sample of translatable
+ * inline text is detected once. Reuse the context for this plugin's reads and edits.
+ *
+ * # Errors
+ *
+ * Returns null and sets the thread-local error for invalid pointers, paths,
+ * override files, or schema requirements.
+ *
+ * # Safety
+ *
+ * `package` and `plugin` must be live borrowed handles for this call. `cpoverride`
+ * may be null; otherwise it must point to a readable NUL-terminated UTF-8 path.
+ * The returned context retains its schema but not the plugin. The caller owns it
+ * and must call `bethkit_semantic_context_free` exactly once.
+ */
+struct BethkitSemanticContext *bethkit_semantic_context_new_for_plugin(const struct BethkitSchemaPackage *package,
+                                                                       const struct BethkitPlugin *plugin,
+                                                                       const char *cpoverride);
+
+/**
+ * Returns an owned JSON encoding decision, or JSON null for a manual context.
+ *
+ * # Errors
+ *
+ * Returns null and sets the thread-local error for a null context or serialization failure.
+ *
+ * # Safety
+ *
+ * `context` must be a live borrowed context. Free the returned UTF-8 allocation
+ * with `bethkit_string_free`; it remains valid independently of the context.
+ */
+char *bethkit_semantic_context_encoding_json(const struct BethkitSemanticContext *context);
+
+/**
  * Returns an owned, structurally addressed snapshot as a UTF-8 JSON document.
  *
  * Borrow `context` and `record` for this call and set `localized` from the plugin.

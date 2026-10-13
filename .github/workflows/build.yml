@@ -127,6 +127,8 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
@@ -150,6 +152,10 @@ jobs:
           cp dist/linux/target/release/libbethkit_ffi.a  staging/linux/
           cp dist/linux/crates/bethkit-ffi/bethkit.h     staging/linux/
           cp dist/linux/target/release-schemas/skyrim_se.bkschema staging/linux/
+          cp LICENSE THIRD_PARTY_NOTICES.md staging/windows/
+          cp LICENSE THIRD_PARTY_NOTICES.md staging/linux/
+          cp -r licenses staging/windows/
+          cp -r licenses staging/linux/
           (cd staging/windows && zip -r ../../bethkit-${{ github.ref_name }}-windows-x64.zip .)
           (cd staging/linux   && zip -r ../../bethkit-${{ github.ref_name }}-linux-x64.zip .)
 

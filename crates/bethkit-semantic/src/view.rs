@@ -2085,10 +2085,20 @@ fn decode_string_selected<'a>(
             value
         }
         encoding => {
-            return Err(SemanticError::Decode {
-                path: path.to_owned(),
-                message: format!("string encoding {encoding} requires a custom decoder"),
-            });
+            let codec = encoding_rs::Encoding::for_label(encoding.as_bytes()).ok_or_else(|| {
+                SemanticError::Decode {
+                    path: path.to_owned(),
+                    message: format!("string encoding {encoding} requires a custom decoder"),
+                }
+            })?;
+            let (value, had_errors) = codec.decode_without_bom_handling(bytes);
+            if had_errors {
+                return Err(SemanticError::Decode {
+                    path: path.to_owned(),
+                    message: format!("invalid {encoding} byte sequence"),
+                });
+            }
+            value
         }
     };
     Ok(FieldValue::String(value))
