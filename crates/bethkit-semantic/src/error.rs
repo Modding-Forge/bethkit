@@ -5,6 +5,9 @@
 /// Errors produced by `bethkit-semantic`.
 #[derive(Debug, thiserror::Error)]
 pub enum SemanticError {
+    /// An explicit plugin encoding policy is unreadable or unsupported.
+    #[error("plugin encoding policy failed: {0}")]
+    EncodingPolicy(String),
     /// The raw plugin layer rejected an operation.
     #[error("plugin operation failed: {0}")]
     Core(#[from] bethkit_core::CoreError),

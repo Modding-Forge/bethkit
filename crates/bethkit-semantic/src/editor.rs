@@ -4114,10 +4114,18 @@ fn encode_primitive(
                     bytes.into_owned()
                 }
                 encoding => {
-                    return Err(encode_error(
-                        path,
-                        format!("unsupported string encoding {encoding}"),
-                    ));
+                    let codec =
+                        encoding_rs::Encoding::for_label(encoding.as_bytes()).ok_or_else(|| {
+                            encode_error(path, format!("unsupported string encoding {encoding}"))
+                        })?;
+                    let (bytes, _, had_errors) = codec.encode(value);
+                    if had_errors {
+                        return Err(encode_error(
+                            path,
+                            format!("string contains characters that {encoding} cannot represent"),
+                        ));
+                    }
+                    bytes.into_owned()
                 }
             };
             finish_string_encoding(string, bytes, path)

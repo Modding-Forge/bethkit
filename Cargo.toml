@@ -26,6 +26,7 @@ ciborium   = "0.2"
 sha2       = "0.10"
 hex        = "0.4"
 encoding_rs = "0.8"
+chardetng = "=1.0.0"
 
 [profile.release]
 lto           = "fat"

@@ -23,7 +23,8 @@ pub struct SemanticContext {
     registry: SchemaRegistry,
     decoders: DecoderRegistry,
     handlers: SemanticHandlerRegistry,
-    inline_string_encoding: Option<InlineStringEncoding>,
+    pub(crate) inline_string_encoding: Option<InlineStringEncoding>,
+    pub(crate) plugin_encoding_decision: Option<crate::PluginEncodingDecision>,
 }
 
 /// Typed result of parsing text accepted by an xEdit edit control.
@@ -99,6 +100,7 @@ impl SemanticContext {
             decoders,
             handlers,
             inline_string_encoding: None,
+            plugin_encoding_decision: None,
         })
     }
 
@@ -110,12 +112,18 @@ impl SemanticContext {
     /// Returns the configured context.
     pub fn with_inline_string_encoding(mut self, encoding: InlineStringEncoding) -> Self {
         self.inline_string_encoding = Some(encoding);
+        self.plugin_encoding_decision = None;
         self
     }
 
     /// Returns the selected policy, or `None` for the schema default.
     pub fn inline_string_encoding(&self) -> Option<InlineStringEncoding> {
         self.inline_string_encoding
+    }
+
+    /// Returns the retained plugin decision, or `None` for a manually configured context.
+    pub fn plugin_encoding_decision(&self) -> Option<&crate::PluginEncodingDecision> {
+        self.plugin_encoding_decision.as_ref()
     }
 
     /// Creates a read-only semantic view over a record.

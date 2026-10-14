@@ -12,6 +12,7 @@ mod error;
 mod grammar;
 mod handler;
 mod info_sort;
+mod plugin_encoding;
 mod text_encoding;
 mod validation;
 mod value;
@@ -41,6 +42,7 @@ pub use handler::{
 pub use info_sort::{
     edit_info_previous, plan_info_group_sort, InfoGroupSortPlan, InfoPreviousEdit,
 };
+pub use plugin_encoding::{PluginEncodingDecision, ENCODING_SAMPLE_BYTES, ENCODING_SAMPLE_RECORDS};
 pub use text_encoding::InlineStringEncoding;
 pub use validation::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationMode, ValidationReport,

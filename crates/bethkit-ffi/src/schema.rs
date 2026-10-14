@@ -46,6 +46,8 @@ use crate::types::{
 use crate::writer::BethkitWritableRecord;
 use crate::{cstr_to_str, ffi_try, null_check, set_last_error, BethkitSlice};
 
+#[path = "schema_plugin_encoding.rs"]
+mod plugin_encoding;
 #[path = "schema_snapshot.rs"]
 mod snapshot;
 
