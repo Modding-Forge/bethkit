@@ -27,13 +27,19 @@ pub(crate) struct GrammarViolation {
 }
 
 #[derive(Clone)]
-struct MatchState<'schema> {
+struct MatchState {
     cursor: usize,
-    assignments: Vec<Option<&'schema SchemaNode>>,
-    repeat_scopes: Vec<Vec<RepeatScope>>,
+    history_head: Option<usize>,
     active_repeat_scopes: Vec<RepeatScope>,
     assigned: usize,
     violations: Vec<GrammarViolation>,
+}
+
+struct MatchedAssignment<'schema> {
+    previous: Option<usize>,
+    index: usize,
+    node: &'schema SchemaNode,
+    repeat_scopes: Vec<RepeatScope>,
 }
 
 pub(crate) fn interpret<'schema>(
@@ -89,12 +95,12 @@ fn interpret_inputs<'schema, T: GrammarInput>(
     collect_signatures(root, &mut declared_signatures);
     let initial = MatchState {
         cursor: 0,
-        assignments: vec![None; subrecords.len()],
-        repeat_scopes: vec![Vec::new(); subrecords.len()],
+        history_head: None,
         active_repeat_scopes: Vec::new(),
         assigned: 0,
         violations: Vec::new(),
     };
+    let mut history = Vec::new();
     let state = match_node(
         root,
         initial,
@@ -102,10 +108,20 @@ fn interpret_inputs<'schema, T: GrammarInput>(
         form_version,
         subrecords,
         &declared_signatures,
+        &mut history,
     )?;
+    let mut assignments = vec![None; subrecords.len()];
+    let mut repeat_scopes = vec![Vec::new(); subrecords.len()];
+    let mut head = state.history_head;
+    while let Some(index) = head {
+        let entry = &history[index];
+        assignments[entry.index] = Some(entry.node);
+        repeat_scopes[entry.index] = entry.repeat_scopes.clone();
+        head = entry.previous;
+    }
     Ok(GrammarMatch {
-        assignments: state.assignments,
-        repeat_scopes: state.repeat_scopes,
+        assignments,
+        repeat_scopes,
         declared_signatures,
         violations: state.violations,
     })
@@ -113,12 +129,13 @@ fn interpret_inputs<'schema, T: GrammarInput>(
 
 fn match_node<'schema, T: GrammarInput>(
     node: &'schema SchemaNode,
-    state: MatchState<'schema>,
+    state: MatchState,
     record_signature: Signature,
     form_version: u16,
     subrecords: &[T],
     declared: &BTreeSet<Signature>,
-) -> Result<MatchState<'schema>> {
+    history: &mut Vec<MatchedAssignment<'schema>>,
+) -> Result<MatchState> {
     if !condition_applies(node, &state, record_signature, form_version, subrecords)? {
         return Ok(state);
     }
@@ -133,6 +150,7 @@ fn match_node<'schema, T: GrammarInput>(
                     form_version,
                     subrecords,
                     declared,
+                    history,
                 )?;
             }
             Ok(current)
@@ -141,7 +159,7 @@ fn match_node<'schema, T: GrammarInput>(
             let mut current = state;
             let mut matched_children = BTreeSet::new();
             loop {
-                let mut best: Option<(usize, MatchState<'schema>)> = None;
+                let mut best: Option<(usize, MatchState)> = None;
                 for (index, child) in children.iter().enumerate() {
                     if matched_children.contains(&index) {
                         continue;
@@ -153,6 +171,7 @@ fn match_node<'schema, T: GrammarInput>(
                         form_version,
                         subrecords,
                         declared,
+                        history,
                     )?;
                     if candidate.assigned == current.assigned {
                         continue;
@@ -183,6 +202,7 @@ fn match_node<'schema, T: GrammarInput>(
                     form_version,
                     subrecords,
                     declared,
+                    history,
                 )?;
                 if candidate.assigned > best.assigned
                     || (candidate.assigned == best.assigned && candidate.cursor > best.cursor)
@@ -196,7 +216,7 @@ fn match_node<'schema, T: GrammarInput>(
             selector,
             alternatives,
         } => {
-            let field_values = assigned_numeric_fields(&state, subrecords)?;
+            let field_values = assigned_numeric_fields(&state, subrecords, history)?;
             let payload = subrecords
                 .get(state.cursor)
                 .map_or(&[][..], GrammarInput::payload);
@@ -245,6 +265,7 @@ fn match_node<'schema, T: GrammarInput>(
                 form_version,
                 subrecords,
                 declared,
+                history,
             )
         }
         SchemaNodeKind::Repeat {
@@ -267,6 +288,7 @@ fn match_node<'schema, T: GrammarInput>(
                     form_version,
                     subrecords,
                     declared,
+                    history,
                 )?;
                 if candidate.assigned == current.assigned {
                     break;
@@ -293,8 +315,15 @@ fn match_node<'schema, T: GrammarInput>(
             if subrecord.signature() != Signature::from(*signature) {
                 return Ok(current);
             }
-            current.assignments[current.cursor] = Some(node);
-            current.repeat_scopes[current.cursor] = current.active_repeat_scopes.clone();
+            // Branches retain only a history index. Failed alternatives cannot mutate
+            // another branch, and discarded histories are freed without recursive drops.
+            history.push(MatchedAssignment {
+                previous: current.history_head,
+                index: current.cursor,
+                node,
+                repeat_scopes: current.active_repeat_scopes.clone(),
+            });
+            current.history_head = Some(history.len() - 1);
             current.cursor += 1;
             current.assigned += 1;
             Ok(current)
@@ -305,7 +334,7 @@ fn match_node<'schema, T: GrammarInput>(
 
 fn condition_applies<T: GrammarInput>(
     node: &SchemaNode,
-    state: &MatchState<'_>,
+    state: &MatchState,
     record_signature: Signature,
     form_version: u16,
     subrecords: &[T],
@@ -333,14 +362,22 @@ fn condition_applies<T: GrammarInput>(
 }
 
 fn assigned_numeric_fields<T: GrammarInput>(
-    state: &MatchState<'_>,
+    state: &MatchState,
     subrecords: &[T],
+    history: &[MatchedAssignment<'_>],
 ) -> Result<BTreeMap<String, i64>> {
     let mut values = BTreeMap::new();
-    for (index, assignment) in state.assignments.iter().enumerate() {
-        let (Some(node), Some(subrecord)) = (assignment, subrecords.get(index)) else {
-            continue;
-        };
+    let mut entries = Vec::with_capacity(state.assigned);
+    let mut head = state.history_head;
+    while let Some(index) = head {
+        let entry = &history[index];
+        entries.push(entry);
+        head = entry.previous;
+    }
+    // Preserve source order: later occurrences overwrite earlier numeric values.
+    for entry in entries.into_iter().rev() {
+        let node = entry.node;
+        let subrecord = &subrecords[entry.index];
         if let SchemaNodeKind::Subrecord { payload, .. } = &node.kind {
             collect_numeric_payload_fields(payload, subrecord.payload(), 0, &mut values)?;
             if let Some(value) = numeric_payload_value(payload, subrecord.payload(), 0)? {
@@ -440,7 +477,7 @@ fn primitive_fixed_size(primitive: &PrimitiveType) -> Option<usize> {
 }
 
 fn skip_unknown<T: GrammarInput>(
-    state: &mut MatchState<'_>,
+    state: &mut MatchState,
     subrecords: &[T],
     declared: &BTreeSet<Signature>,
 ) {
@@ -494,6 +531,25 @@ mod tests {
     use bethkit_schema::{ConflictPriority, SchemaNodeId, SchemaSignature};
 
     use super::*;
+
+    /// Materializes a long winning history without recursive drop or shared-branch mutation.
+    #[test]
+    fn long_repeat_history_keeps_exact_occurrences(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let child = subrecord_node(1, *b"AAAA", false);
+        let mut root = child.clone();
+        root.kind = SchemaNodeKind::Repeat {
+            minimum: 0,
+            maximum: None,
+            child: Box::new(child),
+        };
+        let subrecords: Vec<SubRecord> = (0..10_000).map(|_| subrecord(*b"AAAA")).collect();
+        let matched = interpret(&root, Signature(*b"TEST"), 44, &subrecords)?;
+        assert!(matched.assignments.iter().all(Option::is_some));
+        assert_eq!(matched.repeat_scopes[9_999][0].occurrence, 9_999);
+        assert!(matched.violations.is_empty());
+        Ok(())
+    }
 
     fn subrecord_node(id: u32, signature: [u8; 4], required: bool) -> SchemaNode {
         SchemaNode {
