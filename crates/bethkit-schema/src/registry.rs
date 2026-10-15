@@ -5,14 +5,15 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bethkit_core::{Game, Signature};
 
+use crate::node_index::NodeIndex;
 use crate::package::decode_bundle;
 use crate::{
-    Result, SchemaError, SchemaGame, SchemaLoadLimits, SchemaNode, SchemaNodeKind, SchemaPackage,
-    SchemaRecord, SchemaSignature,
+    Result, SchemaError, SchemaGame, SchemaLoadLimits, SchemaNode, SchemaPackage, SchemaRecord,
+    SchemaSignature,
 };
 
 include!(concat!(env!("OUT_DIR"), "/embedded_catalog.rs"));
@@ -22,6 +23,7 @@ include!(concat!(env!("OUT_DIR"), "/embedded_catalog.rs"));
 pub struct SchemaRegistry {
     package: Arc<SchemaPackage>,
     record_indices: BTreeMap<SchemaSignature, usize>,
+    node_indices: Arc<Vec<OnceLock<NodeIndex>>>,
 }
 
 impl SchemaRegistry {
@@ -33,9 +35,15 @@ impl SchemaRegistry {
             .enumerate()
             .map(|(index, record)| (record.signature, index))
             .collect();
+        let node_indices = Arc::new(
+            (0..package.records().len())
+                .map(|_| OnceLock::new())
+                .collect(),
+        );
         Self {
             package,
             record_indices,
+            node_indices,
         }
     }
 
@@ -47,8 +55,11 @@ impl SchemaRegistry {
 
     /// Returns the node at an exact stable schema path for a main-record signature.
     pub fn get_node(&self, signature: Signature, path: &str) -> Option<&SchemaNode> {
-        let record = self.get(signature)?;
-        find_node(&record.root, path)
+        let index = *self.record_indices.get(&SchemaSignature::from(signature))?;
+        let record = self.package.records().get(index)?;
+        self.node_indices[index]
+            .get_or_init(|| NodeIndex::new(&record.root))
+            .get(&record.root, path)
     }
 
     /// Returns the owned package backing this registry.
@@ -65,35 +76,6 @@ impl SchemaRegistry {
     pub fn is_empty(&self) -> bool {
         self.record_indices.is_empty()
     }
-}
-
-fn find_node<'a>(node: &'a SchemaNode, path: &str) -> Option<&'a SchemaNode> {
-    if node.path == path {
-        return Some(node);
-    }
-    match &node.kind {
-        SchemaNodeKind::Sequence { children } | SchemaNodeKind::Unordered { children } => {
-            find_in_nodes(children, path)
-        }
-        SchemaNodeKind::Choice { alternatives }
-        | SchemaNodeKind::SelectedChoice { alternatives, .. } => find_in_nodes(alternatives, path),
-        SchemaNodeKind::Repeat { child, .. }
-        | SchemaNodeKind::Subrecord { payload: child, .. }
-        | SchemaNodeKind::Array { element: child, .. }
-        | SchemaNodeKind::Compressed { child, .. }
-        | SchemaNodeKind::Terminated { child, .. } => find_node(child, path),
-        SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. } => {
-            find_in_nodes(fields, path)
-        }
-        SchemaNodeKind::Union { variants, .. } => find_in_nodes(variants, path),
-        SchemaNodeKind::Primitive { .. }
-        | SchemaNodeKind::Custom { .. }
-        | SchemaNodeKind::Reference { .. } => None,
-    }
-}
-
-fn find_in_nodes<'a>(nodes: &'a [SchemaNode], path: &str) -> Option<&'a SchemaNode> {
-    nodes.iter().find_map(|node| find_node(node, path))
 }
 
 /// Owned collection of schema packages keyed by game mode.

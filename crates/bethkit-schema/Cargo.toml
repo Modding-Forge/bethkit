@@ -9,6 +9,7 @@ default = []
 schema-skyrim-se = []
 
 [dependencies]
+ahash = { workspace = true }
 bethkit-core = { path = "../bethkit-core" }
 ciborium = { workspace = true }
 hex = { workspace = true }

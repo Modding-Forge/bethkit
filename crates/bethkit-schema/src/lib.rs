@@ -10,6 +10,7 @@
 mod error;
 mod expression;
 mod model;
+mod node_index;
 mod package;
 mod registry;
 
