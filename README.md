@@ -25,6 +25,10 @@ The definitions originate in the [xEdit project](https://github.com/TES5Edit/TES
 
 The detector uses the MIT licensing option of `chardetng`; encoding tables also carry BSD-3-Clause and CC0 notices. Native release archives include the relevant copyright and permission texts. See [encoding component notices](THIRD_PARTY_NOTICES.md) for the audited versions and sources.
 
+The development API also provides `SemanticContext::new_for_plugin_mixed` for explicit per-string UTF-8 preference with a detected legacy fallback (Windows-1252 when the prior is UTF-8). This is a heuristic for mixed files, not a reliable way to disambiguate all valid byte sequences. An explicit `.cpoverride` disables the heuristic, and field-specific overrides remain available. Editors retain the selected field codecs, including repeated occurrences.
+
+The native `bethkit_string_cursor_*` C API traverses records lazily and returns bounded batches of addressed translatable scalars, without constructing typed Python record models. The cursor borrows its plugin and semantic context, so both must remain live until it is freed. Full record decoding remains the default; callers may explicitly skip schema-proven text-free types for extraction-only workloads. Such skipping is not a substitute for validating those omitted payloads. Decode errors remain terminal after the complete valid string prefix is delivered. The header documents batch bounds and ownership.
+
 See [SCHEMA.md](SCHEMA.md) for provenance, measured coverage, validation results, and current limitations.
 
 ## Documentation

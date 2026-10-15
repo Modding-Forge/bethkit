@@ -32,7 +32,7 @@ pub struct PluginEncodingDecision {
 }
 
 impl PluginEncodingDecision {
-    /// Returns the selected concrete codec used for reading and editing.
+    /// Returns the detected or overridden codec; mixed mode uses it as a prior.
     pub fn encoding(&self) -> InlineStringEncoding {
         self.encoding
     }
