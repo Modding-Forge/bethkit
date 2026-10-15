@@ -1022,8 +1022,10 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         encoding,
                         heuristic: explicit_codec.is_some_and(|codec| codec.heuristic)
                             || (explicit_codec.is_none()
-                                && self.context.inline_string_encoding()
-                                    == Some(InlineStringEncoding::PreferUtf8)),
+                                && self
+                                    .context
+                                    .inline_string_encoding()
+                                    .is_some_and(InlineStringEncoding::prefers_utf8)),
                     });
                 }
                 result.map(|value| (value, consumed, None))
@@ -2047,18 +2049,26 @@ fn decode_string_selected<'a>(
     } else {
         bytes
     };
-    let preferred_utf8 = (inline_encoding == Some(InlineStringEncoding::PreferUtf8)
+    let preferred_utf8 = (inline_encoding.is_some_and(InlineStringEncoding::prefers_utf8)
         && is_localized_string(string))
     .then(|| std::str::from_utf8(bytes).ok())
     .flatten();
     let encoding = match inline_encoding.filter(|_| is_localized_string(string)) {
-        Some(InlineStringEncoding::PreferUtf8) if preferred_utf8.is_some() => {
+        Some(policy) if policy.prefers_utf8() && preferred_utf8.is_some() => {
             if !bytes.is_ascii() && text_encoding(string) != "utf8" {
                 *selected_codec = Some(InlineStringEncoding::Utf8);
             }
             "utf8"
         }
-        Some(InlineStringEncoding::PreferUtf8) | None => text_encoding(string),
+        Some(policy) if policy.prefers_utf8() => {
+            let fallback = policy.fallback_encoding();
+            let encoding = fallback.map_or_else(|| text_encoding(string), |v| v.schema_name());
+            if encoding != text_encoding(string) {
+                *selected_codec = fallback;
+            }
+            encoding
+        }
+        None => text_encoding(string),
         Some(encoding) => {
             if encoding.schema_name() != text_encoding(string) {
                 *selected_codec = Some(encoding);

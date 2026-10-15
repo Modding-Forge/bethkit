@@ -12,6 +12,8 @@ pub enum InlineStringEncoding {
     Windows1252,
     /// Prefer UTF-8 for each inline string, falling back to its schema encoding.
     PreferUtf8,
+    /// Prefer UTF-8 per string, with one detected legacy fallback for other bytes.
+    PreferUtf8WithFallback(&'static encoding_rs::Encoding),
     /// A supported legacy codec selected by detection or an explicit override.
     Legacy(&'static encoding_rs::Encoding),
 }
@@ -22,8 +24,21 @@ impl InlineStringEncoding {
         match self {
             Self::Utf8 => "utf8",
             Self::Windows1252 => "windows_1252",
-            Self::PreferUtf8 => "prefer_utf8",
+            Self::PreferUtf8 | Self::PreferUtf8WithFallback(_) => "prefer_utf8",
             Self::Legacy(encoding) => encoding.name(),
+        }
+    }
+
+    /// Returns whether this policy makes a heuristic choice for each string.
+    pub fn prefers_utf8(self) -> bool {
+        matches!(self, Self::PreferUtf8 | Self::PreferUtf8WithFallback(_))
+    }
+
+    pub(crate) fn fallback_encoding(self) -> Option<Self> {
+        match self {
+            Self::PreferUtf8 => None,
+            Self::PreferUtf8WithFallback(codec) => Self::from_label(codec.name()),
+            concrete => Some(concrete),
         }
     }
 

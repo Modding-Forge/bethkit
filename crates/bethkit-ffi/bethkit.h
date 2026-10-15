@@ -330,6 +330,14 @@ typedef struct BethkitSchemaPackage BethkitSchemaPackage;
 typedef struct BethkitSemanticContext BethkitSemanticContext;
 
 /**
+ * Owned cursor over a borrowed immutable plugin and semantic context.
+ *
+ * Both source handles must outlive this cursor. No record values are retained
+ * between batches. Free with `bethkit_string_cursor_free` before either owner.
+ */
+typedef struct BethkitStringCursor BethkitStringCursor;
+
+/**
  * An opaque handle to a single string table (`.strings`, `.dlstrings`, or
  * `.ilstrings`).
  *
@@ -2067,6 +2075,27 @@ const struct BethkitFieldValue *bethkit_field_values_get(const struct BethkitFie
 void bethkit_field_values_free(struct BethkitFieldValues *values);
 
 /**
+ * Creates an owned context using opt-in mixed UTF-8/legacy inline decoding.
+ *
+ * The retained plugin decision is a prior. Each complete UTF-8 string is decoded
+ * as UTF-8; other strings use a detected legacy fallback, or Windows-1252 if the
+ * prior was UTF-8. Ambiguous valid byte sequences remain heuristic. A supplied
+ * override always disables mixed decoding and wins without detector fallback.
+ *
+ * # Errors
+ * Returns null and sets the last error for invalid handles, override paths,
+ * schema requirements, or internal panics.
+ *
+ * # Safety
+ * Both source handles must remain live for this call. An optional override is a
+ * borrowed NUL-terminated UTF-8 path. Free the owned result with
+ * `bethkit_semantic_context_free`; the result retains its schema, not its plugin.
+ */
+struct BethkitSemanticContext *bethkit_semantic_context_new_for_plugin_mixed(const struct BethkitSchemaPackage *package,
+                                                                             const struct BethkitPlugin *plugin,
+                                                                             const char *cpoverride);
+
+/**
  * Creates an owned semantic context with a retained plugin encoding decision.
  *
  * An optional UTF-8 `cpoverride` path always wins over detection. Invalid overrides
@@ -2303,6 +2332,55 @@ int32_t bethkit_record_editor_insert_at_json(struct BethkitRecordEditor *editor,
  */
 int32_t bethkit_record_editor_remove_at_json(struct BethkitRecordEditor *editor,
                                              const char *address_json);
+
+/**
+ * Creates an owned cursor, without decoding or copying the plugin.
+ *
+ * # Errors
+ * Returns null and sets the last error for null handles or an internal panic.
+ *
+ * # Safety
+ * Borrow `context` and `plugin` until the cursor is freed. They must remain live
+ * and immutable, and `context` must match this plugin's game and codec policy.
+ * The caller owns the result and frees it with `bethkit_string_cursor_free`.
+ * `validate_nontext` retains full decoding of text-free records when true.
+ * False skips only signatures proven text-free by the schema. Unknown schemas,
+ * custom decoders and unresolved references are always decoded conservatively.
+ */
+struct BethkitStringCursor *bethkit_string_cursor_new(const struct BethkitSemanticContext *context,
+                                                      const struct BethkitPlugin *plugin,
+                                                      bool validate_nontext);
+
+/**
+ * Copies the next bounded batch of translatable scalars into owned UTF-8 JSON.
+ *
+ * `record_limit` must be 1..=256. Batches stop after 4096 strings or 2 MiB
+ * of uncompressed source payload, but always finish their current record. One
+ * unusually large record can exceed these soft byte/string limits. The JSON
+ * contains `values` and `done`. Empty nonterminal batches are valid. Every value
+ * has the same address, codec metadata and structure hash as a record snapshot.
+ * Free each result with `bethkit_string_free`. After an error, recreate the
+ * cursor: it cannot resume past a malformed record and silently omit its strings.
+ *
+ * # Errors
+ * Returns null and sets the last error for invalid limits, a failed cursor,
+ * record decoding or serialization failure, or an internal panic.
+ *
+ * # Safety
+ * The cursor and both borrowed owners must remain live for the call. Do not
+ * advance this cursor concurrently or mutate its plugin/context. The returned
+ * JSON owns its contents independently of all native handles.
+ */
+char *bethkit_string_cursor_next_json(struct BethkitStringCursor *cursor, uintptr_t record_limit);
+
+/**
+ * Frees an owned cursor without touching its borrowed source handles.
+ *
+ * # Safety
+ * Null is a no-op. Otherwise the cursor must be live, exclusively owned, and
+ * not previously freed. No concurrent advance may be running.
+ */
+void bethkit_string_cursor_free(struct BethkitStringCursor *cursor);
 
 /**
  * Creates a new, empty string table for the given `kind`.

@@ -12,6 +12,56 @@ use crate::plugin::BethkitPlugin;
 use crate::FfiError;
 use crate::{cstr_to_str, ffi_try, null_check};
 
+/// Creates an owned context using opt-in mixed UTF-8/legacy inline decoding.
+///
+/// The retained plugin decision is a prior. Each complete UTF-8 string is decoded
+/// as UTF-8; other strings use a detected legacy fallback, or Windows-1252 if the
+/// prior was UTF-8. Ambiguous valid byte sequences remain heuristic. A supplied
+/// override always disables mixed decoding and wins without detector fallback.
+///
+/// # Errors
+/// Returns null and sets the last error for invalid handles, override paths,
+/// schema requirements, or internal panics.
+///
+/// # Safety
+/// Both source handles must remain live for this call. An optional override is a
+/// borrowed NUL-terminated UTF-8 path. Free the owned result with
+/// `bethkit_semantic_context_free`; the result retains its schema, not its plugin.
+#[no_mangle]
+pub extern "C" fn bethkit_semantic_context_new_for_plugin_mixed(
+    package: *const BethkitSchemaPackage,
+    plugin: *const BethkitPlugin,
+    cpoverride: *const c_char,
+) -> *mut BethkitSemanticContext {
+    null_check!(package, "mixed encoding/package", std::ptr::null_mut());
+    null_check!(plugin, "mixed encoding/plugin", std::ptr::null_mut());
+    ffi_try!(
+        (|| -> crate::Result<*mut BethkitSemanticContext> {
+            // SAFETY: Required handles are non-null and live for this call.
+            let (package, plugin) = unsafe { (&*package, &*plugin) };
+            let path = if cpoverride.is_null() {
+                None
+            } else {
+                let text = cstr_to_str(cpoverride, "cpoverride").ok_or_else(|| {
+                    FfiError::InvalidArgument {
+                        context: "mixed encoding/cpoverride",
+                        message: "override path is not valid UTF-8".to_owned(),
+                    }
+                })?;
+                Some(Path::new(text))
+            };
+            let context = SemanticContext::new_for_plugin_mixed(
+                package.0.clone(),
+                DecoderRegistry::builtin(),
+                &plugin.inner,
+                path,
+            )?;
+            Ok(Box::into_raw(Box::new(BethkitSemanticContext(context))))
+        })(),
+        std::ptr::null_mut()
+    )
+}
+
 /// Creates an owned semantic context with a retained plugin encoding decision.
 ///
 /// An optional UTF-8 `cpoverride` path always wins over detection. Invalid overrides

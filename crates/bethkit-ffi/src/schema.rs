@@ -50,6 +50,8 @@ use crate::{cstr_to_str, ffi_try, null_check, set_last_error, BethkitSlice};
 mod plugin_encoding;
 #[path = "schema_snapshot.rs"]
 mod snapshot;
+#[path = "schema_string_cursor.rs"]
+mod string_cursor;
 
 #[cfg(test)]
 #[path = "schema_tests.rs"]

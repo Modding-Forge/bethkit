@@ -59,6 +59,35 @@ impl PluginEncodingDecision {
 }
 
 impl SemanticContext {
+    /// Creates a context with opt-in per-string UTF-8/legacy selection.
+    ///
+    /// The detector's result is a prior, not proof of an individual string's
+    /// encoding. Valid UTF-8 wins per complete string; other bytes use the
+    /// detected legacy codec, or Windows-1252 when detection selected UTF-8.
+    /// This heuristic cannot disambiguate bytes valid under both codecs. Field
+    /// codec metadata is retained for edits. An explicit `cpoverride` disables
+    /// this heuristic entirely and remains authoritative.
+    ///
+    /// # Errors
+    /// Returns the same schema, decoder and override errors as `new_for_plugin`.
+    pub fn new_for_plugin_mixed(
+        package: Arc<SchemaPackage>,
+        decoders: DecoderRegistry,
+        plugin: &Plugin,
+        cpoverride: Option<&Path>,
+    ) -> Result<Self> {
+        let mut context = Self::new_for_plugin(package, decoders, plugin, cpoverride)?;
+        if cpoverride.is_none() {
+            let fallback = match context.inline_string_encoding {
+                Some(InlineStringEncoding::Legacy(codec)) => codec,
+                _ => encoding_rs::WINDOWS_1252,
+            };
+            context.inline_string_encoding =
+                Some(InlineStringEncoding::PreferUtf8WithFallback(fallback));
+        }
+        Ok(context)
+    }
+
     /// Creates a plugin-specific context using an override or bounded text detection.
     ///
     /// `cpoverride` is an explicitly supplied path, never inferred from a filename.

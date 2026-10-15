@@ -168,6 +168,75 @@ fn snapshot_document(
         "projection":if strings_only {"strings"} else {"full"}})
 }
 
+pub(super) fn string_rows(
+    context: &bethkit_semantic::SemanticContext,
+    record: &bethkit_core::Record,
+    localized: bool,
+) -> crate::Result<Vec<Value>> {
+    let fields = context.view(record, localized)?.fields()?;
+    let registry = context.registry();
+    let schema_hash = schema_hash_hex(&registry.package().payload_sha256());
+    let structure_hash = structure_hash(&fields);
+    let signature = record.header.signature;
+    let mut rows = Vec::new();
+    for field in &fields {
+        let address = FieldAddress {
+            schema_payload_sha256: schema_hash.clone(),
+            structure_hash: structure_hash.clone(),
+            record_signature: signature.0,
+            form_id: record.header.form_id.0,
+            subrecord_index: field.subrecord_index,
+            subrecord_path: field.path.clone(),
+            repeat_scopes: field.repeat_scopes.clone(),
+            value_steps: Vec::new(),
+        };
+        let node = registry.get_node(
+            signature,
+            field.effective_path.as_deref().unwrap_or(&field.path),
+        );
+        let context = WireContext {
+            registry,
+            selections: &field.value_selections,
+            inline_string_codecs: &field.inline_string_codecs,
+            subrecord_signature: field.subrecord_signature,
+            localized,
+            origin: origin_name(field.origin),
+        };
+        if let Some(value) = wire_strings(&field.value, &address, node, &context) {
+            flatten_strings(value, &mut rows);
+        }
+    }
+    Ok(rows)
+}
+
+fn flatten_strings(mut value: Value, rows: &mut Vec<Value>) {
+    match value["kind"].as_str() {
+        Some("struct") => {
+            if let Some(Value::Array(fields)) =
+                value.as_object_mut().and_then(|v| v.remove("fields"))
+            {
+                for field in fields {
+                    let mut field = field;
+                    if let Some(value) = field.as_object_mut().and_then(|v| v.remove("value")) {
+                        flatten_strings(value, rows);
+                    }
+                }
+            }
+        }
+        Some("array") => {
+            if let Some(Value::Array(items)) = value.as_object_mut().and_then(|v| v.remove("items"))
+            {
+                for item in items {
+                    flatten_strings(item, rows);
+                }
+            }
+        }
+        Some("absent") => {}
+        _ if value["translatable"].as_bool() == Some(true) => rows.push(value),
+        _ => {}
+    }
+}
+
 /// Returns only schema-declared translatable values as an owned JSON snapshot.
 ///
 /// Borrows both handles during the call. Free the result with `bethkit_string_free`.
@@ -347,7 +416,7 @@ fn is_translatable(node: &SchemaNode) -> bool {
         if string.localized || string.encoding == "localized")
 }
 
-fn can_contain_strings(
+pub(super) fn can_contain_strings(
     registry: &SchemaRegistry,
     signature: Signature,
     node: &SchemaNode,

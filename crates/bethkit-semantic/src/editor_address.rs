@@ -102,7 +102,7 @@ impl RecordEditor {
         path: &str,
         encoding: InlineStringEncoding,
     ) -> Result<()> {
-        if encoding == InlineStringEncoding::PreferUtf8 {
+        if encoding.prefers_utf8() {
             return Err(address_error(
                 path,
                 "a field override requires a concrete codec",

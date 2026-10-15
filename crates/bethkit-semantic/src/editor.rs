@@ -119,7 +119,10 @@ impl RecordEditor {
             after_load_migrations: 0,
             decoded_values: BTreeMap::new(),
         };
-        if context.inline_string_encoding() == Some(crate::InlineStringEncoding::PreferUtf8) {
+        if context
+            .inline_string_encoding()
+            .is_some_and(crate::InlineStringEncoding::prefers_utf8)
+        {
             editor.inline_string_codecs = vec![Vec::new(); editor.record.subrecords.len()];
             for field in context.view(record, plugin_localized)?.fields()? {
                 editor.inline_string_codecs[field.subrecord_index] = field.inline_string_codecs;
@@ -162,7 +165,9 @@ impl RecordEditor {
         let old_value = self.decoded_values.get(&(path.to_owned(), occurrence));
         let (normalized, mutations) =
             self.apply_after_set_tree(payload, &normalized, old_value, Some(index))?;
-        if self.inline_string_encoding == Some(crate::InlineStringEncoding::PreferUtf8)
+        if self
+            .inline_string_encoding
+            .is_some_and(crate::InlineStringEncoding::prefers_utf8)
             && self
                 .inline_string_codecs
                 .get(index)
@@ -767,10 +772,9 @@ impl RecordEditor {
                         })
                     })
                     .map(|codec| codec.encoding)
-                    .or(match self.inline_string_encoding {
-                        Some(crate::InlineStringEncoding::PreferUtf8) => None,
-                        encoding => encoding,
-                    });
+                    .or(self
+                        .inline_string_encoding
+                        .and_then(crate::InlineStringEncoding::fallback_encoding));
                 encode_primitive(
                     primitive,
                     value,

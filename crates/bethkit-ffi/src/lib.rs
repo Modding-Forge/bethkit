@@ -105,6 +105,13 @@ macro_rules! null_check {
 /// is returned.
 /// On `Err(_)` (panic) `"internal panic"` is stored and `$err_ret` is returned.
 macro_rules! ffi_try {
+    ($expr:expr) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $expr)) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => $crate::set_last_error(error.to_string()),
+            Err(_) => $crate::set_last_error("internal panic in bethkit FFI"),
+        }
+    };
     ($expr:expr, $err_ret:expr) => {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $expr)) {
             Ok(Ok(v)) => v,
