@@ -172,11 +172,34 @@ pub(super) fn string_rows(
     context: &bethkit_semantic::SemanticContext,
     record: &bethkit_core::Record,
     localized: bool,
+    decode_only: bool,
+    #[cfg(feature = "profile-string-stages")] profile: &mut super::string_profile::StageProfile,
 ) -> crate::Result<Vec<Value>> {
-    let fields = context.view(record, localized)?.fields()?;
+    #[cfg(feature = "profile-string-stages")]
+    let started = std::time::Instant::now();
+    let view = context.view(record, localized)?;
+    if decode_only {
+        view.check_decodable()?;
+        #[cfg(feature = "profile-string-stages")]
+        profile.add(
+            record.header.signature,
+            "decode_and_drop",
+            started.elapsed(),
+        );
+        return Ok(Vec::new());
+    }
+    let fields = view.fields()?;
+    #[cfg(feature = "profile-string-stages")]
+    profile.add(record.header.signature, "decode", started.elapsed());
+    #[cfg(feature = "profile-string-stages")]
+    let started = std::time::Instant::now();
     let registry = context.registry();
     let schema_hash = schema_hash_hex(&registry.package().payload_sha256());
     let structure_hash = structure_hash(&fields);
+    #[cfg(feature = "profile-string-stages")]
+    profile.add(record.header.signature, "hash", started.elapsed());
+    #[cfg(feature = "profile-string-stages")]
+    let started = std::time::Instant::now();
     let signature = record.header.signature;
     let mut rows = Vec::new();
     for field in &fields {
@@ -206,6 +229,13 @@ pub(super) fn string_rows(
             flatten_strings(value, &mut rows);
         }
     }
+    #[cfg(feature = "profile-string-stages")]
+    profile.add(signature, "projection", started.elapsed());
+    #[cfg(feature = "profile-string-stages")]
+    let started = std::time::Instant::now();
+    drop(fields);
+    #[cfg(feature = "profile-string-stages")]
+    profile.add(signature, "drop", started.elapsed());
     Ok(rows)
 }
 
@@ -607,6 +637,27 @@ fn wire_value(
     output["schema_path"] = json!(node.map(|node| node.path.as_str()));
     output["translatable"] = json!(translatable);
     output["string_table"] = json!(string_table);
+    if translatable
+        && !context.localized
+        && matches!(value, FieldValue::Bytes(_))
+        && node.is_some_and(|node| {
+            matches!(
+                &node.kind,
+                SchemaNodeKind::Primitive {
+                    primitive: PrimitiveType::String { .. },
+                }
+            )
+        })
+    {
+        output["decoding_warning"] = json!(
+            "Uncertain or damaged inline text; original bytes preserved; select an explicit codec"
+        );
+        if let Some(InlineStringEncoding::PreserveExplicit(codec)) = node.and_then(|node| {
+            selected_inline_codec(context, address, &node.path).map(|codec| codec.encoding)
+        }) {
+            output["preview_encoding"] = json!(codec.name());
+        }
+    }
     if translatable && !context.localized && matches!(value, FieldValue::String(_)) {
         if let Some(
             schema_node @ SchemaNode {
@@ -618,16 +669,7 @@ fn wire_value(
             },
         ) = node
         {
-            let selected = context.inline_string_codecs.iter().find(|codec| {
-                codec.path == schema_node.path
-                    && codec.array_indices.iter().copied().eq(address
-                        .value_steps
-                        .iter()
-                        .filter_map(|step| match step {
-                            ValueStep::Index { index } => Some(*index),
-                            ValueStep::Field { .. } => None,
-                        }))
-            });
+            let selected = selected_inline_codec(context, address, &schema_node.path);
             let encoding = selected.map_or_else(
                 || {
                     if string.encoding == "localized" {
@@ -651,6 +693,24 @@ fn wire_value(
         }
     }
     output
+}
+
+fn selected_inline_codec<'a>(
+    context: &'a WireContext<'_>,
+    address: &FieldAddress,
+    path: &str,
+) -> Option<&'a InlineStringCodec> {
+    context.inline_string_codecs.iter().find(|codec| {
+        codec.path == path
+            && codec
+                .array_indices
+                .iter()
+                .copied()
+                .eq(address.value_steps.iter().filter_map(|step| match step {
+                    ValueStep::Index { index } => Some(*index),
+                    ValueStep::Field { .. } => None,
+                }))
+    })
 }
 
 /// Inserts a subrecord using its schema path and a tagged owned JSON value.

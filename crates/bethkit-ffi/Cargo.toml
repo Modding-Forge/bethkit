@@ -1,12 +1,13 @@
 [package]
 name    = "bethkit-ffi"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
+ahash = { workspace = true }
 bethkit-core = { path = "../bethkit-core" }
 bethkit-schema = { path = "../bethkit-schema", default-features = false }
 bethkit-semantic = { path = "../bethkit-semantic" }
@@ -14,9 +15,13 @@ bethkit-bsa  = { path = "../bethkit-bsa" }
 bethkit-io   = { path = "../bethkit-io" }
 thiserror    = { workspace = true }
 serde_json   = { workspace = true }
+mimalloc = { workspace = true, optional = true }
 
 [features]
 default = []
+fast-mode = ["fast-allocator"]
+fast-allocator = ["dep:mimalloc"]
+profile-string-stages = []
 schema-skyrim-se = ["bethkit-schema/schema-skyrim-se"]
 # Enable to regenerate bethkit.h from the FFI source.
 # cargo build -p bethkit-ffi --features generate-header

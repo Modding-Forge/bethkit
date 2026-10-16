@@ -110,7 +110,8 @@ impl RecordEditor {
         }
         let field = self.addressed_field(address)?;
         let target = decoded_target(&field.value, &address.value_steps, path)?;
-        if !matches!(target, FieldValue::String(_)) || self.localized {
+        // Raw values are eligible only after the schema string checks below succeed.
+        if !matches!(target, FieldValue::String(_) | FieldValue::Bytes(_)) || self.localized {
             return Err(address_error(path, "address does not select inline text"));
         }
         let node = self
@@ -156,7 +157,23 @@ impl RecordEditor {
                 heuristic: false,
             });
         }
-        if let Err(error) = self.fields() {
+        let verified = self.fields().and_then(|fields| {
+            let selected = fields
+                .iter()
+                .find(|candidate| candidate.subrecord_index == address.subrecord_index)
+                .ok_or_else(|| address_error(path, "source field disappeared"))?;
+            if !matches!(
+                decoded_target(&selected.value, &address.value_steps, path)?,
+                FieldValue::String(_)
+            ) {
+                return Err(address_error(
+                    path,
+                    "selected codec did not resolve inline text",
+                ));
+            }
+            Ok(())
+        });
+        if let Err(error) = verified {
             self.inline_string_codecs[field.subrecord_index] = previous;
             return Err(error);
         }

@@ -23,6 +23,8 @@ pub struct BethkitStringCursor {
     failed: bool,
     pending_error: Option<FfiError>,
     text_free: BTreeSet<Signature>,
+    validate_nontext: bool,
+    preserve_opaque_nontext: bool,
 }
 
 impl BethkitStringCursor {
@@ -82,26 +84,22 @@ pub extern "C" fn bethkit_string_cursor_new(
         {
             // SAFETY: The caller borrows a live context for cursor creation.
             let runtime = unsafe { &*context };
-            let text_free = if validate_nontext {
-                BTreeSet::new()
-            } else {
-                runtime
-                    .0
-                    .registry()
-                    .package()
-                    .records()
-                    .iter()
-                    .filter(|record| {
-                        !snapshot::can_contain_strings(
-                            runtime.0.registry(),
-                            record.signature.into(),
-                            &record.root,
-                            0,
-                        )
-                    })
-                    .map(|record| record.signature.into())
-                    .collect()
-            };
+            let text_free = runtime
+                .0
+                .registry()
+                .package()
+                .records()
+                .iter()
+                .filter(|record| {
+                    !snapshot::can_contain_strings(
+                        runtime.0.registry(),
+                        record.signature.into(),
+                        &record.root,
+                        0,
+                    )
+                })
+                .map(|record| record.signature.into())
+                .collect();
             Ok::<_, FfiError>(Box::into_raw(Box::new(BethkitStringCursor {
                 plugin,
                 context,
@@ -110,7 +108,47 @@ pub extern "C" fn bethkit_string_cursor_new(
                 failed: false,
                 pending_error: None,
                 text_free,
+                validate_nontext,
+                preserve_opaque_nontext: false,
             })))
+        },
+        std::ptr::null_mut()
+    )
+}
+
+/// Creates a full-validation cursor retaining undecodable nontext records as opaque source.
+///
+/// Every record is decoded first. Only schema-proven nontext failures become explicit
+/// `diagnostics` entries instead of aborting extraction. Source bytes remain untouched;
+/// this does not repair the record or permit semantic edits to its unknown content.
+///
+/// # Arguments
+/// * `context` - Matching immutable semantic context borrowed until cursor release.
+/// * `plugin` - Immutable source plugin borrowed until cursor release.
+///
+/// # Returns
+/// A uniquely owned cursor, or null on failure.
+///
+/// # Errors
+/// Returns null with the last error for invalid handles or allocation failure.
+///
+/// # Safety
+/// Both immutable owners must outlive the cursor. Free with `bethkit_string_cursor_free`.
+#[no_mangle]
+pub extern "C" fn bethkit_string_cursor_new_preserving_nontext(
+    context: *const BethkitSemanticContext,
+    plugin: *const BethkitPlugin,
+) -> *mut BethkitStringCursor {
+    null_check!(context, "preserving cursor/context", std::ptr::null_mut());
+    null_check!(plugin, "preserving cursor/plugin", std::ptr::null_mut());
+    ffi_try!(
+        {
+            let cursor = bethkit_string_cursor_new(context, plugin, true);
+            if !cursor.is_null() {
+                // SAFETY: The constructor just returned this exclusively owned live cursor.
+                unsafe { (*cursor).preserve_opaque_nontext = true };
+            }
+            Ok::<_, FfiError>(cursor)
         },
         std::ptr::null_mut()
     )
@@ -158,34 +196,60 @@ pub extern "C" fn bethkit_string_cursor_next_json(
             // SAFETY: Creation requires both source handles to outlive the cursor.
             let (plugin, context) = unsafe { (&*cursor.plugin, &*cursor.context) };
             let mut values = Vec::new();
+            let mut diagnostics = Vec::new();
             let mut bytes = 0;
             let mut done = false;
+            #[cfg(feature = "profile-string-stages")]
+            let mut profile = super::string_profile::StageProfile::default();
             for _ in 0..record_limit {
                 let Some(record) = cursor.next_record(&plugin.inner) else {
                     done = true;
                     break;
                 };
-                if cursor.text_free.contains(&record.header.signature) {
+                let text_free = cursor.text_free.contains(&record.header.signature);
+                if text_free && !cursor.validate_nontext {
                     continue;
                 }
-                let rows =
-                    match snapshot::string_rows(&context.0, record, plugin.inner.is_localized()) {
-                        Ok(rows) => rows,
-                        Err(error) if !values.is_empty() => {
-                            // Yield the same valid prefix as the record-at-a-time iterator,
-                            // then report the original error on the very next call.
-                            cursor.pending_error = Some(error);
-                            break;
-                        }
-                        Err(error) => return Err(error),
-                    };
+                let rows = match snapshot::string_rows(
+                    &context.0,
+                    record,
+                    plugin.inner.is_localized(),
+                    text_free,
+                    #[cfg(feature = "profile-string-stages")]
+                    &mut profile,
+                ) {
+                    Ok(rows) => rows,
+                    Err(error) if text_free && cursor.preserve_opaque_nontext => {
+                        diagnostics.push(json!({
+                            "record_signature": record.header.signature.to_string(),
+                            "form_id": record.header.form_id.0,
+                            "source_size": record.header.data_size,
+                            "message": error.to_string(),
+                        }));
+                        continue;
+                    }
+                    Err(error) if !values.is_empty() => {
+                        // Yield the same valid prefix as the record-at-a-time iterator,
+                        // then report the original error on the very next call.
+                        cursor.pending_error = Some(error);
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                };
                 bytes += record.uncompressed_data_size();
                 values.extend(rows);
                 if bytes >= 2 * 1024 * 1024 || values.len() >= 4096 {
                     break;
                 }
             }
-            let result = owned_json(&json!({"values":values,"done":done}))?;
+            let document = json!({"values":values,"done":done,"diagnostics":diagnostics});
+            #[cfg(feature = "profile-string-stages")]
+            let document = {
+                let mut document = document;
+                document["profile"] = profile.document();
+                document
+            };
+            let result = owned_json(&document)?;
             cursor.failed = cursor.pending_error.is_some();
             Ok(result)
         })(),
@@ -219,6 +283,10 @@ mod tests {
     fn invalid_inputs_fail_without_accessing_owners(
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         assert!(bethkit_string_cursor_new(std::ptr::null(), std::ptr::null(), true).is_null());
+        assert!(
+            bethkit_string_cursor_new_preserving_nontext(std::ptr::null(), std::ptr::null())
+                .is_null()
+        );
         assert!(bethkit_string_cursor_next_json(std::ptr::null_mut(), 1).is_null());
         bethkit_string_cursor_free(std::ptr::null_mut());
         let cursor = Box::into_raw(Box::new(BethkitStringCursor {
@@ -229,6 +297,8 @@ mod tests {
             failed: false,
             pending_error: None,
             text_free: BTreeSet::new(),
+            validate_nontext: true,
+            preserve_opaque_nontext: false,
         }));
         for limit in [0, 257, usize::MAX] {
             assert!(bethkit_string_cursor_next_json(cursor, limit).is_null());

@@ -21,6 +21,13 @@
 //! the same thread.
 
 use std::ffi::{c_char, CStr};
+
+// This changes Rust-owned allocations only; C callers still use matching FFI frees.
+// Keep opt-in so static-link consumers can retain their application's allocator.
+#[cfg(feature = "fast-allocator")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod archive;
 mod cache;
 mod error;

@@ -12,6 +12,56 @@ use crate::plugin::BethkitPlugin;
 use crate::FfiError;
 use crate::{cstr_to_str, ffi_try, null_check};
 
+/// Creates an owned mixed context with conservative raw preservation for uncertain text.
+///
+/// # Arguments
+/// `package` and `plugin` identify the schema and immutable source; `cpoverride`
+/// is an optional explicit authoritative codec file and disables guessing.
+///
+/// # Returns
+/// An owned context freed by `bethkit_semantic_context_free`, or null on failure.
+///
+/// # Errors
+/// Returns null with the last error for invalid handles, paths or schema requirements.
+///
+/// # Safety
+/// Both handles and an optional NUL-terminated UTF-8 path must remain live for this call.
+#[no_mangle]
+pub extern "C" fn bethkit_semantic_context_new_for_plugin_preserving_text(
+    package: *const BethkitSchemaPackage,
+    plugin: *const BethkitPlugin,
+    cpoverride: *const c_char,
+) -> *mut BethkitSemanticContext {
+    null_check!(package, "preserving text/package", std::ptr::null_mut());
+    null_check!(plugin, "preserving text/plugin", std::ptr::null_mut());
+    ffi_try!(
+        (|| -> crate::Result<*mut BethkitSemanticContext> {
+            // SAFETY: Required handles are non-null and live for this call.
+            let (package, plugin) = unsafe { (&*package, &*plugin) };
+            let path = if cpoverride.is_null() {
+                None
+            } else {
+                Some(Path::new(
+                    cstr_to_str(cpoverride, "cpoverride").ok_or_else(|| {
+                        FfiError::InvalidArgument {
+                            context: "preserving text/cpoverride",
+                            message: "override path is not valid UTF-8".to_owned(),
+                        }
+                    })?,
+                ))
+            };
+            let context = SemanticContext::new_for_plugin_preserving_text(
+                package.0.clone(),
+                DecoderRegistry::builtin(),
+                &plugin.inner,
+                path,
+            )?;
+            Ok(Box::into_raw(Box::new(BethkitSemanticContext(context))))
+        })(),
+        std::ptr::null_mut()
+    )
+}
+
 /// Creates an owned context using opt-in mixed UTF-8/legacy inline decoding.
 ///
 /// The retained plugin decision is a prior. Each complete UTF-8 string is decoded

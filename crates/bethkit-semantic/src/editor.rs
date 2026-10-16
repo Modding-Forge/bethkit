@@ -740,7 +740,17 @@ impl RecordEditor {
         source_subrecord_index: Option<usize>,
         source_record: &WritableRecord,
     ) -> Result<Vec<u8>> {
-        self.encode_node_with_scope(
+        let source = source_subrecord_index.and_then(|index| source_record.subrecords.get(index));
+        let legacy = source.and_then(|subrecord| {
+            crate::legacy_payload::weapon_critical_data(
+                source_record.signature,
+                subrecord.signature,
+                node,
+                subrecord.data.len(),
+            )
+        });
+        let node = legacy.as_ref().unwrap_or(node);
+        let mut encoded = self.encode_node_with_scope(
             node,
             value,
             field_values,
@@ -750,7 +760,30 @@ impl RecordEditor {
                 array_indices: &[],
             },
             source_record,
-        )
+        )?;
+        if source.is_some_and(|subrecord| {
+            crate::legacy_payload::fixed_string_terminator(node, &subrecord.data)
+        }) {
+            encoded.push(0);
+        }
+        Ok(encoded)
+    }
+
+    fn legacy_payload_node(
+        node: &SchemaNode,
+        source_subrecord_index: Option<usize>,
+        source_record: &WritableRecord,
+    ) -> Option<SchemaNode> {
+        source_subrecord_index
+            .and_then(|index| source_record.subrecords.get(index))
+            .and_then(|subrecord| {
+                crate::legacy_payload::weapon_critical_data(
+                    source_record.signature,
+                    subrecord.signature,
+                    node,
+                    subrecord.data.len(),
+                )
+            })
     }
 
     fn encode_node_with_scope(
@@ -1048,6 +1081,8 @@ impl RecordEditor {
         field_values: &BTreeMap<String, i64>,
         source_subrecord_index: Option<usize>,
     ) -> Result<(OwnedFieldValue, Vec<HandlerMutation>)> {
+        let legacy = Self::legacy_payload_node(node, source_subrecord_index, &self.record);
+        let node = legacy.as_ref().unwrap_or(node);
         let (mut updated, mut mutations) = match (&node.kind, value) {
             (
                 SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. },
@@ -2204,6 +2239,8 @@ impl RecordEditor {
         source_subrecord_index: Option<usize>,
         source_record: &WritableRecord,
     ) -> Result<FieldValue<'static>> {
+        let legacy = Self::legacy_payload_node(node, source_subrecord_index, source_record);
+        let node = legacy.as_ref().unwrap_or(node);
         match (&node.kind, value) {
             (
                 SchemaNodeKind::Struct { fields } | SchemaNodeKind::OptionalStruct { fields, .. },

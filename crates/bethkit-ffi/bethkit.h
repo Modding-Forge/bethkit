@@ -1465,10 +1465,17 @@ const BethkitGroup *bethkit_plugin_group_get(const struct BethkitPlugin *plugin,
  * Returns a borrowed pointer to the first matching record, or null if not
  * found.  The returned pointer is borrowed from `plugin` and must not be
  * freed.
+ * The immutable FFI owner lazily indexes group routes on its first lookup.
+ * Duplicate IDs retain first-match source order; the plugin header is excluded.
  *
  * # Errors
  *
  * Returns null and sets the last error if `plugin` is null.
+ *
+ * # Safety
+ *
+ * A non-null plugin must remain live and immutable for this call and the lifetime
+ * of any returned record pointer. Concurrent read-only lookups are supported.
  */
 const BethkitRecord *bethkit_plugin_find_record(const struct BethkitPlugin *plugin,
                                                 uint32_t form_id);
@@ -1558,6 +1565,30 @@ void bethkit_record_editor_id_free(char *ptr);
  * cannot be decoded.
  */
 int64_t bethkit_record_subrecord_count(const BethkitRecord *record);
+
+/**
+ * Copies all subrecord signatures in source order into caller-owned storage.
+ *
+ * # Arguments
+ * * `record` - Live, immutable borrowed record, retained for this call.
+ * * `out` - Non-null writable buffer, not overlapping any source allocation.
+ * * `capacity` - Writable byte count, at least four times the subrecord count.
+ *
+ * # Returns
+ * The number of copied four-byte signatures, or -1 on failure.
+ *
+ * # Errors
+ * Returns -1 with the last error for null pointers, an undersized buffer,
+ * subrecord parsing errors, size overflow, or a panic. Failure never partially
+ * writes the buffer. No allocation or borrowed pointer is transferred.
+ *
+ * # Safety
+ * Both pointers must remain valid throughout the call. `out` must point to
+ * `capacity` writable bytes and must not alias the record or its source data.
+ */
+int64_t bethkit_record_subrecord_signatures(const BethkitRecord *record,
+                                            uint8_t *out,
+                                            uintptr_t capacity);
 
 /**
  * Returns a borrowed pointer to the subrecord at `index`, or null if
@@ -2075,6 +2106,26 @@ const struct BethkitFieldValue *bethkit_field_values_get(const struct BethkitFie
 void bethkit_field_values_free(struct BethkitFieldValues *values);
 
 /**
+ * Creates an owned mixed context with conservative raw preservation for uncertain text.
+ *
+ * # Arguments
+ * `package` and `plugin` identify the schema and immutable source; `cpoverride`
+ * is an optional explicit authoritative codec file and disables guessing.
+ *
+ * # Returns
+ * An owned context freed by `bethkit_semantic_context_free`, or null on failure.
+ *
+ * # Errors
+ * Returns null with the last error for invalid handles, paths or schema requirements.
+ *
+ * # Safety
+ * Both handles and an optional NUL-terminated UTF-8 path must remain live for this call.
+ */
+struct BethkitSemanticContext *bethkit_semantic_context_new_for_plugin_preserving_text(const struct BethkitSchemaPackage *package,
+                                                                                       const struct BethkitPlugin *plugin,
+                                                                                       const char *cpoverride);
+
+/**
  * Creates an owned context using opt-in mixed UTF-8/legacy inline decoding.
  *
  * The retained plugin decision is a prior. Each complete UTF-8 string is decoded
@@ -2350,6 +2401,29 @@ int32_t bethkit_record_editor_remove_at_json(struct BethkitRecordEditor *editor,
 struct BethkitStringCursor *bethkit_string_cursor_new(const struct BethkitSemanticContext *context,
                                                       const struct BethkitPlugin *plugin,
                                                       bool validate_nontext);
+
+/**
+ * Creates a full-validation cursor retaining undecodable nontext records as opaque source.
+ *
+ * Every record is decoded first. Only schema-proven nontext failures become explicit
+ * `diagnostics` entries instead of aborting extraction. Source bytes remain untouched;
+ * this does not repair the record or permit semantic edits to its unknown content.
+ *
+ * # Arguments
+ * * `context` - Matching immutable semantic context borrowed until cursor release.
+ * * `plugin` - Immutable source plugin borrowed until cursor release.
+ *
+ * # Returns
+ * A uniquely owned cursor, or null on failure.
+ *
+ * # Errors
+ * Returns null with the last error for invalid handles or allocation failure.
+ *
+ * # Safety
+ * Both immutable owners must outlive the cursor. Free with `bethkit_string_cursor_free`.
+ */
+struct BethkitStringCursor *bethkit_string_cursor_new_preserving_nontext(const struct BethkitSemanticContext *context,
+                                                                         const struct BethkitPlugin *plugin);
 
 /**
  * Copies the next bounded batch of translatable scalars into owned UTF-8 JSON.

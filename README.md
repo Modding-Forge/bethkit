@@ -29,6 +29,8 @@ The development API also provides `SemanticContext::new_for_plugin_mixed` for ex
 
 The native `bethkit_string_cursor_*` C API traverses records lazily and returns bounded batches of addressed translatable scalars, without constructing typed Python record models. The cursor borrows its plugin and semantic context, so both must remain live until it is freed. Full record decoding remains the default; callers may explicitly skip schema-proven text-free types for extraction-only workloads. Such skipping is not a substitute for validating those omitted payloads. Decode errors remain terminal after the complete valid string prefix is delivered. The header documents batch bounds and ownership.
 
+For low-level inspection, `bethkit_record_subrecord_signatures` copies all source-ordered signatures into one caller-owned bounded buffer without copying payloads or exposing additional borrowed handles. Repeated and unknown signatures remain intact; invalid or undersized buffers fail without partial writes.
+
 See [SCHEMA.md](SCHEMA.md) for provenance, measured coverage, validation results, and current limitations.
 
 ## Documentation
@@ -64,6 +66,8 @@ cargo test --workspace
 ```
 
 Tests that require installed game data skip automatically when their local fixtures are unavailable. See [local build setup](docs/local-build.md) for the optional live-test configuration.
+
+Standalone native builds can explicitly enable Fast Mode with `--features bethkit-ffi/fast-mode` to use mimalloc for Rust-owned allocations. It can improve throughput at the cost of higher peak memory, so it is disabled by default. This is a build-time choice, not a runtime switch; the lower-level `fast-allocator` feature selects the same allocator. It requires a C compiler and does not replace the caller's allocator or change matching-free requirements. Static-link users with their own global allocator should leave it disabled. See [third-party notices](THIRD_PARTY_NOTICES.md#optional-native-allocator) for the additional MIT notices that must accompany such builds. Release workflows are unchanged.
 
 ## License
 

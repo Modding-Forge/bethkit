@@ -11,6 +11,7 @@ use bethkit_schema::{
     PrimitiveType, SchemaNode, SchemaNodeKind, SchemaRecord, StringType, UnionSelector,
 };
 
+use crate::decode_retention::DecodeRetention;
 use crate::handler::HandlerInvocationAccess;
 use crate::value::float_from_raw;
 use crate::{
@@ -82,6 +83,7 @@ pub struct RecordView<'context, 'record> {
     schema: &'context SchemaRecord,
     localized: bool,
     inline_codecs: Option<&'context [Vec<InlineStringCodec>]>,
+    retention: DecodeRetention,
 }
 
 #[derive(Clone, Copy)]
@@ -117,6 +119,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
             schema,
             localized: plugin_localized,
             inline_codecs: None,
+            retention: DecodeRetention::Full,
         })
     }
 
@@ -282,6 +285,26 @@ impl<'context, 'record> RecordView<'context, 'record> {
     /// Returns [`SemanticError`] when subrecord parsing, conditions, primitive
     /// decoding, or a custom decoder fails.
     pub fn fields(&self) -> Result<Vec<Field<'record>>> {
+        self.fields_impl(false)
+    }
+
+    /// Performs the same payload decoding checks without retaining unobserved containers.
+    ///
+    /// Every primitive, byte count, condition and selector is still decoded. Payloads
+    /// with observers or unsupported analysis use ordinary full materialization.
+    /// This is decode checking, not the additional semantic checks in `validate`.
+    /// No source bytes, callbacks, public snapshots or editing addresses are changed.
+    ///
+    /// # Returns
+    /// An empty success result when all source payloads can be decoded.
+    ///
+    /// # Errors
+    /// Returns the same decoding errors as `fields`, including their original paths.
+    pub fn check_decodable(&self) -> Result<()> {
+        self.fields_impl(true).map(|_| ())
+    }
+
+    fn fields_impl(&self, discard_unobserved: bool) -> Result<Vec<Field<'record>>> {
         let subrecords: &'record [SubRecord] = self.record.subrecords()?;
         let grammar = interpret(
             &self.schema.root,
@@ -311,6 +334,32 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         unreachable!("definition was filtered to subrecord nodes");
                     };
                     let data: &'record [u8] = subrecord.as_bytes();
+                    let legacy = crate::legacy_payload::weapon_critical_data(
+                        self.record.header.signature,
+                        subrecord.signature,
+                        payload,
+                        data.len(),
+                    );
+                    let payload = legacy.as_ref().unwrap_or(payload);
+                    let decoder = Self {
+                        context: self.context,
+                        record: self.record,
+                        schema: self.schema,
+                        localized: self.localized,
+                        inline_codecs: self.inline_codecs,
+                        retention: if discard_unobserved {
+                            DecodeRetention::for_payload(self.context.registry(), payload)
+                        } else {
+                            DecodeRetention::Full
+                        },
+                    };
+                    let fixed_terminator =
+                        crate::legacy_payload::fixed_string_terminator(payload, data);
+                    let decode_data = if fixed_terminator {
+                        &data[..data.len() - 1]
+                    } else {
+                        data
+                    };
                     let mut field_values = BTreeMap::new();
                     let mut metadata = DecodeMetadata::default();
                     let frame = DecodeFrame {
@@ -319,24 +368,34 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         sibling_values: &[],
                         array_indices: &[],
                     };
-                    let (value, consumed, effective_path): (
+                    let (value, mut consumed, effective_path): (
                         FieldValue<'record>,
                         usize,
                         Option<String>,
-                    ) = if data.is_empty() && self.is_model_info_payload(node, payload) {
-                        // Vanilla records can retain an empty model-information cache.
-                        // Keep its actual zero-byte subrecord instead of inventing a header.
+                    ) = if data.is_empty()
+                        && (self.is_model_info_payload(node, payload)
+                            || crate::legacy_payload::empty_unused_form_id(
+                                self.record.header.signature,
+                                subrecord.signature,
+                                payload,
+                            ))
+                    {
+                        // Existing records retain empty caches or ignored legacy slots.
+                        // Preserve their zero bytes instead of inventing header or FormID data.
                         (FieldValue::Absent, 0, None)
                     } else {
-                        self.decode_node(
+                        decoder.decode_node(
                             payload,
-                            data,
-                            data,
+                            decode_data,
+                            decode_data,
                             frame,
                             &mut field_values,
                             &mut metadata,
                         )?
                     };
+                    if fixed_terminator && consumed == decode_data.len() {
+                        consumed += 1;
+                    }
                     if consumed != data.len() {
                         return Err(SemanticError::Decode {
                             path: payload.path.clone(),
@@ -420,19 +479,13 @@ impl<'context, 'record> RecordView<'context, 'record> {
     }
 
     fn uses_handler(&self, path: &str, handler: &str) -> bool {
-        self.context
-            .registry()
-            .package()
-            .callback_bindings()
-            .iter()
-            .any(|binding| {
-                binding.path == path
-                    && matches!(
-                        &binding.implementation,
-                        CallbackImplementation::BuiltIn { operation }
-                            if operation.id == handler
-                    )
-            })
+        self.context.registry().callbacks_at(path).any(|binding| {
+            matches!(
+                &binding.implementation,
+                CallbackImplementation::BuiltIn { operation }
+                    if operation.id == handler
+            )
+        })
     }
 
     fn structural_callback_scope(&self) -> Result<FieldValue<'record>> {
@@ -1037,22 +1090,28 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     }
                     _ => None,
                 };
-                let mut values: Vec<NamedValue<'a>> = Vec::with_capacity(fields.len());
+                let mut values: Vec<NamedValue<'a>> = if self.retention.materializes() {
+                    Vec::with_capacity(fields.len())
+                } else {
+                    Vec::new()
+                };
                 let mut cursor: usize = 0;
                 let mut optional_suffix_absent = false;
                 for (index, field) in fields.iter().enumerate() {
                     if !self.node_applies(field, payload, field_values)? {
-                        values.push(NamedValue {
-                            node_id: field.id,
-                            path: field.path.clone(),
-                            effective_path: None,
-                            name: field.name.clone(),
-                            span: ByteSpan {
-                                start: frame.offset + cursor,
-                                end: frame.offset + cursor,
-                            },
-                            value: FieldValue::Absent,
-                        });
+                        if self.retention.materializes() {
+                            values.push(NamedValue {
+                                node_id: field.id,
+                                path: field.path.clone(),
+                                effective_path: None,
+                                name: field.name.clone(),
+                                span: ByteSpan {
+                                    start: frame.offset + cursor,
+                                    end: frame.offset + cursor,
+                                },
+                                value: FieldValue::Absent,
+                            });
+                        }
                         continue;
                     }
                     let remaining: &'a [u8] =
@@ -1061,23 +1120,25 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             message: "struct cursor exceeded payload".to_owned(),
                         })?;
                     let field_is_optional = optional_from.is_some_and(|start| index >= start);
-                    let field_does_not_fit =
-                        fixed_node_size(field).is_some_and(|size| size > remaining.len());
+                    let field_does_not_fit = field_is_optional
+                        && fixed_node_size(field).is_some_and(|size| size > remaining.len());
                     if field_is_optional
                         && (optional_suffix_absent || remaining.is_empty() || field_does_not_fit)
                     {
                         optional_suffix_absent = true;
-                        values.push(NamedValue {
-                            node_id: field.id,
-                            path: field.path.clone(),
-                            effective_path: None,
-                            name: field.name.clone(),
-                            span: ByteSpan {
-                                start: frame.offset + cursor,
-                                end: frame.offset + cursor,
-                            },
-                            value: FieldValue::Absent,
-                        });
+                        if self.retention.materializes() {
+                            values.push(NamedValue {
+                                node_id: field.id,
+                                path: field.path.clone(),
+                                effective_path: None,
+                                name: field.name.clone(),
+                                span: ByteSpan {
+                                    start: frame.offset + cursor,
+                                    end: frame.offset + cursor,
+                                },
+                                value: FieldValue::Absent,
+                            });
+                        }
                         continue;
                     }
                     let child_frame = DecodeFrame {
@@ -1095,17 +1156,19 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             field_values,
                             metadata,
                         )?;
-                    values.push(NamedValue {
-                        node_id: field.id,
-                        path: field.path.clone(),
-                        effective_path,
-                        name: field.name.clone(),
-                        span: ByteSpan {
-                            start: frame.offset + cursor,
-                            end: frame.offset + cursor + consumed,
-                        },
-                        value,
-                    });
+                    if self.retention.materializes() {
+                        values.push(NamedValue {
+                            node_id: field.id,
+                            path: field.path.clone(),
+                            effective_path,
+                            name: field.name.clone(),
+                            span: ByteSpan {
+                                start: frame.offset + cursor,
+                                end: frame.offset + cursor + consumed,
+                            },
+                            value,
+                        });
+                    }
                     cursor = cursor
                         .checked_add(consumed)
                         .ok_or_else(|| SemanticError::Decode {
@@ -1113,7 +1176,12 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             message: "struct cursor overflowed".to_owned(),
                         })?;
                 }
-                Ok((FieldValue::Struct(values), cursor, None))
+                let value = if self.retention.materializes() {
+                    FieldValue::Struct(values)
+                } else {
+                    FieldValue::Absent
+                };
+                Ok((value, cursor, None))
             }
             SchemaNodeKind::Array { element, count } => {
                 let (prefix_size, element_count): (usize, Option<usize>) = match count {
@@ -1183,11 +1251,31 @@ impl<'context, 'record> RecordView<'context, 'record> {
                         ),
                     });
                 }
-                let mut values: Vec<FieldValue<'a>> =
-                    Vec::with_capacity(element_count.unwrap_or_default());
+                if let Some(consumed) =
+                    self.retention
+                        .array_bytes(element, element_count, current.len() - prefix_size)
+                {
+                    // Every bit pattern is valid for these unobserved fixed-width integers
+                    // and bytes. Short/partial arrays use the ordinary decoder below so
+                    // their first failing node and exact error message remain unchanged.
+                    return Ok((FieldValue::Absent, prefix_size + consumed, None));
+                }
+                let mut values: Vec<FieldValue<'a>> = if self.retention.materializes() {
+                    Vec::with_capacity(element_count.unwrap_or_default())
+                } else {
+                    Vec::new()
+                };
+                let mut decoded_count = 0;
                 let mut cursor = prefix_size;
-                while element_count.is_none_or(|count| values.len() < count) {
-                    if cursor == current.len() && element_count.is_none() {
+                // Recursive decoding borrows this scope only for the current element.
+                // Retained codec/union metadata makes its own copies, so reuse the slot.
+                let mut child_array_indices = frame.array_indices.to_vec();
+                child_array_indices.push(0);
+                while element_count.is_none_or(|count| decoded_count < count) {
+                    if cursor == current.len()
+                        && (element_count.is_none()
+                            || crate::legacy_payload::info_fragment_limit(node))
+                    {
                         break;
                     }
                     let remaining = current.get(cursor..).ok_or_else(|| SemanticError::Decode {
@@ -1197,8 +1285,7 @@ impl<'context, 'record> RecordView<'context, 'record> {
                     if !self.should_include_array_element(node, remaining, frame)? {
                         break;
                     }
-                    let mut child_array_indices = frame.array_indices.to_vec();
-                    child_array_indices.push(values.len());
+                    child_array_indices[frame.array_indices.len()] = decoded_count;
                     let child_frame = DecodeFrame {
                         offset: frame.offset + cursor,
                         source_subrecord_index: frame.source_subrecord_index,
@@ -1235,10 +1322,18 @@ impl<'context, 'record> RecordView<'context, 'record> {
                             ),
                         });
                     }
-                    values.push(value);
+                    if self.retention.materializes() {
+                        values.push(value);
+                    }
+                    decoded_count += 1;
                     cursor = end;
                 }
-                Ok((FieldValue::Array(values), cursor, None))
+                let value = if self.retention.materializes() {
+                    FieldValue::Array(values)
+                } else {
+                    FieldValue::Absent
+                };
+                Ok((value, cursor, None))
             }
             SchemaNodeKind::Union { selector, variants } => {
                 let index =
@@ -1323,26 +1418,28 @@ impl<'context, 'record> RecordView<'context, 'record> {
                 message: "container node cannot decode a payload directly".to_owned(),
             }),
         }?;
-        let normalized = self
-            .context
-            .apply_normalizers(&node.path, self.record, decoded)?;
+        let normalized = if self.retention.materializes() {
+            self.context
+                .apply_normalizers(&node.path, self.record, decoded)?
+        } else {
+            // Observation analysis proved that no normalizer occurs in this payload.
+            decoded
+        };
         let value = apply_float_read_semantics(node, normalized)?;
-        match &value {
-            FieldValue::Int(value) => {
-                field_values.insert(node.path.clone(), *value);
+        let numeric = match &value {
+            FieldValue::Int(value) | FieldValue::Enumeration { value, .. } => Some(*value),
+            FieldValue::UInt(value) | FieldValue::Flags { value, .. } => i64::try_from(*value).ok(),
+            FieldValue::FormId { value, .. } => Some(i64::from(value.0)),
+            _ => None,
+        };
+        if let Some(numeric) = numeric.filter(|_| self.retention.tracks_numeric()) {
+            // Repeated numeric arrays update the same selector paths millions of times.
+            // Keep their existing owned keys rather than allocating discarded replacements.
+            if let Some(previous) = field_values.get_mut(node.path.as_str()) {
+                *previous = numeric;
+            } else {
+                field_values.insert(node.path.clone(), numeric);
             }
-            FieldValue::UInt(value) | FieldValue::Flags { value, .. } => {
-                if let Ok(value) = i64::try_from(*value) {
-                    field_values.insert(node.path.clone(), value);
-                }
-            }
-            FieldValue::Enumeration { value, .. } => {
-                field_values.insert(node.path.clone(), *value);
-            }
-            FieldValue::FormId { value, .. } => {
-                field_values.insert(node.path.clone(), i64::from(value.0));
-            }
-            _ => {}
         }
         Ok((value, consumed, effective_path))
     }
@@ -1458,15 +1555,15 @@ impl<'context, 'record> RecordView<'context, 'record> {
         remaining: &[u8],
         frame: DecodeFrame<'_, '_>,
     ) -> Result<bool> {
+        if !self.retention.materializes() {
+            // The same analysis rejects every array-inclusion binding, even inactive ones.
+            return Ok(true);
+        }
         let Some(binding) = self
             .context
             .registry()
-            .package()
-            .callback_bindings()
-            .iter()
-            .find(|binding| {
-                binding.path == node.path && binding.callback_id == "array.should_include"
-            })
+            .callbacks_at(&node.path)
+            .find(|binding| binding.callback_id == "array.should_include")
         else {
             return Ok(true);
         };
@@ -1509,12 +1606,8 @@ impl<'context, 'record> RecordView<'context, 'record> {
         let binding = self
             .context
             .registry()
-            .package()
-            .callback_bindings()
-            .iter()
-            .find(|binding| {
-                binding.path == node.path && binding.callback_id.as_str() == callback_id
-            })
+            .callbacks_at(&node.path)
+            .find(|binding| binding.callback_id.as_str() == callback_id)
             .ok_or_else(|| SemanticError::Handler {
                 handler: callback_id.to_owned(),
                 message: format!("schema node {} has no callback binding", node.path),
@@ -2053,6 +2146,12 @@ fn decode_string_selected<'a>(
         && is_localized_string(string))
     .then(|| std::str::from_utf8(bytes).ok())
     .flatten();
+    if is_localized_string(string)
+        && preferred_utf8.is_none()
+        && crate::opaque_text::preserve(bytes, inline_encoding)
+    {
+        return Ok(FieldValue::Bytes(Cow::Borrowed(bytes)));
+    }
     let encoding = match inline_encoding.filter(|_| is_localized_string(string)) {
         Some(policy) if policy.prefers_utf8() && preferred_utf8.is_some() => {
             if !bytes.is_ascii() && text_encoding(string) != "utf8" {
@@ -2076,42 +2175,62 @@ fn decode_string_selected<'a>(
             encoding.schema_name()
         }
     };
-    let value: Cow<'a, str> = match encoding {
-        "utf8" => Cow::Borrowed(match preferred_utf8 {
-            Some(value) => value,
-            None => std::str::from_utf8(bytes).map_err(|error| SemanticError::Decode {
-                path: path.to_owned(),
-                message: error.to_string(),
-            })?,
-        }),
-        "windows_1252" => {
-            let (value, had_errors) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes);
-            if had_errors {
-                return Err(SemanticError::Decode {
+    let decoded = (|| -> Result<Cow<'a, str>> {
+        Ok(match encoding {
+            "utf8" => Cow::Borrowed(match preferred_utf8 {
+                Some(value) => value,
+                None => std::str::from_utf8(bytes).map_err(|error| SemanticError::Decode {
                     path: path.to_owned(),
-                    message: "invalid Windows-1252 byte sequence".to_owned(),
-                });
-            }
-            value
-        }
-        encoding => {
-            let codec = encoding_rs::Encoding::for_label(encoding.as_bytes()).ok_or_else(|| {
-                SemanticError::Decode {
-                    path: path.to_owned(),
-                    message: format!("string encoding {encoding} requires a custom decoder"),
+                    message: error.to_string(),
+                })?,
+            }),
+            "windows_1252" => {
+                let (value, had_errors) =
+                    encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes);
+                if had_errors {
+                    return Err(SemanticError::Decode {
+                        path: path.to_owned(),
+                        message: "invalid Windows-1252 byte sequence".to_owned(),
+                    });
                 }
-            })?;
-            let (value, had_errors) = codec.decode_without_bom_handling(bytes);
-            if had_errors {
-                return Err(SemanticError::Decode {
-                    path: path.to_owned(),
-                    message: format!("invalid {encoding} byte sequence"),
-                });
+                value
             }
-            value
+            encoding => {
+                let codec =
+                    encoding_rs::Encoding::for_label(encoding.as_bytes()).ok_or_else(|| {
+                        SemanticError::Decode {
+                            path: path.to_owned(),
+                            message: format!(
+                                "string encoding {encoding} requires a custom decoder"
+                            ),
+                        }
+                    })?;
+                let (value, had_errors) = codec.decode_without_bom_handling(bytes);
+                if had_errors {
+                    return Err(SemanticError::Decode {
+                        path: path.to_owned(),
+                        message: format!("invalid {encoding} byte sequence"),
+                    });
+                }
+                value
+            }
+        })
+    })();
+    match decoded {
+        Ok(value) => Ok(FieldValue::String(value)),
+        Err(_)
+            if matches!(
+                inline_encoding,
+                Some(
+                    InlineStringEncoding::PreserveUtf8WithFallback { .. }
+                        | InlineStringEncoding::PreserveExplicit(_)
+                )
+            ) =>
+        {
+            Ok(FieldValue::Bytes(Cow::Borrowed(bytes)))
         }
-    };
-    Ok(FieldValue::String(value))
+        Err(error) => Err(error),
+    }
 }
 
 fn is_localized_string(string: &StringType) -> bool {
@@ -2336,7 +2455,9 @@ where
             };
             let mut decoded = 0_usize;
             while count.is_none_or(|count| decoded < count) {
-                if cursor == data.len() && count.is_none() {
+                if cursor == data.len()
+                    && (count.is_none() || crate::legacy_payload::info_fragment_limit(node))
+                {
                     break;
                 }
                 let remaining = data.get(cursor..).ok_or_else(|| SemanticError::Decode {
@@ -2472,6 +2593,14 @@ fn decode_length_error(path: &str, expected: usize, actual: usize) -> SemanticEr
 }
 
 #[cfg(test)]
+#[path = "view_legacy_tests.rs"]
+mod legacy_tests;
+
+#[cfg(test)]
+#[path = "view_decode_tests.rs"]
+mod decode_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
@@ -2487,7 +2616,7 @@ mod tests {
     use crate::SemanticHandlerRegistry;
 
     /// Builds an explicitly typed payload node for focused decoder regressions.
-    fn payload_test_node(id: u32, path: &str, kind: SchemaNodeKind) -> SchemaNode {
+    pub(super) fn payload_test_node(id: u32, path: &str, kind: SchemaNodeKind) -> SchemaNode {
         SchemaNode {
             id: bethkit_schema::SchemaNodeId(id),
             path: path.to_owned(),
@@ -5217,7 +5346,7 @@ mod tests {
         Ok(())
     }
 
-    fn test_record_bytes(
+    pub(super) fn test_record_bytes(
         record_signature: &[u8; 4],
         subrecord_signature: &[u8; 4],
         payload: &[u8],
@@ -5252,7 +5381,7 @@ mod tests {
         bytes
     }
 
-    fn test_manifest() -> SchemaManifest {
+    pub(super) fn test_manifest() -> SchemaManifest {
         SchemaManifest {
             format_version: PACKAGE_FORMAT_VERSION,
             game: bethkit_schema::SchemaGame::SkyrimSe,

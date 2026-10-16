@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "bethkit-bsa"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "ahash",
  "bethkit-io",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "bethkit-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "ahash",
  "bethkit-bsa",
@@ -101,21 +101,23 @@ dependencies = [
 
 [[package]]
 name = "bethkit-ffi"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
+ "ahash",
  "bethkit-bsa",
  "bethkit-core",
  "bethkit-io",
  "bethkit-schema",
  "bethkit-semantic",
  "cbindgen",
+ "mimalloc",
  "serde_json",
  "thiserror",
 ]
 
 [[package]]
 name = "bethkit-io"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "flate2",
  "lz4_flex",
@@ -125,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "bethkit-schema"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "ahash",
  "bethkit-core",
@@ -139,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "bethkit-semantic"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bethkit-core",
  "bethkit-io",
@@ -196,6 +198,16 @@ dependencies = [
  "syn",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "cc"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6651c9ed80effdc7db0ff72512157f901af5e3549e341e24b1dd4887d836d838"
+dependencies = [
+ "find-msvc-tools",
+ "shlex",
 ]
 
 [[package]]
@@ -382,6 +394,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
+name = "find-msvc-tools"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -471,6 +489,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -504,6 +531,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -653,6 +689,12 @@ dependencies = [
  "cpufeatures",
  "digest",
 ]
+
+[[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "simd-adler32"

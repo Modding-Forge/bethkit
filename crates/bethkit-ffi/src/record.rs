@@ -168,6 +168,61 @@ pub extern "C" fn bethkit_record_subrecord_count(record: *const BethkitRecord) -
     subs.len() as i64
 }
 
+/// Copies all subrecord signatures in source order into caller-owned storage.
+///
+/// # Arguments
+/// * `record` - Live, immutable borrowed record, retained for this call.
+/// * `out` - Non-null writable buffer, not overlapping any source allocation.
+/// * `capacity` - Writable byte count, at least four times the subrecord count.
+///
+/// # Returns
+/// The number of copied four-byte signatures, or -1 on failure.
+///
+/// # Errors
+/// Returns -1 with the last error for null pointers, an undersized buffer,
+/// subrecord parsing errors, size overflow, or a panic. Failure never partially
+/// writes the buffer. No allocation or borrowed pointer is transferred.
+///
+/// # Safety
+/// Both pointers must remain valid throughout the call. `out` must point to
+/// `capacity` writable bytes and must not alias the record or its source data.
+#[no_mangle]
+pub extern "C" fn bethkit_record_subrecord_signatures(
+    record: *const BethkitRecord,
+    out: *mut u8,
+    capacity: usize,
+) -> i64 {
+    null_check!(record, "bethkit_record_subrecord_signatures/record", -1);
+    null_check!(out, "bethkit_record_subrecord_signatures/out", -1);
+    ffi_try!(
+        (|| -> crate::Result<i64> {
+            // SAFETY: The caller borrows a live immutable record for this call.
+            let record = unsafe { &*record };
+            let subrecords = record.0.subrecords()?;
+            let invalid_capacity = || FfiError::InvalidArgument {
+                context: "bethkit_record_subrecord_signatures",
+                message: "signature buffer is too small or its size overflows".to_owned(),
+            };
+            let required = subrecords
+                .len()
+                .checked_mul(4)
+                .ok_or_else(invalid_capacity)?;
+            let count = i64::try_from(subrecords.len()).map_err(|_| invalid_capacity())?;
+            if capacity < required || required > isize::MAX as usize {
+                return Err(invalid_capacity());
+            }
+            // SAFETY: The contract guarantees capacity writable, nonaliasing bytes;
+            // SAFETY: required fits isize and has been checked against capacity.
+            let output = unsafe { std::slice::from_raw_parts_mut(out, required) };
+            for (signature, subrecord) in output.as_chunks_mut::<4>().0.iter_mut().zip(subrecords) {
+                signature.copy_from_slice(&subrecord.signature.0);
+            }
+            Ok(count)
+        })(),
+        -1
+    )
+}
+
 /// Returns a borrowed pointer to the subrecord at `index`, or null if
 /// `index` is out of bounds or on error.
 ///
@@ -430,6 +485,58 @@ mod tests {
             &writer.write_to_vec()?,
             GameContext::sse(),
         )?)
+    }
+
+    /// Copies signatures only into sufficiently sized, non-null caller buffers.
+    #[test]
+    fn subrecord_signature_buffer_is_atomic() -> Result<(), Box<dyn std::error::Error>> {
+        let plugin = fixture(Some(b"Name\0"))?;
+        let record = plugin
+            .find_record(FormId(0x800))
+            .expect("fixture record exists");
+        let pointer = record as *const _ as *const BethkitRecord;
+        let mut buffer = [0xa5; 8];
+        assert_eq!(
+            bethkit_record_subrecord_signatures(pointer, buffer.as_mut_ptr(), 3),
+            -1
+        );
+        assert_eq!(buffer, [0xa5; 8]);
+        assert_eq!(
+            bethkit_record_subrecord_signatures(std::ptr::null(), buffer.as_mut_ptr(), 8),
+            -1
+        );
+        assert_eq!(
+            bethkit_record_subrecord_signatures(pointer, std::ptr::null_mut(), 8),
+            -1
+        );
+        assert_eq!(buffer, [0xa5; 8]);
+        assert_eq!(
+            bethkit_record_subrecord_signatures(pointer, buffer.as_mut_ptr(), 8),
+            1
+        );
+        assert_eq!(&buffer[..4], b"EDID");
+        assert_eq!(&buffer[4..], &[0xa5; 4]);
+        Ok(())
+    }
+
+    /// Accepts an empty record without writing into the supplied buffer.
+    #[test]
+    fn empty_signature_buffer_keeps_output_untouched() -> Result<(), Box<dyn std::error::Error>> {
+        let plugin = fixture(None)?;
+        let record = plugin
+            .find_record(FormId(0x800))
+            .expect("fixture record exists");
+        let mut buffer = [0xa5; 4];
+        assert_eq!(
+            bethkit_record_subrecord_signatures(
+                record as *const _ as *const BethkitRecord,
+                buffer.as_mut_ptr(),
+                0
+            ),
+            0
+        );
+        assert_eq!(buffer, [0xa5; 4]);
+        Ok(())
     }
 
     /// Distinguishes missing and malformed EDIDs without depending on stale errors.

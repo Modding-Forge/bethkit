@@ -29,6 +29,7 @@ pub struct PluginEncodingDecision {
     sample_strings: usize,
     scanned_records: usize,
     skipped_records: usize,
+    non_ascii_bytes: usize,
 }
 
 impl PluginEncodingDecision {
@@ -59,6 +60,58 @@ impl PluginEncodingDecision {
 }
 
 impl SemanticContext {
+    /// Creates a mixed context retaining suspicious inline text as raw byte values.
+    ///
+    /// Sparse non-default legacy samples and invalid UTF-8 with substantial valid
+    /// UTF-8 fragments are treated as uncertain, not repaired. Explicit overrides
+    /// remain authoritative. Conservative false positives require codec selection.
+    ///
+    /// # Errors
+    /// Returns the schema, decoder and override errors of `new_for_plugin_mixed`.
+    pub fn new_for_plugin_preserving_text(
+        package: Arc<SchemaPackage>,
+        decoders: DecoderRegistry,
+        plugin: &Plugin,
+        cpoverride: Option<&Path>,
+    ) -> Result<Self> {
+        let mut context = Self::new_for_plugin_mixed(package, decoders, plugin, cpoverride)?;
+        if cpoverride.is_some() {
+            let codec = match context.inline_string_encoding {
+                Some(InlineStringEncoding::Utf8) => encoding_rs::UTF_8,
+                Some(InlineStringEncoding::Windows1252) => encoding_rs::WINDOWS_1252,
+                Some(InlineStringEncoding::Legacy(codec)) => codec,
+                _ => {
+                    return Err(SemanticError::EncodingPolicy(
+                        "explicit override did not select a concrete codec".to_owned(),
+                    ))
+                }
+            };
+            context.inline_string_encoding = Some(InlineStringEncoding::PreserveExplicit(codec));
+        }
+        if cpoverride.is_none() {
+            let fallback = context
+                .inline_string_encoding
+                .and_then(InlineStringEncoding::fallback_encoding)
+                .map_or(encoding_rs::WINDOWS_1252, |codec| match codec {
+                    InlineStringEncoding::Legacy(codec) => codec,
+                    _ => encoding_rs::WINDOWS_1252,
+                });
+            let uncertain_legacy =
+                context
+                    .plugin_encoding_decision
+                    .as_ref()
+                    .is_some_and(|decision| {
+                        matches!(decision.encoding, InlineStringEncoding::Legacy(_))
+                            && decision.non_ascii_bytes < 16
+                    });
+            context.inline_string_encoding = Some(InlineStringEncoding::PreserveUtf8WithFallback {
+                encoding: fallback,
+                uncertain_legacy,
+            });
+        }
+        Ok(context)
+    }
+
     /// Creates a context with opt-in per-string UTF-8/legacy selection.
     ///
     /// The detector's result is a prior, not proof of an individual string's
@@ -119,6 +172,7 @@ impl SemanticContext {
                 sample_strings: 0,
                 scanned_records: 0,
                 skipped_records: 0,
+                non_ascii_bytes: 0,
             }
         } else {
             // Windows-1252 maps all byte values reversibly during structural sampling.
@@ -230,6 +284,7 @@ fn detect(context: &SemanticContext, plugin: &Plugin) -> PluginEncodingDecision 
         sample_strings: strings,
         scanned_records: scanned,
         skipped_records: skipped,
+        non_ascii_bytes: sample.iter().filter(|byte| !byte.is_ascii()).count(),
     }
 }
 

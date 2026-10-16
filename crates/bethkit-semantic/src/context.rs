@@ -851,10 +851,8 @@ impl SemanticContext {
     ) -> Result<FieldValue<'a>> {
         for binding in self
             .registry
-            .package()
-            .callback_bindings()
-            .iter()
-            .filter(|binding| binding.path == path && binding.callback_id == "float.normalizer")
+            .callbacks_at(path)
+            .filter(|binding| binding.callback_id == "float.normalizer")
         {
             if !matches!(
                 binding.implementation,

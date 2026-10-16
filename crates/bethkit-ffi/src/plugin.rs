@@ -11,6 +11,7 @@
 
 use std::ffi::{c_char, CString};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use bethkit_core::Plugin;
 
@@ -18,6 +19,11 @@ use crate::group::BethkitGroup;
 use crate::record::BethkitRecord;
 use crate::types::{game_to_ctx, plugin_kind_from_rust, BethkitGame, BethkitPluginKind};
 use crate::{cstr_to_str, ffi_try, null_check, set_last_error};
+
+#[path = "plugin_record_index.rs"]
+mod record_index;
+
+use record_index::RecordIndex;
 
 /// An opaque handle to an opened Bethesda plugin file.
 ///
@@ -29,6 +35,7 @@ pub struct BethkitPlugin {
     pub(crate) master_cstrings: Vec<CString>,
     /// Optional description CString.
     pub(crate) description_cstring: Option<CString>,
+    record_index: OnceLock<RecordIndex>,
 }
 
 impl BethkitPlugin {
@@ -53,6 +60,7 @@ impl BethkitPlugin {
             inner: plugin,
             master_cstrings,
             description_cstring,
+            record_index: OnceLock::new(),
         }
     }
 }
@@ -268,10 +276,17 @@ pub extern "C" fn bethkit_plugin_group_get(
 /// Returns a borrowed pointer to the first matching record, or null if not
 /// found.  The returned pointer is borrowed from `plugin` and must not be
 /// freed.
+/// The immutable FFI owner lazily indexes group routes on its first lookup.
+/// Duplicate IDs retain first-match source order; the plugin header is excluded.
 ///
 /// # Errors
 ///
 /// Returns null and sets the last error if `plugin` is null.
+///
+/// # Safety
+///
+/// A non-null plugin must remain live and immutable for this call and the lifetime
+/// of any returned record pointer. Concurrent read-only lookups are supported.
 #[no_mangle]
 pub extern "C" fn bethkit_plugin_find_record(
     plugin: *const BethkitPlugin,
@@ -280,8 +295,14 @@ pub extern "C" fn bethkit_plugin_find_record(
     null_check!(plugin, "bethkit_plugin_find_record", std::ptr::null());
     // SAFETY: plugin is non-null.
     let p = unsafe { &*plugin };
-    match p.inner.find_record(bethkit_core::FormId(form_id)) {
-        Some(r) => r as *const _ as *const BethkitRecord,
-        None => std::ptr::null(),
-    }
+    ffi_try!(
+        Ok::<_, crate::FfiError>(
+            p.record_index
+                .get_or_init(|| RecordIndex::new(&p.inner))
+                .get(&p.inner, bethkit_core::FormId(form_id))
+                .map_or(std::ptr::null(), |record| record as *const _
+                    as *const BethkitRecord)
+        ),
+        std::ptr::null()
+    )
 }

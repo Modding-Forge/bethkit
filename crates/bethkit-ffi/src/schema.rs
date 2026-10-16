@@ -52,6 +52,9 @@ mod plugin_encoding;
 mod snapshot;
 #[path = "schema_string_cursor.rs"]
 mod string_cursor;
+#[cfg(feature = "profile-string-stages")]
+#[path = "schema_string_profile.rs"]
+mod string_profile;
 
 #[cfg(test)]
 #[path = "schema_tests.rs"]

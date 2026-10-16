@@ -276,6 +276,9 @@ fn match_node<'schema, T: GrammarInput>(
             let mut current = state;
             let mut count = 0_u32;
             while maximum.is_none_or(|limit| count < limit) {
+                if !repeat_anchor_matches(child, &current, subrecords, declared) {
+                    break;
+                }
                 let mut scoped = current.clone();
                 scoped.active_repeat_scopes.push(RepeatScope {
                     path: child.path.clone(),
@@ -330,6 +333,32 @@ fn match_node<'schema, T: GrammarInput>(
         }
         _ => Ok(state),
     }
+}
+
+fn repeat_anchor_matches<T: GrammarInput>(
+    child: &SchemaNode,
+    state: &MatchState,
+    subrecords: &[T],
+    declared: &BTreeSet<Signature>,
+) -> bool {
+    let SchemaNodeKind::Sequence { children } = &child.kind else {
+        return true;
+    };
+    let Some(first) = children.first() else {
+        return true;
+    };
+    let SchemaNodeKind::Subrecord { signature, .. } = &first.kind else {
+        return true;
+    };
+    if !first.required || first.condition.is_some() {
+        return true;
+    }
+    // A repeated structure has not begun until its required opening field matches.
+    // Evaluating dependent selectors in an absent occurrence reads missing or stale data.
+    subrecords[state.cursor..]
+        .iter()
+        .find(|subrecord| declared.contains(&subrecord.signature()))
+        .is_some_and(|subrecord| subrecord.signature() == Signature::from(*signature))
 }
 
 fn condition_applies<T: GrammarInput>(
@@ -911,6 +940,17 @@ mod tests {
             Some("TEST/items/repeat/choice/0:A")
         );
         assert!(matched.violations.is_empty());
+        let absent = interpret(&root, Signature(*b"TEST"), 44, &[])?;
+        assert!(absent.assignments.is_empty());
+        let mut trailing = subrecords;
+        trailing.push(subrecord(*b"AAAA"));
+        let matched = interpret(&root, Signature(*b"TEST"), 44, &trailing)?;
+        assert!(matched.assignments[4].is_none());
+        let malformed = [SubRecord {
+            signature: Signature(*b"TYPE"),
+            data: SubRecordData::Owned(Vec::new()),
+        }];
+        assert!(interpret(&root, Signature(*b"TEST"), 44, &malformed).is_err());
         Ok(())
     }
 }

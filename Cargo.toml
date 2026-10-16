@@ -27,6 +27,7 @@ sha2       = "0.10"
 hex        = "0.4"
 encoding_rs = "0.8"
 chardetng = "=1.0.0"
+mimalloc = { version = "0.1.52", default-features = false }
 
 [profile.release]
 lto           = "fat"
