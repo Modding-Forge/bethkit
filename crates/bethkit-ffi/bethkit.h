@@ -2489,6 +2489,34 @@ struct BethkitStringTable *bethkit_string_table_new(enum BethkitStringFileKind k
 struct BethkitStringTable *bethkit_string_table_open(const char *path);
 
 /**
+ * Parses a complete serialized string table without accessing the filesystem.
+ *
+ * # Arguments
+ *
+ * * `data` - Borrowed pointer to the complete serialized table, including its header.
+ * * `len` - Number of readable bytes in `data`.
+ * * `kind` - Explicit format; bytes do not carry a reliable format discriminator.
+ *
+ * # Returns
+ *
+ * An owned handle, released with [`bethkit_string_table_free`], or null on failure.
+ * The table copies entry payloads and does not retain `data` after this call.
+ *
+ * # Errors
+ *
+ * Returns null and sets the thread-local last error for a null pointer, excessive
+ * length, malformed input, or a caught Rust panic.
+ *
+ * # Safety
+ *
+ * A non-null `data` must point to `len` initialized readable bytes in one allocation
+ * and remain valid and unmodified until this function returns. `kind` must be valid.
+ */
+struct BethkitStringTable *bethkit_string_table_from_bytes(const uint8_t *data,
+                                                           uintptr_t len,
+                                                           enum BethkitStringFileKind kind);
+
+/**
  * Frees a string table handle.  Passing a null pointer is a no-op.
  */
 void bethkit_string_table_free(struct BethkitStringTable *st);

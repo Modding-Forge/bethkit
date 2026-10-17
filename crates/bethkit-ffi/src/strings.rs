@@ -73,6 +73,57 @@ pub extern "C" fn bethkit_string_table_open(path: *const c_char) -> *mut Bethkit
     Box::into_raw(Box::new(BethkitStringTable(table)))
 }
 
+/// Parses a complete serialized string table without accessing the filesystem.
+///
+/// # Arguments
+///
+/// * `data` - Borrowed pointer to the complete serialized table, including its header.
+/// * `len` - Number of readable bytes in `data`.
+/// * `kind` - Explicit format; bytes do not carry a reliable format discriminator.
+///
+/// # Returns
+///
+/// An owned handle, released with [`bethkit_string_table_free`], or null on failure.
+/// The table copies entry payloads and does not retain `data` after this call.
+///
+/// # Errors
+///
+/// Returns null and sets the thread-local last error for a null pointer, excessive
+/// length, malformed input, or a caught Rust panic.
+///
+/// # Safety
+///
+/// A non-null `data` must point to `len` initialized readable bytes in one allocation
+/// and remain valid and unmodified until this function returns. `kind` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn bethkit_string_table_from_bytes(
+    data: *const u8,
+    len: usize,
+    kind: BethkitStringFileKind,
+) -> *mut BethkitStringTable {
+    null_check!(
+        data,
+        "bethkit_string_table_from_bytes",
+        std::ptr::null_mut()
+    );
+    ffi_try!(
+        (|| {
+            if len > isize::MAX as usize {
+                return Err(FfiError::InvalidArgument {
+                    context: "bethkit_string_table_from_bytes",
+                    message: "byte length exceeds the slice limit".into(),
+                });
+            }
+            // SAFETY: the caller guarantees a readable allocation of len bytes;
+            // SAFETY: null and the maximum slice length were checked above.
+            let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+            let table = StringTable::from_bytes(bytes, string_kind_to_rust(kind))?;
+            Ok(Box::into_raw(Box::new(BethkitStringTable(table))))
+        })(),
+        std::ptr::null_mut()
+    )
+}
+
 /// Frees a string table handle.  Passing a null pointer is a no-op.
 #[no_mangle]
 pub extern "C" fn bethkit_string_table_free(st: *mut BethkitStringTable) {
@@ -657,6 +708,63 @@ pub extern "C" fn bethkit_localization_set_write(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parses each format independently of the caller's serialized byte allocation.
+    #[test]
+    fn string_tables_from_bytes_own_their_entries() -> Result<(), Box<dyn std::error::Error>> {
+        for kind in [
+            BethkitStringFileKind::Strings,
+            BethkitStringFileKind::DlStrings,
+            BethkitStringFileKind::IlStrings,
+        ] {
+            // given
+            let mut source = StringTable::new(string_kind_to_rust(kind));
+            source.insert(17, b"Gr\xc3\xbc\xc3\x9fe".to_vec());
+            source.insert(29, vec![0xff, 0xfe]);
+            let mut bytes: Vec<u8> = Vec::new();
+            source.write_to(&mut bytes)?;
+            // when
+            // SAFETY: bytes is a live immutable allocation for the duration of the call.
+            let table =
+                unsafe { bethkit_string_table_from_bytes(bytes.as_ptr(), bytes.len(), kind) };
+            assert!(!table.is_null());
+            bytes.fill(0);
+            drop(bytes);
+            // then
+            assert_eq!(bethkit_string_table_kind(table), kind);
+            assert_eq!(bethkit_string_table_len(table), 2);
+            let mut length: usize = 0;
+            let data = bethkit_string_table_get(table, 29, &mut length);
+            assert!(!data.is_null());
+            // SAFETY: data is borrowed from table, which has not been mutated or freed.
+            assert_eq!(
+                unsafe { std::slice::from_raw_parts(data, length) },
+                &[0xff, 0xfe]
+            );
+            bethkit_string_table_free(table);
+        }
+        Ok(())
+    }
+
+    /// Rejects invalid byte inputs before allocating an owned table handle.
+    #[test]
+    fn string_tables_from_bytes_reject_invalid_inputs() -> Result<(), Box<dyn std::error::Error>> {
+        let kind = BethkitStringFileKind::Strings;
+        // SAFETY: null is handled before dereferencing, regardless of len.
+        assert!(unsafe { bethkit_string_table_from_bytes(std::ptr::null(), 8, kind) }.is_null());
+        for bytes in [Vec::new(), vec![0; 7], vec![0xff; 8]] {
+            // SAFETY: bytes provides the exact readable range, including the empty case.
+            assert!(
+                unsafe { bethkit_string_table_from_bytes(bytes.as_ptr(), bytes.len(), kind) }
+                    .is_null()
+            );
+        }
+        // SAFETY: excessive lengths are rejected before constructing a slice or reading data.
+        assert!(
+            unsafe { bethkit_string_table_from_bytes(b"x".as_ptr(), usize::MAX, kind) }.is_null()
+        );
+        Ok(())
+    }
 
     /// Checks independent clones and copy-on-write string IDs for every table format.
     #[test]
