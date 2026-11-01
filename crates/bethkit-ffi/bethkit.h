@@ -2433,6 +2433,8 @@ struct BethkitStringCursor *bethkit_string_cursor_new_preserving_nontext(const s
  * unusually large record can exceed these soft byte/string limits. The JSON
  * contains `values` and `done`. Empty nonterminal batches are valid. Every value
  * has the same address, codec metadata and structure hash as a record snapshot.
+ * Values additionally carry `record_context` with the containing subrecord
+ * signature and the record's editor ID, unless that editor ID cannot be decoded.
  * Free each result with `bethkit_string_free`. After an error, recreate the
  * cursor: it cannot resume past a malformed record and silently omit its strings.
  *

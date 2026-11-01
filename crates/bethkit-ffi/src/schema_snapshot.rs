@@ -201,8 +201,15 @@ pub(super) fn string_rows(
     #[cfg(feature = "profile-string-stages")]
     let started = std::time::Instant::now();
     let signature = record.header.signature;
+    // NOTE: The context is omitted when the editor ID cannot be decoded, so consumers
+    // fall back to their own record lookup and observe the original error there.
+    let editor_id: Option<Option<String>> = record
+        .editor_id()
+        .ok()
+        .map(|editor_id| editor_id.map(str::to_owned));
     let mut rows = Vec::new();
     for field in &fields {
+        let first_row = rows.len();
         let address = FieldAddress {
             schema_payload_sha256: schema_hash.clone(),
             structure_hash: structure_hash.clone(),
@@ -227,6 +234,14 @@ pub(super) fn string_rows(
         };
         if let Some(value) = wire_strings(&field.value, &address, node, &context) {
             flatten_strings(value, &mut rows);
+        }
+        if let Some(editor_id) = &editor_id {
+            for row in &mut rows[first_row..] {
+                row["record_context"] = json!({
+                    "subrecord_signature": field.subrecord_signature.0,
+                    "editor_id": editor_id,
+                });
+            }
         }
     }
     #[cfg(feature = "profile-string-stages")]
