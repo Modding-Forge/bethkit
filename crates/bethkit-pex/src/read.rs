@@ -116,7 +116,7 @@ impl<'a, O: ByteOrder> Reader<'a, O> {
         for _ in 0..count {
             objects.push(self.object()?);
         }
-        self.finish()?;
+        let trailing_data: &'a [u8] = self.rest()?;
         Ok(PexFile {
             game: self.game,
             header: preamble.header,
@@ -124,23 +124,23 @@ impl<'a, O: ByteOrder> Reader<'a, O> {
             debug_info: preamble.debug_info,
             user_flags: preamble.user_flags,
             objects,
+            trailing_data: Cow::Borrowed(trailing_data),
         })
     }
 
-    /// Fails if unread bytes remain.
+    /// Returns the unread bytes and moves to the end.
     ///
     /// # Errors
     ///
-    /// Returns [`PexError::TrailingData`] if the cursor is not at the end.
-    pub(crate) fn finish(&self) -> Result<()> {
-        if self.cursor.is_empty() {
-            Ok(())
-        } else {
-            Err(PexError::TrailingData {
-                offset: self.cursor.pos(),
-                remaining: self.cursor.remaining(),
-            })
-        }
+    /// Never fails in practice; reading the remaining length cannot overrun.
+    pub(crate) fn rest(&mut self) -> Result<&'a [u8]> {
+        let remaining: usize = self.cursor.remaining();
+        Ok(self.cursor.read_slice(remaining)?)
+    }
+
+    /// Returns the current byte offset.
+    pub(crate) fn pos(&self) -> usize {
+        self.cursor.pos()
     }
 
     /// Reads the header, string table, debug information and user flags.
@@ -207,11 +207,14 @@ impl<'a, O: ByteOrder> Reader<'a, O> {
         self.u16()
     }
 
-    /// Skips one object using its size field and returns its byte range start.
+    /// Skips one object using its size field and returns its start offset.
+    ///
+    /// The size field may be wrong in files from third-party compilers, so a
+    /// successful skip does not prove the object ends there.
     ///
     /// # Errors
     ///
-    /// Returns an I/O error if the object extends beyond the data.
+    /// Returns an I/O error if the declared size extends beyond the data.
     pub(crate) fn skip_object(&mut self) -> Result<usize> {
         let start: usize = self.cursor.pos();
         self.id()?;
@@ -303,12 +306,14 @@ impl<'a, O: ByteOrder> Reader<'a, O> {
         })
     }
 
-    /// Reads one object and checks its declared size.
+    /// Reads one object.
+    ///
+    /// A size field that does not match the object is kept in
+    /// [`Object::declared_size`] so the file still round-trips exactly.
     ///
     /// # Errors
     ///
-    /// Returns [`PexError::ObjectSizeMismatch`] if the declared size does not
-    /// match, or any error of the contained functions and values.
+    /// Returns any decoding error of the contained functions and values.
     pub(crate) fn object(&mut self) -> Result<Object> {
         let name: StringId = self.id()?;
         let size_offset: usize = self.cursor.pos();
@@ -375,16 +380,14 @@ impl<'a, O: ByteOrder> Reader<'a, O> {
         }
 
         let actual: usize = self.cursor.pos() - size_offset;
-        if usize::try_from(declared).ok() != Some(actual) {
-            return Err(PexError::ObjectSizeMismatch {
-                offset: size_offset,
-                declared,
-                actual,
-            });
-        }
+        // Caprica stores sizes in the wrong byte order and without the size field;
+        // the game ignores the field, so such files are valid and kept as they are.
+        let declared_size: Option<u32> =
+            (usize::try_from(declared).ok() != Some(actual)).then_some(declared);
 
         Ok(Object {
             name,
+            declared_size,
             parent_class_name,
             doc_string,
             const_flag,

@@ -94,26 +94,6 @@ pub enum PexError {
         variadic: usize,
     },
 
-    /// The size stored for an object does not match the bytes it occupies.
-    #[error("object at offset {offset} declares {declared} bytes but occupies {actual}")]
-    ObjectSizeMismatch {
-        /// Offset of the object's size field.
-        offset: usize,
-        /// The size stored in the file.
-        declared: u32,
-        /// The size the object actually occupies.
-        actual: usize,
-    },
-
-    /// Bytes remain after the last object.
-    #[error("{remaining} unexpected bytes after the last object at offset {offset}")]
-    TrailingData {
-        /// Offset of the first unexpected byte.
-        offset: usize,
-        /// Number of unexpected bytes.
-        remaining: usize,
-    },
-
     /// A list has more entries than its 16-bit count field can store.
     #[error("{what} has {len} entries, more than the maximum of 65535")]
     TooManyEntries {

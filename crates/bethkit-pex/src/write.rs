@@ -93,6 +93,7 @@ impl<O: ByteOrder> Writer<O> {
         for object in &file.objects {
             self.object(object)?;
         }
+        self.out.write_bytes(&file.trailing_data);
         Ok(self.out.into_inner())
     }
 
@@ -218,7 +219,10 @@ impl<O: ByteOrder> Writer<O> {
             }
         }
 
-        self.out.patch_u32_with_size_since(size)?;
+        match object.declared_size {
+            Some(declared) => self.out.patch_u32(size, declared)?,
+            None => self.out.patch_u32_with_size_since(size)?,
+        }
         Ok(())
     }
 

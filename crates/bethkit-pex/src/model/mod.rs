@@ -39,6 +39,9 @@ pub struct PexFile<'a> {
     pub user_flags: Vec<UserFlag>,
     /// The script objects; compiled scripts contain exactly one.
     pub objects: Vec<Object>,
+    /// Bytes after the last object. Some tools leave garbage there; the game
+    /// ignores it, and keeping it makes such files round-trip exactly.
+    pub trailing_data: Cow<'a, [u8]>,
 }
 
 impl<'a> PexFile<'a> {
@@ -74,6 +77,7 @@ impl<'a> PexFile<'a> {
             debug_info: self.debug_info,
             user_flags: self.user_flags,
             objects: self.objects,
+            trailing_data: Cow::Owned(self.trailing_data.into_owned()),
         }
     }
 }
@@ -263,6 +267,13 @@ impl Value {
 pub struct Object {
     /// Name of the object (the script name).
     pub name: StringId,
+    /// A size field value that did not match the object when it was read.
+    ///
+    /// `None` (the normal case) makes the writer store the correct size.
+    /// `Some` is written verbatim: some third-party compilers store wrong
+    /// sizes, which the game ignores, and keeping them preserves such files
+    /// byte for byte.
+    pub declared_size: Option<u32>,
     /// Name of the parent script; empty for none.
     pub parent_class_name: StringId,
     /// Documentation of the script.

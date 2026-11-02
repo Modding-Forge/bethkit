@@ -101,6 +101,7 @@ fn sample(game: PexGame) -> Result<PexFile<'static>, Box<dyn std::error::Error>>
 
     let object = Object {
         name: script,
+        declared_size: None,
         parent_class_name: parent,
         doc_string: empty,
         const_flag: u8::from(fallout4),
@@ -214,6 +215,7 @@ fn sample(game: PexGame) -> Result<PexFile<'static>, Box<dyn std::error::Error>>
             bit: 0,
         }],
         objects: vec![object],
+        trailing_data: Cow::Borrowed(&[]),
     })
 }
 
@@ -315,8 +317,6 @@ fn malformed_files_report_errors() -> TestResult {
     unknown_opcode[assign] = 0x60;
     let mut bad_value = bytes.clone();
     bad_value[assign + 1] = 9;
-    let mut trailing = bytes.clone();
-    trailing.push(0);
     let mut unknown_game = sample(PexGame::Fallout4)?.write()?;
     unknown_game[6] = 9;
 
@@ -342,14 +342,50 @@ fn malformed_files_report_errors() -> TestResult {
         Err(PexError::InvalidValueType { tag: 9, .. })
     ));
     assert!(matches!(
-        PexFile::parse(&trailing),
-        Err(PexError::TrailingData { remaining: 1, .. })
-    ));
-    assert!(matches!(
         PexFile::parse(&unknown_game),
         Err(PexError::UnknownGame { game_id: 9 })
     ));
     Ok(())
+}
+
+/// Keeps bytes after the last object and wrong object sizes, as written by
+/// some tools and third-party compilers, and reproduces them exactly.
+#[test]
+fn tolerated_irregularities_round_trip() -> TestResult {
+    for game in GAMES {
+        // given
+        let bytes: Vec<u8> = sample(game)?.write()?;
+        let mut trailing: Vec<u8> = bytes.clone();
+        trailing.extend_from_slice(b"\0garbage");
+        // The object size field follows the two-byte object name after the count.
+        let size_offset: usize = bytes.len() - object_len(&bytes)? + 2;
+        let mut wrong_size: Vec<u8> = bytes.clone();
+        wrong_size[size_offset..size_offset + 4].copy_from_slice(&[0xA6, 0, 0, 0]);
+
+        for (variant, data) in [("trailing", &trailing), ("wrong size", &wrong_size)] {
+            // when
+            let parsed: PexFile<'_> = PexFile::parse(data)?;
+            let viewed: PexFile<'_> = PexView::parse(data)?.into_file()?;
+
+            // then
+            assert_eq!(&parsed.write()?, data, "{game} {variant}");
+            assert_eq!(viewed, parsed, "{game} {variant}");
+        }
+        assert_eq!(&*PexFile::parse(&trailing)?.trailing_data, b"\0garbage");
+        assert!(PexFile::parse(&wrong_size)?.objects[0]
+            .declared_size
+            .is_some());
+        assert!(PexFile::parse(&bytes)?.objects[0].declared_size.is_none());
+    }
+    Ok(())
+}
+
+/// Returns the length of the single object of a sample file, including its
+/// name, as the difference to the same file without objects.
+fn object_len(bytes: &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut without_object: PexFile<'_> = PexFile::parse(bytes)?;
+    without_object.objects.clear();
+    Ok(bytes.len() - without_object.write()?.len())
 }
 
 /// Parses every prefix and thousands of corrupted copies without panicking, and

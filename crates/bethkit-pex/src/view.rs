@@ -6,8 +6,12 @@
 //! flags, and locates the objects through their size fields without decoding
 //! them. Objects are the finest unit that can be skipped: functions have no
 //! size field, so finding the end of one requires decoding its instructions.
+//!
+//! Size fields are only trusted when they lead exactly to the end of the
+//! file. Otherwise (third-party compilers write wrong sizes, some tools leave
+//! bytes after the last object) the objects are located by decoding them.
 
-use bethkit_io::{BigEndian, Endianness, LittleEndian};
+use bethkit_io::{BigEndian, ByteOrder, Endianness, LittleEndian};
 
 use crate::error::{PexError, Result};
 use crate::game::PexGame;
@@ -24,6 +28,7 @@ pub struct PexView<'a> {
     debug_info: Option<DebugInfo>,
     user_flags: Vec<UserFlag>,
     object_starts: Vec<usize>,
+    trailing_data: &'a [u8],
 }
 
 impl<'a> PexView<'a> {
@@ -31,9 +36,8 @@ impl<'a> PexView<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`PexError`] for malformed data before the objects, for objects
-    /// whose size field points beyond the data, and for bytes after the last
-    /// object.
+    /// Returns [`PexError`] for malformed data before the objects, and for
+    /// objects that can neither be skipped nor decoded.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let game: PexGame = detect(data)?;
         match game.profile().byte_order {
@@ -42,15 +46,18 @@ impl<'a> PexView<'a> {
         }
     }
 
-    fn scan<O: bethkit_io::ByteOrder>(data: &'a [u8], game: PexGame) -> Result<Self> {
+    fn scan<O: ByteOrder>(data: &'a [u8], game: PexGame) -> Result<Self> {
         let mut reader: Reader<'a, O> = Reader::new(data, game);
         let preamble: Preamble<'a> = reader.preamble()?;
         let count: u16 = reader.object_count()?;
-        let mut object_starts: Vec<usize> = Vec::with_capacity(usize::from(count));
-        for _ in 0..count {
-            object_starts.push(reader.skip_object()?);
-        }
-        reader.finish()?;
+        let objects_offset: usize = reader.pos();
+
+        let (object_starts, trailing_data) =
+            match Self::locate_by_size::<O>(data, game, objects_offset, count) {
+                Some(starts) => (starts, &data[data.len()..]),
+                None => Self::locate_by_decoding::<O>(data, game, objects_offset, count)?,
+            };
+
         Ok(Self {
             data,
             game,
@@ -59,7 +66,40 @@ impl<'a> PexView<'a> {
             debug_info: preamble.debug_info,
             user_flags: preamble.user_flags,
             object_starts,
+            trailing_data,
         })
+    }
+
+    /// Skips objects by their size fields; `None` unless they end exactly at
+    /// the end of the data.
+    fn locate_by_size<O: ByteOrder>(
+        data: &'a [u8],
+        game: PexGame,
+        offset: usize,
+        count: u16,
+    ) -> Option<Vec<usize>> {
+        let mut reader: Reader<'a, O> = Reader::at(data, game, offset).ok()?;
+        let mut starts: Vec<usize> = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            starts.push(reader.skip_object().ok()?);
+        }
+        (reader.pos() == data.len()).then_some(starts)
+    }
+
+    /// Decodes objects to find their boundaries and the trailing bytes.
+    fn locate_by_decoding<O: ByteOrder>(
+        data: &'a [u8],
+        game: PexGame,
+        offset: usize,
+        count: u16,
+    ) -> Result<(Vec<usize>, &'a [u8])> {
+        let mut reader: Reader<'a, O> = Reader::at(data, game, offset)?;
+        let mut starts: Vec<usize> = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            starts.push(reader.pos());
+            reader.object()?;
+        }
+        Ok((starts, reader.rest()?))
     }
 
     /// Returns the game whose format the file uses.
@@ -85,6 +125,11 @@ impl<'a> PexView<'a> {
     /// Returns the user flags.
     pub fn user_flags(&self) -> &[UserFlag] {
         &self.user_flags
+    }
+
+    /// Returns the bytes after the last object.
+    pub fn trailing_data(&self) -> &'a [u8] {
+        self.trailing_data
     }
 
     /// Returns the number of objects.
@@ -128,6 +173,7 @@ impl<'a> PexView<'a> {
             debug_info: self.debug_info,
             user_flags: self.user_flags,
             objects,
+            trailing_data: std::borrow::Cow::Borrowed(self.trailing_data),
         })
     }
 }
