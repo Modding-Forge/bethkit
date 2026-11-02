@@ -12,6 +12,7 @@ use std::path::Path;
 
 use crate::error::{BsaError, Result};
 use crate::hash::hash_fo4;
+use crate::write::ba2_extension;
 
 /// BA2 magic bytes (`"BTDX"`).
 const MAGIC: [u8; 4] = *b"BTDX";
@@ -19,6 +20,9 @@ const MAGIC: [u8; 4] = *b"BTDX";
 const SUB_GNRL: [u8; 4] = *b"GNRL";
 /// Sentinel value at the end of every GNRL file record.
 const BAADF00D: u32 = 0xBAAD_F00D;
+
+/// Flags stored in every GNRL file record of the vanilla Fallout 4 archives.
+const GNRL_RECORD_FLAGS: u32 = 0x0010_0100;
 
 /// Builder for BA2 GNRL archives.
 ///
@@ -187,18 +191,17 @@ fn write(
         let (stem, ext) = split_stem_ext(filename);
 
         let name_hash = hash_fo4(stem);
-        let ext_hash = hash_fo4(ext);
         let dir_hash = hash_fo4(dir);
         let offset = data_offsets[i] as i64;
 
         out.write_all(&name_hash.to_le_bytes())?;
-        out.write_all(&ext_hash.to_le_bytes())?;
+        out.write_all(&ba2_extension(ext))?;
         out.write_all(&dir_hash.to_le_bytes())?;
+        out.write_all(&GNRL_RECORD_FLAGS.to_le_bytes())?;
         out.write_all(&offset.to_le_bytes())?;
         out.write_all(&f.packed_size.to_le_bytes())?;
         out.write_all(&f.uncompressed_size.to_le_bytes())?;
         out.write_all(&BAADF00D.to_le_bytes())?;
-        out.write_all(&0u32.to_le_bytes())?; // 4-byte padding to fill 36-byte record
     }
 
     // File data.

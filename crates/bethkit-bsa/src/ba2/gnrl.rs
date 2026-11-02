@@ -78,24 +78,24 @@ impl GnrlArchive {
         for (i, name) in names.iter().enumerate() {
             let base = records_start + i * record_size;
             let rec_bytes = &bytes[base..base + record_size];
-            // NOTE: Record layout: name_hash(4) ext(4) dir_hash(4) unknown(4)
+            // NOTE: Record layout: name_hash(4) ext(4) dir_hash(4) flags(4)
             // NOTE: offset(8) packed_size(4) size(4) tail(4) = 36 bytes total
             let offset = i64::from_le_bytes(
-                rec_bytes[12..20]
+                rec_bytes[16..24]
                     .try_into()
                     .map_err(|_| BsaError::Corrupt(format!("GNRL record {i}: offset read")))?,
             ) as u64;
             let packed_size =
-                u32::from_le_bytes(rec_bytes[20..24].try_into().map_err(|_| {
+                u32::from_le_bytes(rec_bytes[24..28].try_into().map_err(|_| {
                     BsaError::Corrupt(format!("GNRL record {i}: packed_size read"))
                 })?);
             let size = u32::from_le_bytes(
-                rec_bytes[24..28]
+                rec_bytes[28..32]
                     .try_into()
                     .map_err(|_| BsaError::Corrupt(format!("GNRL record {i}: size read")))?,
             );
             let tail = u32::from_le_bytes(
-                rec_bytes[28..32]
+                rec_bytes[32..36]
                     .try_into()
                     .map_err(|_| BsaError::Corrupt(format!("GNRL record {i}: tail read")))?,
             );

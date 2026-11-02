@@ -15,6 +15,7 @@ use std::path::Path;
 
 use crate::error::{BsaError, Result};
 use crate::hash::hash_fo4;
+use crate::write::ba2_extension;
 use crate::write::dds_parse;
 
 /// BA2 magic bytes (`"BTDX"`).
@@ -223,12 +224,11 @@ fn write(
         let (dir, filename) = split_dir_filename(&rec.path);
         let (stem, ext) = split_stem_ext(filename);
         let name_hash = hash_fo4(stem);
-        let ext_hash = hash_fo4(ext);
         let dir_hash = hash_fo4(dir);
 
         // Texture header (24 bytes).
         out.write_all(&name_hash.to_le_bytes())?;
-        out.write_all(&ext_hash.to_le_bytes())?;
+        out.write_all(&ba2_extension(ext))?;
         out.write_all(&dir_hash.to_le_bytes())?;
         out.write_all(&0u8.to_le_bytes())?; // unknown_tex
         out.write_all(&1u8.to_le_bytes())?; // chunk_count = 1
