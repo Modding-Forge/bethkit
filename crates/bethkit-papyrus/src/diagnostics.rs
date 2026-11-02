@@ -131,6 +131,9 @@ pub enum DiagnosticCode {
     UnknownFlagTarget,
     /// A flag file defines the same flag name more than once.
     DuplicateFlag,
+    /// A composite flag refers to a flag that is not defined before it, or
+    /// combines fewer than two flags.
+    UnknownFlag,
 }
 
 impl DiagnosticCode {
@@ -158,6 +161,7 @@ impl DiagnosticCode {
             Self::InvalidFlagIndex => "PAP0200",
             Self::UnknownFlagTarget => "PAP0201",
             Self::DuplicateFlag => "PAP0202",
+            Self::UnknownFlag => "PAP0203",
         }
     }
 }

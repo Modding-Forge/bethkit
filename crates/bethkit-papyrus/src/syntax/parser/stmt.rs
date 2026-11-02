@@ -83,12 +83,18 @@ impl Parser<'_> {
             Some(_) => Some(self.expression()?),
             None => None,
         };
+        let is_const: bool = self.eat_keyword(Keyword::Const).is_some();
         let span: Span = self.span_from(ty.span);
         self.expect_line_end();
-        Some(
-            self.ast
-                .push_stmt(StmtKind::Define { ty, name, initial }, span),
-        )
+        Some(self.ast.push_stmt(
+            StmtKind::Define {
+                ty,
+                name,
+                initial,
+                is_const,
+            },
+            span,
+        ))
     }
 
     fn expression_statement(&mut self) -> Option<StmtId> {

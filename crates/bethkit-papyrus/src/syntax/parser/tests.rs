@@ -52,6 +52,12 @@ fn render(parsed: &ParsedScript, id: ExprId) -> String {
         ExprKind::None => "none".to_owned(),
         ExprKind::String(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
         ExprKind::Name(ident) => parsed.name(*ident).to_owned(),
+        ExprKind::Path(path) => path
+            .segments
+            .iter()
+            .map(|segment| parsed.name(*segment))
+            .collect::<Vec<&str>>()
+            .join(":"),
         ExprKind::SelfRef => "self".to_owned(),
         ExprKind::Parent => "parent".to_owned(),
         ExprKind::Unary { op, operand } => format!("({op:?} {})", render(parsed, *operand)),
@@ -267,6 +273,8 @@ fn parses_fallout4_additions() -> TestResult {
         Event Actor.OnDeath(Actor akSender, Var[] akArgs)\n\
         \tEntry e = new Entry\n\
         \tIf akSender is Actor\n\t\tVar v = e.Count\n\tEndIf\n\
+        \tInt count = GetCount() Const\n\
+        \tDLC04:DLC04_Manager.GetScript().Attach(akSender As Actor)\n\
         EndEvent\n";
 
     // when
@@ -290,6 +298,19 @@ fn parses_fallout4_additions() -> TestResult {
     let death: &Function = functions(&parsed)[0];
     assert!(death.receiver.is_some());
     assert!(matches!(death.params[1].ty.name, TypeName::Var));
+    let body = death.body.as_ref().ok_or("missing body")?;
+    let ast = parsed.ast();
+    assert!(matches!(
+        ast[body[2]].kind,
+        StmtKind::Define { is_const: true, .. }
+    ));
+    let StmtKind::Expr(call) = ast[body[3]].kind else {
+        return Err("expected a call statement".into());
+    };
+    assert_eq!(
+        render(&parsed, call),
+        "DLC04:DLC04_Manager.GetScript().Attach((as akSender))"
+    );
     Ok(())
 }
 

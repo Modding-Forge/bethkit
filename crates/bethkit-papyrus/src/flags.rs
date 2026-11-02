@@ -14,10 +14,13 @@
 //!     Property
 //! }
 //! Flag Conditional 1
+//! Flag Collapsed CollapsedOnRef & CollapsedOnBase
 //! ```
 //!
-//! A flag without a target list is allowed everywhere. More than one index
-//! may be given; the flag then sets every listed bit.
+//! A flag without a target list is allowed everywhere. A composite flag (the
+//! last form, introduced with Fallout 4) has no bit of its own: it sets the
+//! bits of its previously defined children and is allowed where all of them
+//! are allowed.
 
 use bitflags::bitflags;
 
@@ -65,6 +68,7 @@ impl FlagTargets {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlagDefinition {
     name: String,
+    index: Option<u8>,
     mask: u32,
     targets: FlagTargets,
     span: Span,
@@ -74,6 +78,16 @@ impl FlagDefinition {
     /// Returns the flag name as written in the file.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the bit index of a simple flag, or `None` for a composite flag.
+    pub fn index(&self) -> Option<u8> {
+        self.index
+    }
+
+    /// Returns `true` for a flag made up of other flags.
+    pub fn is_composite(&self) -> bool {
+        self.index.is_none()
     }
 
     /// Returns the bits the flag sets in a user flags mask.
@@ -174,7 +188,7 @@ fn words(source: &[u8]) -> Vec<Word<'_>> {
                 .position(|pair| pair == b"*/")
                 .map_or(rest.len(), |end| end + 4);
             pos += end;
-        } else if matches!(rest[0], b'{' | b'}') {
+        } else if matches!(rest[0], b'{' | b'}' | b'&') {
             words.push(Word {
                 text: &rest[..1],
                 span: Span::new(offset(pos), offset(pos + 1)),
@@ -186,7 +200,7 @@ fn words(source: &[u8]) -> Vec<Word<'_>> {
             let ends_word = |index: usize| {
                 let byte: u8 = rest[index];
                 byte.is_ascii_whitespace()
-                    || matches!(byte, b'{' | b'}' | b';')
+                    || matches!(byte, b'{' | b'}' | b'&' | b';')
                     || (byte == b'/' && matches!(rest.get(index + 1), Some(b'/' | b'*')))
             };
             let len: usize = (1..rest.len())
@@ -252,40 +266,44 @@ impl<'s> FlagParser<'s> {
         let name_text: String = String::from_utf8_lossy(name.text).into_owned();
         let name_span: Span = name.span;
 
-        let mut mask: u32 = 0;
-        let mut has_index: bool = false;
-        while let Some(text) = self.peek_text() {
-            if !text.iter().all(u8::is_ascii_digit) {
-                break;
-            }
-            let index: Option<u32> = std::str::from_utf8(text)
+        let is_index: bool = self
+            .peek_text()
+            .is_some_and(|text| text.iter().all(u8::is_ascii_digit));
+        let is_child: bool = self.peek_text().is_some_and(|text| {
+            !text.eq_ignore_ascii_case(b"Flag") && text != b"{" && text != b"}"
+        });
+        let (index, mask, mut targets): (Option<u8>, u32, FlagTargets) = if is_index {
+            let Some(word) = self.next() else { return };
+            let index: Option<u8> = std::str::from_utf8(word.text)
                 .ok()
-                .and_then(|digits| digits.parse::<u32>().ok())
+                .and_then(|digits| digits.parse::<u8>().ok())
                 .filter(|index| *index < 32);
-            let Some(word) = self.next() else { break };
-            let span: Span = word.span;
-            match index {
-                Some(index) => {
-                    mask |= 1 << index;
-                    has_index = true;
-                }
-                None => self.error(
+            let Some(index) = index else {
+                self.error(
                     DiagnosticCode::InvalidFlagIndex,
-                    span,
+                    word.span,
                     "flag index must be between 0 and 31".to_owned(),
-                ),
-            }
-        }
-        if !has_index {
+                );
+                self.skip_targets();
+                return;
+            };
+            (Some(index), 1 << index, FlagTargets::empty())
+        } else if is_child {
+            let Some((mask, targets)) = self.composite(&name_text) else {
+                return;
+            };
+            (None, mask, targets)
+        } else {
             self.error(
                 DiagnosticCode::InvalidFlagIndex,
                 name_span,
-                format!("flag '{name_text}' has no bit index"),
+                format!("flag '{name_text}' has neither a bit index nor child flags"),
             );
-        }
+            self.skip_targets();
+            return;
+        };
 
-        let mut targets: FlagTargets = FlagTargets::empty();
-        if self.peek_text() == Some(b"{") {
+        if index.is_some() && self.peek_text() == Some(b"{") {
             self.next();
             loop {
                 let Some(word) = self.next() else {
@@ -313,13 +331,10 @@ impl<'s> FlagParser<'s> {
                 }
             }
         }
-        if targets.is_empty() {
+        if index.is_some() && targets.is_empty() {
             targets = FlagTargets::all();
         }
 
-        if !has_index {
-            return;
-        }
         if self.file.get(&name_text).is_some() {
             self.error(
                 DiagnosticCode::DuplicateFlag,
@@ -335,10 +350,76 @@ impl<'s> FlagParser<'s> {
         let span: Span = start.to(last);
         self.file.flags.push(FlagDefinition {
             name: name_text,
+            index,
             mask,
             targets,
             span,
         });
+    }
+
+    /// Parses `Child (& Child)+` and returns the combined mask and the targets
+    /// shared by all children, or `None` after reporting an error.
+    fn composite(&mut self, name: &str) -> Option<(u32, FlagTargets)> {
+        let mut mask: u32 = 0;
+        let mut targets: FlagTargets = FlagTargets::all();
+        let mut children: usize = 0;
+        let mut valid: bool = true;
+        loop {
+            let Some(child) = self.next() else {
+                let span: Span = self.words.last().map_or(Span::default(), |word| word.span);
+                self.error(
+                    DiagnosticCode::UnknownFlag,
+                    span,
+                    format!("composite flag '{name}' ends without a flag after '&'"),
+                );
+                return None;
+            };
+            let child_name: String = String::from_utf8_lossy(child.text).into_owned();
+            match self.file.get(&child_name) {
+                Some(definition) => {
+                    mask |= definition.mask;
+                    targets &= definition.targets;
+                }
+                None => {
+                    self.error(
+                        DiagnosticCode::UnknownFlag,
+                        child.span,
+                        format!("flag '{name}' refers to undefined flag '{child_name}'"),
+                    );
+                    valid = false;
+                }
+            }
+            children += 1;
+            if self.peek_text() != Some(b"&") {
+                break;
+            }
+            self.next();
+        }
+        if children < 2 {
+            let span: Span = self
+                .words
+                .get(self.pos.saturating_sub(1))
+                .map_or(Span::default(), |word| word.span);
+            self.error(
+                DiagnosticCode::UnknownFlag,
+                span,
+                format!("composite flag '{name}' needs at least two flags joined with '&'"),
+            );
+            return None;
+        }
+        valid.then_some((mask, targets))
+    }
+
+    /// Skips a `{ ... }` target list after an invalid definition.
+    fn skip_targets(&mut self) {
+        if self.peek_text() != Some(b"{") {
+            return;
+        }
+        while let Some(word) = self.next() {
+            if word.text == b"}" {
+                break;
+            }
+        }
     }
 }
 
@@ -352,7 +433,8 @@ mod tests {
         // given
         let source: &[u8] = b"/*\n Format: Flag <name> <index> { ... } */\n// note\n\
             Flag Hidden 0\n{\n\tScript\n\tProperty\n}\nFlag Conditional 1 { Script Variable }\n\
-            Flag Collapsed 3 4 { Group }\nFlag Anywhere 7\n";
+            Flag OnRef 3 { Group Property }\nFlag OnBase 4 { Group }\n\
+            Flag Collapsed OnRef&OnBase\nFlag Anywhere 7\n";
 
         // when
         let file: FlagFile = FlagFile::parse(source)?;
@@ -365,15 +447,16 @@ mod tests {
             hidden.targets(),
             FlagTargets::SCRIPT | FlagTargets::PROPERTY
         );
-        assert_eq!(
-            file.get("Collapsed").map(FlagDefinition::mask),
-            Some(0b11000)
-        );
+        assert_eq!(hidden.index(), Some(0));
+        let collapsed: &FlagDefinition = file.get("Collapsed").ok_or("missing Collapsed")?;
+        assert!(collapsed.is_composite());
+        assert_eq!(collapsed.mask(), 0b11000);
+        assert_eq!(collapsed.targets(), FlagTargets::GROUP);
         assert_eq!(
             file.get("Anywhere").map(FlagDefinition::targets),
             Some(FlagTargets::all())
         );
-        assert_eq!(file.flags().len(), 4);
+        assert_eq!(file.flags().len(), 6);
         Ok(())
     }
 
@@ -381,8 +464,10 @@ mod tests {
     #[test]
     fn reports_invalid_entries() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // when
-        let file: FlagFile =
-            FlagFile::parse(b"Flag Big 32\nFlag A 1 { Nonsense }\nFlag a 2\nOops\nFlag B 3 {")?;
+        let file: FlagFile = FlagFile::parse(
+            b"Flag Big 32 { Script }\nFlag A 1 { Nonsense }\nFlag a 2\n\
+            Flag C A & Missing\nFlag D A\nOops\nFlag B 3 {",
+        )?;
 
         // then
         let codes: Vec<DiagnosticCode> = file.diagnostics().iter().map(Diagnostic::code).collect();
@@ -390,9 +475,10 @@ mod tests {
             codes,
             vec![
                 DiagnosticCode::InvalidFlagIndex,
-                DiagnosticCode::InvalidFlagIndex,
                 DiagnosticCode::UnknownFlagTarget,
                 DiagnosticCode::DuplicateFlag,
+                DiagnosticCode::UnknownFlag,
+                DiagnosticCode::UnknownFlag,
                 DiagnosticCode::UnexpectedToken,
                 DiagnosticCode::UnexpectedToken,
             ]

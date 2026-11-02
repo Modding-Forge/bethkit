@@ -10,7 +10,9 @@
 
 use super::Parser;
 use crate::diagnostics::{DiagnosticCode, Span};
-use crate::syntax::ast::{Argument, BinaryOp, ExprId, ExprKind, Ident, TypeRef, UnaryOp};
+use crate::syntax::ast::{
+    Argument, BinaryOp, ExprId, ExprKind, Ident, QualifiedName, TypeRef, UnaryOp,
+};
 use crate::syntax::token::{Keyword, Token, TokenKind};
 
 fn binary_operator(kind: TokenKind) -> Option<(BinaryOp, u8)> {
@@ -248,6 +250,14 @@ impl Parser<'_> {
                 return Some(inner);
             }
             TokenKind::Keyword(Keyword::New) => return self.new_expression(),
+            TokenKind::Ident
+                if self.peek_nth(1).kind == TokenKind::Colon
+                    && self.peek_nth(2).kind == TokenKind::Ident =>
+            {
+                let path: QualifiedName = self.qualified_name("a script name")?;
+                let span: Span = path.span;
+                return Some(self.ast.push_expr(ExprKind::Path(path), span));
+            }
             TokenKind::Ident => {
                 self.bump();
                 let name: Ident = self.make_ident(token);

@@ -471,6 +471,8 @@ pub enum StmtKind {
         name: Ident,
         /// The initial value.
         initial: Option<ExprId>,
+        /// Whether the local is declared `Const` (Fallout 4 and later).
+        is_const: bool,
     },
     /// `target op value`
     Assign {
@@ -585,6 +587,9 @@ pub enum ExprKind {
     String(Box<[u8]>),
     /// A variable, property or type name.
     Name(Ident),
+    /// A namespaced script name such as `DLC04:ManagerScript`, used as the
+    /// receiver of a global function call (Fallout 4 and later).
+    Path(QualifiedName),
     /// `Self`
     SelfRef,
     /// `Parent`
