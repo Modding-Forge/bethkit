@@ -5,6 +5,7 @@ members = [
     "crates/bethkit-schema",
     "crates/bethkit-semantic",
     "crates/bethkit-bsa",
+    "crates/bethkit-papyrus",
     "crates/bethkit-ffi",
 ]
 resolver = "2"
