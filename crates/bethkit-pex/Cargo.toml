@@ -1,0 +1,19 @@
+[package]
+name    = "bethkit-pex"
+version = "0.11.0"
+edition = "2021"
+
+[dependencies]
+bethkit-core = { path = "../bethkit-core" }
+bethkit-io   = { path = "../bethkit-io" }
+bitflags     = { workspace = true }
+thiserror    = { workspace = true }
+
+[dev-dependencies]
+bethkit-bsa = { path = "../bethkit-bsa" }
+criterion   = { workspace = true }
+rayon       = { workspace = true }
+
+[[bench]]
+name    = "parse"
+harness = false
