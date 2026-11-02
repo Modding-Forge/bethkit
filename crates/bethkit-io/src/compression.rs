@@ -14,7 +14,7 @@ use crate::error::{IoError, Result};
 /// Decompresses zlib-compressed data.
 ///
 /// This is the format used by compressed ESP/ESM records and BSA file entries.
-/// The input must be a raw zlib stream (with zlib header — **not** raw deflate
+/// The input must be a raw zlib stream (with zlib header - **not** raw deflate
 /// and **not** gzip).
 ///
 /// # Arguments

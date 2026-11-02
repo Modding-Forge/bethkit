@@ -3,9 +3,15 @@
 //! Zero-copy cursor over a byte slice.
 //!
 //! [`SliceCursor`] is the central I/O primitive passed through every parser in
-//! bethkit. All reads are little-endian and bounds-checked, returning
+//! bethkit. All reads are bounds-checked, returning
 //! [`crate::IoError::UnexpectedEof`] on overrun rather than panicking.
+//!
+//! The unsuffixed readers (`read_u16`, `read_u32`, ...) are little-endian, which
+//! matches almost every Bethesda format. The `*_as::<O>` readers take the byte
+//! order as a type parameter, so formats with a per-file byte order (such as
+//! Papyrus `.pex`) are parsed by monomorphised code without runtime branches.
 
+use crate::byte_order::{ByteOrder, LittleEndian};
 use crate::error::{IoError, Result};
 
 /// A position-tracking cursor over a borrowed byte slice.
@@ -67,8 +73,16 @@ impl<'a> SliceCursor<'a> {
     ///
     /// Returns [`IoError::UnexpectedEof`] if fewer than 2 bytes remain.
     pub fn read_u16(&mut self) -> Result<u16> {
-        let b: [u8; 2] = self.read_array()?;
-        Ok(u16::from_le_bytes(b))
+        self.read_u16_as::<LittleEndian>()
+    }
+
+    /// Reads a little-endian `i16`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IoError::UnexpectedEof`] if fewer than 2 bytes remain.
+    pub fn read_i16(&mut self) -> Result<i16> {
+        self.read_i16_as::<LittleEndian>()
     }
 
     /// Reads a little-endian `u32`.
@@ -77,8 +91,7 @@ impl<'a> SliceCursor<'a> {
     ///
     /// Returns [`IoError::UnexpectedEof`] if fewer than 4 bytes remain.
     pub fn read_u32(&mut self) -> Result<u32> {
-        let b: [u8; 4] = self.read_array()?;
-        Ok(u32::from_le_bytes(b))
+        self.read_u32_as::<LittleEndian>()
     }
 
     /// Reads a little-endian `i32`.
@@ -87,8 +100,7 @@ impl<'a> SliceCursor<'a> {
     ///
     /// Returns [`IoError::UnexpectedEof`] if fewer than 4 bytes remain.
     pub fn read_i32(&mut self) -> Result<i32> {
-        let b: [u8; 4] = self.read_array()?;
-        Ok(i32::from_le_bytes(b))
+        self.read_i32_as::<LittleEndian>()
     }
 
     /// Reads a little-endian `u64`.
@@ -97,18 +109,96 @@ impl<'a> SliceCursor<'a> {
     ///
     /// Returns [`IoError::UnexpectedEof`] if fewer than 8 bytes remain.
     pub fn read_u64(&mut self) -> Result<u64> {
-        let b: [u8; 8] = self.read_array()?;
-        Ok(u64::from_le_bytes(b))
+        self.read_u64_as::<LittleEndian>()
     }
 
-    /// Reads a little-endian `f32`.
+    /// Reads a little-endian `f32` through its raw bit pattern.
     ///
     /// # Errors
     ///
     /// Returns [`IoError::UnexpectedEof`] if fewer than 4 bytes remain.
     pub fn read_f32(&mut self) -> Result<f32> {
-        let b: [u8; 4] = self.read_array()?;
-        Ok(f32::from_le_bytes(b))
+        self.read_f32_as::<LittleEndian>()
+    }
+
+    /// Reads a `u16` in byte order `O`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IoError::UnexpectedEof`] if fewer than 2 bytes remain.
+    #[inline]
+    pub fn read_u16_as<O: ByteOrder>(&mut self) -> Result<u16> {
+        Ok(O::u16_from(self.read_array()?))
+    }
+
+    /// Reads an `i16` in byte order `O`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IoError::UnexpectedEof`] if fewer than 2 bytes remain.
+    #[inline]
+    pub fn read_i16_as<O: ByteOrder>(&mut self) -> Result<i16> {
+        Ok(i16::from_ne_bytes(
+            O::u16_from(self.read_array()?).to_ne_bytes(),
+        ))
+    }
+
+    /// Reads a `u32` in byte order `O`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IoError::UnexpectedEof`] if fewer than 4 bytes remain.
+    #[inline]
+    pub fn read_u32_as<O: ByteOrder>(&mut self) -> Result<u32> {
+        Ok(O::u32_from(self.read_array()?))
+    }
+
+    /// Reads an `i32` in byte order `O`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IoError::UnexpectedEof`] if fewer than 4 bytes remain.
+    #[inline]
+    pub fn read_i32_as<O: ByteOrder>(&mut self) -> Result<i32> {
+        Ok(i32::from_ne_bytes(
+            O::u32_from(self.read_array()?).to_ne_bytes(),
+        ))
+    }
+
+    /// Reads a `u64` in byte order `O`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IoError::UnexpectedEof`] if fewer than 8 bytes remain.
+    #[inline]
+    pub fn read_u64_as<O: ByteOrder>(&mut self) -> Result<u64> {
+        Ok(O::u64_from(self.read_array()?))
+    }
+
+    /// Reads an `f32` in byte order `O` through its raw bit pattern.
+    ///
+    /// The value is never touched arithmetically, so NaN payloads and signed
+    /// zeros survive a read/write round-trip unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IoError::UnexpectedEof`] if fewer than 4 bytes remain.
+    #[inline]
+    pub fn read_f32_as<O: ByteOrder>(&mut self) -> Result<f32> {
+        Ok(f32::from_bits(O::u32_from(self.read_array()?)))
+    }
+
+    /// Reads a `u16` length in byte order `O` followed by that many bytes and
+    /// returns the bytes as a zero-copy slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IoError::UnexpectedEof`] if the length prefix or the payload
+    /// is truncated.
+    #[inline]
+    pub fn read_u16_prefixed_as<O: ByteOrder>(&mut self) -> Result<&'a [u8]> {
+        let len: u16 = self.read_u16_as::<O>()?;
+        self.read_slice(usize::from(len))
     }
 
     /// Reads exactly `N` bytes into a stack-allocated array without heap
@@ -126,7 +216,6 @@ impl<'a> SliceCursor<'a> {
         if end > self.data.len() {
             return Err(IoError::UnexpectedEof { offset: self.pos });
         }
-        // SAFETY: we just verified that self.data[self.pos..end] is valid.
         let mut buf = [0u8; N];
         buf.copy_from_slice(&self.data[self.pos..end]);
         self.pos = end;
@@ -207,6 +296,7 @@ impl<'a> SliceCursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::byte_order::BigEndian;
 
     /// Verifies that reading primitive types advances the position correctly.
     #[test]
@@ -330,18 +420,73 @@ mod tests {
     #[test]
     fn read_slice_overflow_returns_offset_overflow(
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        // given: position at usize::MAX - 1 via a synthetic cursor.
-        // We fabricate this by constructing a cursor and manually setting its
-        // position through from_offset with a slice sized exactly to that offset.
+        // given: any non-zero position makes `pos + usize::MAX` wrap around.
         let data: Vec<u8> = vec![0u8; 2];
         let mut cursor = SliceCursor::from_offset(&data, 1)?;
-        // Advance to 1; now attempt a read of usize::MAX bytes (wraps on add).
 
         // when
         let result = cursor.read_slice(usize::MAX);
 
         // then
         assert!(matches!(result, Err(IoError::OffsetOverflow { .. })));
+        Ok(())
+    }
+
+    /// Verifies that the generic readers honour both byte orders.
+    #[test]
+    fn generic_readers_honour_byte_order() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let data: &[u8] = &[0xFA, 0x57, 0xC0, 0xDE, 0xFF, 0xFE];
+        let mut big = SliceCursor::new(data);
+        let mut little = SliceCursor::new(data);
+
+        // when
+        let big_magic: u32 = big.read_u32_as::<BigEndian>()?;
+        let big_short: i16 = big.read_i16_as::<BigEndian>()?;
+        let little_magic: u32 = little.read_u32()?;
+        let little_short: i16 = little.read_i16()?;
+
+        // then
+        assert_eq!(big_magic, 0xFA57_C0DE);
+        assert_eq!(big_short, -2);
+        assert_eq!(little_magic, 0xDEC0_57FA);
+        assert_eq!(little_short, -257);
+        Ok(())
+    }
+
+    /// Verifies that floats keep their exact bit pattern, including NaN payloads.
+    #[test]
+    fn f32_reads_are_bit_exact() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let bits: u32 = 0x7FA0_0001;
+        let data: [u8; 4] = bits.to_be_bytes();
+        let mut cursor = SliceCursor::new(&data);
+
+        // when
+        let value: f32 = cursor.read_f32_as::<BigEndian>()?;
+
+        // then
+        assert_eq!(value.to_bits(), bits);
+        Ok(())
+    }
+
+    /// Verifies length-prefixed reads in both byte orders and truncation errors.
+    #[test]
+    fn u16_prefixed_reads_borrow_payload() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // given
+        let data: &[u8] = &[0x00, 0x02, b'o', b'k', 0x05, 0x00, b'x'];
+        let mut cursor = SliceCursor::new(data);
+
+        // when
+        let payload: &[u8] = cursor.read_u16_prefixed_as::<BigEndian>()?;
+        let truncated = cursor.read_u16_prefixed_as::<LittleEndian>();
+
+        // then
+        assert_eq!(payload, b"ok");
+        assert!(matches!(
+            truncated,
+            Err(IoError::UnexpectedEof { offset: 6 })
+        ));
         Ok(())
     }
 }
