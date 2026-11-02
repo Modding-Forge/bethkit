@@ -1,0 +1,12 @@
+[package]
+name    = "bethkit-papyrus"
+version = "0.11.0"
+edition = "2021"
+
+[dependencies]
+ahash     = { workspace = true }
+bitflags  = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rayon = { workspace = true }
