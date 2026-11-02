@@ -39,6 +39,26 @@ use std::path::Path;
 
 use crate::error::Result;
 
+/// Returns the extension field of a BA2 file record.
+///
+/// BA2 records store the extension itself, not a hash: up to four lower-case
+/// bytes without the dot, padded with zeros (`b"dds\0"`, `b"bgsm"`).
+///
+/// # Arguments
+///
+/// * `ext` - The extension, with or without the leading dot.
+///
+/// # Returns
+///
+/// The four bytes to store in the record.
+pub(crate) fn ba2_extension(ext: &str) -> [u8; 4] {
+    let mut field = [0u8; 4];
+    for (slot, byte) in field.iter_mut().zip(ext.trim_start_matches('.').bytes()) {
+        *slot = byte.to_ascii_lowercase();
+    }
+    field
+}
+
 /// BSA format version selector for [`BsaWriter`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BsaVersion {
