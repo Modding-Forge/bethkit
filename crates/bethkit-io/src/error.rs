@@ -23,6 +23,15 @@ pub enum IoError {
     /// which indicates malformed or adversarial input.
     #[error("offset overflow at offset {offset} adding {len} bytes")]
     OffsetOverflow { offset: usize, len: usize },
+
+    /// A length does not fit into the size field of the target format.
+    #[error("length {len} exceeds the maximum of {max}")]
+    LengthOverflow { len: usize, max: usize },
+
+    /// A reserved slot does not lie inside the written data, which means it
+    /// was created by a different writer.
+    #[error("invalid reserved slot at offset {offset}")]
+    InvalidSlot { offset: usize },
 }
 
 /// Convenience alias for `Result<T, IoError>`.
